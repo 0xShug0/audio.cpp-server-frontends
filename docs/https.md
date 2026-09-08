@@ -25,20 +25,26 @@ The default server build does not include this TLS dependency.
 ```bash
 build/debug/bin/audiocpp_server \
   --config server.json \
-  --https-cert-file cert.pem \
-  --https-key-file key.pem
+  --frontend-listener https \
+  --frontend-option cert_file=cert.pem \
+  --frontend-option key_file=key.pem
 ```
 
 The same fields can be set in `server.json`:
 
 ```json
 {
-  "https_cert_file": "cert.pem",
-  "https_key_file": "key.pem"
+  "frontend_listener": "https",
+  "frontend_options": {
+    "cert_file": "cert.pem",
+    "key_file": "key.pem"
+  }
 }
 ```
 
-Relative config paths are resolved from the config file directory.
-
 When HTTPS is enabled at runtime, that listener port is HTTPS-only. Plain HTTP
 requests sent to the HTTPS port fail before reaching the server handler.
+
+`cert_file` and `key_file` are listener options and are used as provided by the
+HTTPS frontend. Relative paths are resolved from the server process working
+directory.

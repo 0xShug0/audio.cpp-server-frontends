@@ -131,56 +131,79 @@ void handle_request(
     send_response(handler.handle(to_http_request(request)), response);
 }
 
+std::string require_option(const ServerFrontendOptions & options, const std::string & key) {
+    const auto it = options.find(key);
+    if (it == options.end() || it->second.empty()) {
+        throw std::runtime_error("HTTPS frontend listener requires frontend option '" + key + "'");
+    }
+    return it->second;
+}
+
+class HttpsFrontendListener final : public ServerFrontendListener {
+public:
+    std::string_view name() const override {
+        return "https";
+    }
+
+    void serve(
+        const std::string & host,
+        int port,
+        IHttpHandler & handler,
+        ShutdownRequested shutdown_requested,
+        uint64_t max_request_body_bytes,
+        const ServerFrontendOptions & options) override {
+        const auto cert_file = require_option(options, "cert_file");
+        const auto key_file = require_option(options, "key_file");
+        httplib::SSLServer server(cert_file.c_str(), key_file.c_str());
+        if (!server.is_valid()) {
+            throw std::runtime_error("could not initialize HTTPS frontend server from certificate/key files");
+        }
+        server.set_payload_max_length(static_cast<size_t>(max_request_body_bytes));
+        server.set_idle_interval(std::chrono::milliseconds(250));
+
+        const auto route = [&handler, max_request_body_bytes](const httplib::Request & request, httplib::Response & response) {
+            try {
+                handle_request(request, response, handler, max_request_body_bytes);
+            } catch (const std::exception & ex) {
+                send_response(error_response(500, ex.what(), "server_error"), response);
+            }
+        };
+        server.Get(R"(.*)", route);
+        server.Post(R"(.*)", route);
+        server.Put(R"(.*)", route);
+        server.Patch(R"(.*)", route);
+        server.Delete(R"(.*)", route);
+        server.Options(R"(.*)", route);
+
+        if (!server.bind_to_port(host, port)) {
+            throw std::runtime_error("could not bind HTTPS frontend server on " + host + ":" + std::to_string(port));
+        }
+
+        std::thread server_thread([&server] {
+            if (!server.listen_after_bind()) {
+                std::cerr << "audiocpp_server HTTPS frontend listener stopped before accepting requests\n";
+            }
+        });
+        std::cout << "audiocpp_server HTTPS frontend listening on https://" << host << ":" << port << "\n";
+        while (!shutdown_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        server.stop();
+        if (server_thread.joinable()) {
+            server_thread.join();
+        }
+        std::cout << "audiocpp_server stopped\n";
+    }
+};
+
+std::unique_ptr<ServerFrontendListener> make_https_listener() {
+    return std::make_unique<HttpsFrontendListener>();
+}
+
 } // namespace
 
-void serve_frontend_https(
-    const std::string & host,
-    int port,
-    IHttpHandler & handler,
-    ShutdownRequested shutdown_requested,
-    uint64_t max_request_body_bytes,
-    const ServerFrontendHttpsConfig & config) {
-    httplib::SSLServer server(
-        config.cert_file.string().c_str(),
-        config.key_file.string().c_str());
-    if (!server.is_valid()) {
-        throw std::runtime_error("could not initialize HTTPS frontend server from certificate/key files");
-    }
-    server.set_payload_max_length(static_cast<size_t>(max_request_body_bytes));
-    server.set_idle_interval(std::chrono::milliseconds(250));
-
-    const auto route = [&handler, max_request_body_bytes](const httplib::Request & request, httplib::Response & response) {
-        try {
-            handle_request(request, response, handler, max_request_body_bytes);
-        } catch (const std::exception & ex) {
-            send_response(error_response(500, ex.what(), "server_error"), response);
-        }
-    };
-    server.Get(R"(.*)", route);
-    server.Post(R"(.*)", route);
-    server.Put(R"(.*)", route);
-    server.Patch(R"(.*)", route);
-    server.Delete(R"(.*)", route);
-    server.Options(R"(.*)", route);
-
-    if (!server.bind_to_port(host, port)) {
-        throw std::runtime_error("could not bind HTTPS frontend server on " + host + ":" + std::to_string(port));
-    }
-
-    std::thread server_thread([&server] {
-        if (!server.listen_after_bind()) {
-            std::cerr << "audiocpp_server HTTPS frontend listener stopped before accepting requests\n";
-        }
-    });
-    std::cout << "audiocpp_server HTTPS frontend listening on https://" << host << ":" << port << "\n";
-    while (!shutdown_requested()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
-    server.stop();
-    if (server_thread.joinable()) {
-        server_thread.join();
-    }
-    std::cout << "audiocpp_server stopped\n";
+void register_https_listener(ServerFrontendRegistry & registry) {
+    registry.add_listener("https", make_https_listener);
 }
 
 } // namespace minitts::server

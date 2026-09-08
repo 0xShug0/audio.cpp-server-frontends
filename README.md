@@ -22,8 +22,8 @@ cmake -S . -B build/debug \
 ```
 
 `AUDIOCPP_SERVER_FRONTENDS_DIR` points at this package. It may be a sibling
-checkout, an optional git submodule such as `external/server-frontends`, or any
-other local path. `AUDIOCPP_SERVER_FRONTEND_MODULES` is a semicolon-separated
+checkout, an optional git submodule such as `external/audio.cpp-server-frontends`,
+or any other local path. `AUDIOCPP_SERVER_FRONTEND_MODULES` is a semicolon-separated
 ordered list. Only the selected sources and their private dependencies are
 compiled and linked into `audiocpp_server`.
 
@@ -34,6 +34,7 @@ compiled and linked into `audiocpp_server`.
 | `audio_decode` | pre-processing module | Accept MP3/FLAC ASR input and rewrite it to core WAV input | [audio_decode.md](docs/audio_decode.md) |
 | `mp3_encode` | pre/post-processing module | Honor TTS `response_format=mp3` by encoding core WAV output to MP3 | [mp3_encode.md](docs/mp3_encode.md) |
 | `https` | listener capability | Serve the same in-process server over HTTPS | [https.md](docs/https.md) |
+| `websocket` | listener capability | Serve HTTP plus a WebSocket bridge to the same in-process handler | [websocket.md](docs/websocket.md) |
 
 For adding a new module, see [adding_modules.md](docs/adding_modules.md).
 
@@ -57,9 +58,10 @@ A post-processing module mutates `ServerFrontendResponse::response` after the
 core handler returns. It also receives both the original client request and the
 request that actually reached core.
 
-`https` is not part of this pre/post pipeline. It is a frontend-owned listener
-capability that terminates TLS and forwards the request envelope to the same
-core handler.
+Listener capabilities such as `https` and `websocket` are not part of this
+pre/post pipeline. They are frontend-owned transports selected by name through
+audio.cpp's generic `frontend_listener` connector, then forward requests to the
+same core handler.
 
 ## Contracts
 
@@ -88,3 +90,12 @@ for modules that deliberately accept or preserve any state.
 
 Current shared states are declared by the main audio.cpp repo in
 `app/server/frontend.h`.
+
+Listener modules register a factory with:
+
+```cpp
+registry.add_listener("websocket", make_websocket_listener);
+```
+
+The listener receives the host, port, core handler, shutdown callback, request
+body limit, and string options map from the main server.

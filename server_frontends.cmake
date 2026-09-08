@@ -53,12 +53,23 @@ endif()
 audiocpp_external_frontend_requested(https AUDIOCPP_EXTERNAL_FRONTEND_HTTPS)
 if (AUDIOCPP_EXTERNAL_FRONTEND_HTTPS)
     audiocpp_register_server_frontend(https
+        REGISTER_FUNCTION register_https_listener
         SOURCES
             "${AUDIOCPP_EXTERNAL_SERVER_FRONTENDS_SOURCE_DIR}/modules/https.cpp"
         INCLUDE_DIRS
             "${AUDIOCPP_EXTERNAL_SERVER_FRONTENDS_SOURCE_DIR}/modules"
         LIBRARIES
-            audiocpp_cpp_httplib
-        COMPILE_DEFINITIONS
-            AUDIOCPP_SERVER_FRONTEND_HAS_HTTPS=1)
+            audiocpp_cpp_httplib)
+endif()
+
+audiocpp_external_frontend_requested(websocket AUDIOCPP_EXTERNAL_FRONTEND_WEBSOCKET)
+if (AUDIOCPP_EXTERNAL_FRONTEND_WEBSOCKET)
+    audiocpp_register_server_frontend(websocket
+        REGISTER_FUNCTION register_websocket_listener
+        SOURCES
+            "${AUDIOCPP_EXTERNAL_SERVER_FRONTENDS_SOURCE_DIR}/modules/websocket.cpp"
+        INCLUDE_DIRS
+            "${AUDIOCPP_EXTERNAL_SERVER_FRONTENDS_SOURCE_DIR}/modules"
+        LIBRARIES
+            audiocpp_cpp_httplib)
 endif()
