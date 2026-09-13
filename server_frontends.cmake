@@ -10,6 +10,15 @@ function(audiocpp_external_frontend_requested AUDIOCPP_EXTERNAL_FRONTEND_NAME AU
     set(${AUDIOCPP_EXTERNAL_FRONTEND_OUT} ${AUDIOCPP_EXTERNAL_FRONTEND_FOUND} PARENT_SCOPE)
 endfunction()
 
+function(audiocpp_external_frontend_require_cpp_httplib)
+    if (TARGET audiocpp_cpp_httplib)
+        return()
+    endif()
+    add_subdirectory(
+        "${PROJECT_SOURCE_DIR}/external/cpp-httplib"
+        "${CMAKE_CURRENT_BINARY_DIR}/audio.cpp-server-frontends/cpp-httplib")
+endfunction()
+
 audiocpp_external_frontend_requested(audio_decode AUDIOCPP_EXTERNAL_FRONTEND_AUDIO_DECODE)
 if (AUDIOCPP_EXTERNAL_FRONTEND_AUDIO_DECODE)
     audiocpp_register_server_frontend(audio_decode
@@ -52,6 +61,7 @@ endif()
 
 audiocpp_external_frontend_requested(https AUDIOCPP_EXTERNAL_FRONTEND_HTTPS)
 if (AUDIOCPP_EXTERNAL_FRONTEND_HTTPS)
+    audiocpp_external_frontend_require_cpp_httplib()
     audiocpp_register_server_frontend(https
         REGISTER_FUNCTION register_https_listener
         SOURCES
@@ -64,6 +74,7 @@ endif()
 
 audiocpp_external_frontend_requested(websocket AUDIOCPP_EXTERNAL_FRONTEND_WEBSOCKET)
 if (AUDIOCPP_EXTERNAL_FRONTEND_WEBSOCKET)
+    audiocpp_external_frontend_require_cpp_httplib()
     audiocpp_register_server_frontend(websocket
         REGISTER_FUNCTION register_websocket_listener
         SOURCES
