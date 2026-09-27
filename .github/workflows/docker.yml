@@ -1,0 +1,242 @@
+name: Docker (all frontends)
+
+on:
+  schedule:
+    # audio.cpp's Docker workflow runs at 03:21 UTC.
+    - cron: '21 15 * * *'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      audio_cpp_ref:
+        description: audio.cpp tag or commit to build
+        type: string
+        default: 90c56c2e20923886204991a5ffb1d5a10b6b8954
+      publish:
+        description: Publish the multi-architecture image to GHCR
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: docker-frontends-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AUDIOCPP_REF: 90c56c2e20923886204991a5ffb1d5a10b6b8954
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      audio_cpp_sha: ${{ steps.meta.outputs.audio_cpp_sha }}
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+      publish: ${{ steps.meta.outputs.publish }}
+      build: ${{ github.event_name != 'schedule' || (steps.upstream_idle.outputs.busy != 'true' && steps.published.outputs.cache-hit != 'true') }}
+      publication_key: ${{ steps.meta.outputs.publication_key }}
+    steps:
+      - name: Avoid overlapping audio.cpp Docker builds
+        id: upstream_idle
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          busy=false
+          for status in queued in_progress waiting pending requested; do
+            count=$(gh api "repos/0xShug0/audio.cpp/actions/workflows/docker.yml/runs?status=$status&per_page=1" --jq .total_count)
+            if (( count > 0 )); then
+              busy=true
+              break
+            fi
+          done
+          echo "busy=$busy" >> "$GITHUB_OUTPUT"
+          if [[ "$busy" == true ]]; then
+            echo 'Skipping today: audio.cpp Docker build is active.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Find latest stable audio.cpp release
+        id: upstream
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api repos/0xShug0/audio.cpp/releases/latest --jq .tag_name)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: ${{ steps.upstream.outputs.ref || inputs.audio_cpp_ref || env.AUDIOCPP_REF }}
+          persist-credentials: false
+      - id: meta
+        name: Resolve source and image versions
+        env:
+          REPOSITORY: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PUBLISH: ${{ inputs.publish }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.ref }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "audio_cpp_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "publication_key=docker-published-cuda12-cuda13-$sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT" == schedule ]]; then
+            tag="audio-${UPSTREAM_TAG}-${sha:0:12}-${GITHUB_SHA:0:12}"
+            publish=true
+          elif [[ "$EVENT" == release ]]; then
+            tag="${RELEASE_TAG}"
+            publish=true
+          else
+            tag="build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            publish="$PUBLISH"
+          fi
+          [[ "${tag}-cuda13" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+      - name: Check successful scheduled publication
+        id: published
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: .docker-published
+          key: ${{ steps.meta.outputs.publication_key }}
+          lookup-only: true
+
+  build:
+    needs: metadata
+    if: needs.metadata.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: [cuda12, cuda13]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          # Match audio.cpp's CUDA 12 Docker release configuration.
+          - cuda: cuda12
+            gcc: '14'
+            devel_image: nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5
+            runtime_image: nvidia/cuda:12.9.2-runtime-ubuntu24.04@sha256:6d2a0dabc50c3bf14d27fc66822b6b1f94a325807ace17bd1997762307790587
+          - cuda: cuda13
+            gcc: '13'
+            devel_image: nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
+            runtime_image: nvidia/cuda:13.0.2-runtime-ubuntu24.04@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
+    steps:
+      - name: Checkout frontend modules
+        uses: actions/checkout@v5
+        with:
+          path: frontends
+          persist-credentials: false
+      - name: Checkout pinned audio.cpp
+        uses: actions/checkout@v5
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: ${{ needs.metadata.outputs.audio_cpp_sha }}
+          path: audio.cpp
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        if: needs.metadata.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build all frontends
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frontends/docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          outputs: ${{ needs.metadata.outputs.publish == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', needs.metadata.outputs.image) || 'type=docker' }}
+          build-args: |
+            BASE_CUDA_DEV_CONTAINER=${{ matrix.devel_image }}
+            BASE_CUDA_RUN_CONTAINER=${{ matrix.runtime_image }}
+            GCC_VERSION=${{ matrix.gcc }}
+            AUDIOCPP_REVISION=${{ needs.metadata.outputs.audio_cpp_sha }}
+            FRONTENDS_REVISION=${{ github.sha }}
+            IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=frontends-${{ matrix.cuda }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=frontends-${{ matrix.cuda }}-${{ matrix.arch }}
+      - name: Record image digest
+        if: needs.metadata.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+          CUDA: ${{ matrix.cuda }}
+        run: |
+          mkdir -p digests
+          printf '%s\n' "$DIGEST" > "digests/$CUDA-$ARCH.txt"
+      - uses: actions/upload-artifact@v4
+        if: needs.metadata.outputs.publish == 'true'
+        with:
+          name: digest-${{ matrix.cuda }}-${{ matrix.arch }}
+          path: digests/*.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [metadata, build]
+    if: needs.metadata.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - name: Publish multi-architecture manifest
+        env:
+          IMAGE: ${{ needs.metadata.outputs.image }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          STABLE_RELEASE: ${{ github.event_name == 'schedule' || (github.event_name == 'release' && !github.event.release.prerelease) }}
+          AUDIOCPP_REVISION: ${{ needs.metadata.outputs.audio_cpp_sha }}
+        run: |
+          set -euo pipefail
+          for cuda in cuda12 cuda13; do
+            sources=()
+            for arch in amd64 arm64; do
+              digest=$(cat "digests/$cuda-$arch.txt")
+              [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+              sources+=("$IMAGE@$digest")
+            done
+            tags=(-t "$IMAGE:$TAG-$cuda")
+            if [[ "$STABLE_RELEASE" == true ]]; then
+              tags+=(-t "$IMAGE:$cuda")
+            fi
+            docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+            docker buildx imagetools inspect "$IMAGE:$TAG-$cuda"
+            printf 'Image: `%s:%s-%s`\n\naudio.cpp: `%s`\n\nFrontends: `%s`\n' \
+              "$IMAGE" "$TAG" "$cuda" "$AUDIOCPP_REVISION" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Record successful scheduled publication
+        if: github.event_name == 'schedule'
+        run: touch .docker-published
+      - uses: actions/cache/save@v4
+        if: github.event_name == 'schedule'
+        with:
+          path: .docker-published
+          key: ${{ needs.metadata.outputs.publication_key }}

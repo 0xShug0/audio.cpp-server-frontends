@@ -27,6 +27,50 @@ or any other local path. `AUDIOCPP_SERVER_FRONTEND_MODULES` is a semicolon-separ
 ordered list. Only the selected sources and their private dependencies are
 compiled and linked into `audiocpp_server`.
 
+## Docker images
+
+The **Docker (all frontends)** workflow builds CUDA 12.9.2 and CUDA 13.0.2 images
+for Linux amd64 and arm64. Use CUDA 13 for DGX Spark. All four modules below are compiled in. Images
+use a Debug build and include all model families; no model weights are included.
+Plain HTTP remains the default; HTTPS and WebSocket listeners require explicit
+runtime selection.
+
+Daily at 15:21 UTC, the workflow checks for the latest stable audio.cpp release
+and automatically builds and publishes it with the frontend default branch,
+updating `:cuda12` and `:cuda13`. This tracks releases, not every audio.cpp commit. The workflow
+caches successful publications by both source revisions and skips unchanged
+pairs; failed builds are retried on the next check. Cache eviction can cause a
+rebuild. This is twelve hours after audio.cpp's 03:21 UTC Docker schedule;
+the daily build is skipped if an audio.cpp Docker run is still active.
+Scheduled runs require this workflow on the default branch.
+
+Run the workflow manually to test a pinned audio.cpp tag or commit. Publishing
+is off by default for manual runs. Publishing a frontend GitHub release builds
+the audio.cpp revision pinned in the workflow and publishes to
+`ghcr.io/0xshug0/audio.cpp-server-frontends:<release-tag>-cuda12` and
+`:<release-tag>-cuda13`. Stable releases also update `:cuda12` and `:cuda13`;
+manual published builds use a unique run-based tag for each CUDA version.
+The image labels and workflow summary record both source revisions.
+
+Once an image has been published:
+
+```bash
+docker run --rm --gpus all -p 8080:8080 \
+  -v /path/to/models:/app/models \
+  ghcr.io/0xshug0/audio.cpp-server-frontends:cuda13
+```
+
+Use `:cuda12` instead for the CUDA 12 image.
+
+The default command opens the full WebUI. To use a server configuration, mount
+it and pass `--config /path/in/container/server.json --host 0.0.0.0 --port 8080
+--log` after the image name. The mounted model directory must be writable by
+the container's `ubuntu` user when downloading through the UI.
+
+The build runners do not have GPUs. Publishing checks build/link dependencies,
+not CUDA inference; MP3 and GPU end-to-end testing still requires a running
+server and model weights.
+
 ## Supported Frontends
 
 | Name | Type | Purpose | Docs |
