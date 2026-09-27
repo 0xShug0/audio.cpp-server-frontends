@@ -131,7 +131,7 @@ jobs:
             devel_image: nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5
             runtime_image: nvidia/cuda:12.9.2-runtime-ubuntu24.04@sha256:6d2a0dabc50c3bf14d27fc66822b6b1f94a325807ace17bd1997762307790587
           - cuda: cuda13
-            gcc: '13'
+            gcc: '14'
             devel_image: nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
             runtime_image: nvidia/cuda:13.0.2-runtime-ubuntu24.04@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
     steps:

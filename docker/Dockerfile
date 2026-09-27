@@ -4,7 +4,7 @@ ARG BASE_CUDA_DEV_CONTAINER=nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca2
 ARG BASE_CUDA_RUN_CONTAINER=nvidia/cuda:13.0.2-runtime-ubuntu24.04@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
 FROM ${BASE_CUDA_DEV_CONTAINER} AS build
 
-ARG GCC_VERSION=13
+ARG GCC_VERSION=14
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ninja-build git ca-certificates libmp3lame-dev \
