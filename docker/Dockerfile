@@ -37,9 +37,9 @@ RUN cmake -S . -B build/debug -G Ninja \
     -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
     && cmake --build build/debug --parallel 2 --target audiocpp_server audiocpp_cli
 
-RUN mkdir -p /out/lib && \
+RUN mkdir -p /out && \
     cp build/debug/bin/audiocpp_server build/debug/bin/audiocpp_cli /out/ && \
-    find build/debug -name '*.so*' -exec cp -P {} /out/lib/ \;
+    find build/debug -name '*.so*' -exec cp -P {} /out/ \;
 
 FROM ${BASE_CUDA_RUN_CONTAINER}
 
@@ -52,14 +52,14 @@ LABEL org.opencontainers.image.source=$IMAGE_SOURCE \
       io.audiocpp.core.revision=$AUDIOCPP_REVISION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libmp3lame0 ca-certificates ffmpeg \
+    libgomp1 libmp3lame0 libespeak-ng1 ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ /app/
 COPY audio.cpp/model_specs/ /app/model_specs/
 COPY audio.cpp/assets/ /app/assets/
 COPY audio.cpp/LICENSE /usr/share/doc/audio.cpp/LICENSE
 COPY frontends/LICENSE /usr/share/doc/audio.cpp-server-frontends/LICENSE
-ENV LD_LIBRARY_PATH=/app/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV LD_LIBRARY_PATH=/app:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 WORKDIR /app
 
 # NVIDIA's driver library is supplied by the host at container launch.

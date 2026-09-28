@@ -44,6 +44,21 @@ HttpRequest to_http_request(const httplib::Request & request) {
     for (const auto & header : request.headers) {
         out.headers[lower_ascii(header.first)] = header.second;
     }
+    if (request.is_multipart_form_data()) {
+        // httplib stores parsed multipart data separately from request.body.
+        httplib::UploadFormDataItems parts;
+        for (const auto & [name, field] : request.form.fields) {
+            parts.push_back({name, field.content, "", ""});
+        }
+        for (const auto & [name, file] : request.form.files) {
+            parts.push_back({name, file.content, file.filename, file.content_type});
+        }
+        const httplib::MultipartFormDataWriter writer;
+        out.body = writer.serialize(parts);
+        out.headers["content-type"] = writer.content_type();
+        out.headers["content-length"] = std::to_string(out.body.size());
+        out.headers.erase("transfer-encoding");
+    }
     return out;
 }
 
@@ -128,7 +143,14 @@ void handle_request(
             response);
         return;
     }
-    send_response(handler.handle(to_http_request(request)), response);
+    auto forwarded = to_http_request(request);
+    if (forwarded.body.size() > max_request_body_bytes) {
+        send_response(
+            error_response(413, "request body exceeds max_request_body_bytes", "request_too_large"),
+            response);
+        return;
+    }
+    send_response(handler.handle(forwarded), response);
 }
 
 std::string require_option(const ServerFrontendOptions & options, const std::string & key) {
