@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1
+# Context contains sibling audio.cpp/ and frontends/ checkouts.
+# CPU/Vulkan dependencies follow audio.cpp's .devops Dockerfiles.
+ARG UBUNTU_VERSION=24.04
+FROM ubuntu:${UBUNTU_VERSION} AS build
+
+ARG BACKEND
+ARG GCC_VERSION=14
+ARG BUILD_JOBS=2
+
+RUN case "$BACKEND" in \
+        cpu) vulkan_packages='' ;; \
+        vulkan) vulkan_packages='glslc libvulkan-dev spirv-headers libxcb-xinput0 libxcb-xinerama0 libxcb-cursor-dev' ;; \
+        *) echo "Unsupported backend: $BACKEND" >&2; exit 1 ;; \
+    esac && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ninja-build git ca-certificates libmp3lame-dev \
+        $vulkan_packages && \
+    rm -rf /var/lib/apt/lists/*
+ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION}
+
+COPY audio.cpp/ /src/audio.cpp/
+COPY frontends/modules/ /src/frontends/modules/
+COPY frontends/external/ /src/frontends/external/
+COPY frontends/server_frontends.cmake /src/frontends/server_frontends.cmake
+WORKDIR /src/audio.cpp
+
+RUN vulkan=OFF && if [ "$BACKEND" = vulkan ]; then vulkan=ON; fi && \
+    cmake -S . -B build/debug -G Ninja \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+        -DAUDIOCPP_MODEL_SET=full \
+        -DENGINE_ENABLE_NATIVE_CPU=OFF \
+        -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
+        -DENGINE_ENABLE_OPENMP=ON \
+        -DENGINE_ENABLE_CUDA=OFF \
+        -DENGINE_ENABLE_VULKAN=$vulkan \
+        -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON \
+        -DAUDIOCPP_BUILD_SERVER_FRONTENDS=ON \
+        -DAUDIOCPP_SERVER_FRONTENDS_DIR=/src/frontends \
+        '-DAUDIOCPP_SERVER_FRONTEND_MODULES=audio_decode;mp3_encode;https;websocket' \
+        -DENGINE_BUILD_EXAMPLES=OFF \
+        -DENGINE_BUILD_TESTS=OFF \
+        -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+        -DENGINE_BUILD_MODEL_TESTS=OFF \
+        -DENGINE_BUILD_WARMBENCH=OFF && \
+    cmake --build build/debug --parallel ${BUILD_JOBS} --target audiocpp_server audiocpp_cli
+
+RUN mkdir -p /out && \
+    cp build/debug/bin/audiocpp_server build/debug/bin/audiocpp_cli /out/ && \
+    find build/debug -name '*.so*' -exec cp -P {} /out/ \;
+
+FROM ubuntu:${UBUNTU_VERSION} AS runtime
+
+ARG BACKEND
+ARG AUDIOCPP_REVISION
+ARG FRONTENDS_REVISION
+ARG IMAGE_SOURCE
+LABEL org.opencontainers.image.source=$IMAGE_SOURCE \
+      org.opencontainers.image.revision=$FRONTENDS_REVISION \
+      org.opencontainers.image.title="audio.cpp with all server frontends" \
+      io.audiocpp.core.revision=$AUDIOCPP_REVISION
+
+RUN case "$BACKEND" in \
+        cpu) vulkan_packages='' ;; \
+        vulkan) vulkan_packages='libvulkan1 mesa-vulkan-drivers libglvnd0 libgl1 libglx0 libegl1 libgles2' ;; \
+        *) echo "Unsupported backend: $BACKEND" >&2; exit 1 ;; \
+    esac && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 libmp3lame0 libespeak-ng1 ca-certificates ffmpeg $vulkan_packages && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/ /app/
+COPY audio.cpp/model_specs/ /app/model_specs/
+COPY audio.cpp/assets/ /app/assets/
+COPY audio.cpp/LICENSE /usr/share/doc/audio.cpp/LICENSE
+COPY frontends/LICENSE /usr/share/doc/audio.cpp-server-frontends/LICENSE
+ENV LD_LIBRARY_PATH=/app
+WORKDIR /app
+
+RUN ldd /app/audiocpp_server > /app/runtime-dependencies.txt && \
+    cat /app/runtime-dependencies.txt && \
+    ! grep 'not found' /app/runtime-dependencies.txt
+
+RUN mkdir -p /app/models && chown ubuntu:ubuntu /app/models
+USER ubuntu
+EXPOSE 8080
+ENTRYPOINT ["/app/audiocpp_server"]
+
+FROM runtime AS cpu
+CMD ["--ui", "--ui-management", "--host", "0.0.0.0", "--port", "8080", "--backend", "cpu", "--log"]
+
+FROM runtime AS vulkan
+CMD ["--ui", "--ui-management", "--host", "0.0.0.0", "--port", "8080", "--backend", "vulkan", "--log"]

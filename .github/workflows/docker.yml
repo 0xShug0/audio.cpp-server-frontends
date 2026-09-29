@@ -84,7 +84,7 @@ jobs:
           set -euo pipefail
           sha=$(git rev-parse HEAD)
           echo "audio_cpp_sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "publication_key=docker-published-cuda12-cuda13-$sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "publication_key=docker-published-cpu-vulkan-cuda12-cuda13-$sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
           if [[ "$EVENT" == schedule ]]; then
             tag="audio-${UPSTREAM_TAG}-${sha:0:12}-${GITHUB_SHA:0:12}"
@@ -118,19 +118,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cuda: [cuda12, cuda13]
+        backend: [cpu, vulkan, cuda12, cuda13]
         arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
+          - backend: cpu
+            gcc: '14'
+            dockerfile: Dockerfile.portable
+            target: cpu
+          - backend: vulkan
+            gcc: '14'
+            dockerfile: Dockerfile.portable
+            target: vulkan
           # Match audio.cpp's CUDA 12 Docker release configuration.
-          - cuda: cuda12
+          - backend: cuda12
+            dockerfile: Dockerfile
             gcc: '14'
             devel_image: nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5
             runtime_image: nvidia/cuda:12.9.2-runtime-ubuntu24.04@sha256:6d2a0dabc50c3bf14d27fc66822b6b1f94a325807ace17bd1997762307790587
-          - cuda: cuda13
+          - backend: cuda13
+            dockerfile: Dockerfile
             gcc: '14'
             devel_image: nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
             runtime_image: nvidia/cuda:13.0.2-runtime-ubuntu24.04@sha256:6a0e31b59e70890446f2c17356d6efc0d54260090a8c63d6ca7c2ad049db95d2
@@ -159,7 +169,8 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: frontends/docker/Dockerfile
+          file: frontends/docker/${{ matrix.dockerfile }}
+          target: ${{ matrix.target || '' }}
           platforms: linux/${{ matrix.arch }}
           provenance: false
           outputs: ${{ needs.metadata.outputs.publish == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', needs.metadata.outputs.image) || 'type=docker' }}
@@ -170,21 +181,22 @@ jobs:
             AUDIOCPP_REVISION=${{ needs.metadata.outputs.audio_cpp_sha }}
             FRONTENDS_REVISION=${{ github.sha }}
             IMAGE_SOURCE=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=frontends-${{ matrix.cuda }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=frontends-${{ matrix.cuda }}-${{ matrix.arch }}
+            BACKEND=${{ matrix.backend }}
+          cache-from: type=gha,scope=frontends-${{ matrix.backend }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=frontends-${{ matrix.backend }}-${{ matrix.arch }}
       - name: Record image digest
         if: needs.metadata.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
           ARCH: ${{ matrix.arch }}
-          CUDA: ${{ matrix.cuda }}
+          BACKEND: ${{ matrix.backend }}
         run: |
           mkdir -p digests
-          printf '%s\n' "$DIGEST" > "digests/$CUDA-$ARCH.txt"
+          printf '%s\n' "$DIGEST" > "digests/$BACKEND-$ARCH.txt"
       - uses: actions/upload-artifact@v4
         if: needs.metadata.outputs.publish == 'true'
         with:
-          name: digest-${{ matrix.cuda }}-${{ matrix.arch }}
+          name: digest-${{ matrix.backend }}-${{ matrix.arch }}
           path: digests/*.txt
           retention-days: 1
           if-no-files-found: error
@@ -216,21 +228,21 @@ jobs:
           AUDIOCPP_REVISION: ${{ needs.metadata.outputs.audio_cpp_sha }}
         run: |
           set -euo pipefail
-          for cuda in cuda12 cuda13; do
+          for backend in cpu vulkan cuda12 cuda13; do
             sources=()
             for arch in amd64 arm64; do
-              digest=$(cat "digests/$cuda-$arch.txt")
+              digest=$(cat "digests/$backend-$arch.txt")
               [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
               sources+=("$IMAGE@$digest")
             done
-            tags=(-t "$IMAGE:$TAG-$cuda")
+            tags=(-t "$IMAGE:$TAG-$backend")
             if [[ "$STABLE_RELEASE" == true ]]; then
-              tags+=(-t "$IMAGE:$cuda")
+              tags+=(-t "$IMAGE:$backend")
             fi
             docker buildx imagetools create "${tags[@]}" "${sources[@]}"
-            docker buildx imagetools inspect "$IMAGE:$TAG-$cuda"
+            docker buildx imagetools inspect "$IMAGE:$TAG-$backend"
             printf 'Image: `%s:%s-%s`\n\naudio.cpp: `%s`\n\nFrontends: `%s`\n' \
-              "$IMAGE" "$TAG" "$cuda" "$AUDIOCPP_REVISION" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+              "$IMAGE" "$TAG" "$backend" "$AUDIOCPP_REVISION" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
           done
       - name: Record successful scheduled publication
         if: github.event_name == 'schedule'

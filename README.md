@@ -29,7 +29,7 @@ compiled and linked into `audiocpp_server`.
 
 ## Docker images
 
-The **Docker (all frontends)** workflow builds CUDA 12.9.2 and CUDA 13.0.2 images
+The **Docker (all frontends)** workflow builds CPU, Vulkan, CUDA 12.9.2, and CUDA 13.0.2 images
 for Linux amd64 and arm64. Use CUDA 13 for DGX Spark. All four modules below are compiled in. Images
 use a Debug build and include all model families; no model weights are included.
 Plain HTTP remains the default; HTTPS and WebSocket listeners require explicit
@@ -37,7 +37,7 @@ runtime selection.
 
 Daily at 15:21 UTC, the workflow checks for the latest stable audio.cpp release
 and automatically builds and publishes it with the frontend default branch,
-updating `:cuda12` and `:cuda13`. This tracks releases, not every audio.cpp commit. The workflow
+updating `:cpu`, `:vulkan`, `:cuda12`, and `:cuda13`. This tracks releases, not every audio.cpp commit. The workflow
 caches successful publications by both source revisions and skips unchanged
 pairs; failed builds are retried on the next check. Cache eviction can cause a
 rebuild. This is twelve hours after audio.cpp's 03:21 UTC Docker schedule;
@@ -47,12 +47,39 @@ Scheduled runs require this workflow on the default branch.
 Run the workflow manually to test a pinned audio.cpp tag or commit. Publishing
 is off by default for manual runs. Publishing a frontend GitHub release builds
 the audio.cpp revision pinned in the workflow and publishes to
-`ghcr.io/0xshug0/audio.cpp-server-frontends:<release-tag>-cuda12` and
-`:<release-tag>-cuda13`. Stable releases also update `:cuda12` and `:cuda13`;
-manual published builds use a unique run-based tag for each CUDA version.
+`ghcr.io/0xshug0/audio.cpp-server-frontends:<release-tag>-<backend>`, where
+`<backend>` is `cpu`, `vulkan`, `cuda12`, or `cuda13`. Stable releases also update
+the corresponding backend tags; manual published builds use a unique run-based
+tag for each backend.
 The image labels and workflow summary record both source revisions.
 
 Once an image has been published:
+
+CPU (no GPU or NVIDIA container runtime required):
+
+```bash
+docker run --rm -p 8080:8080 \
+  -v /path/to/models:/app/models \
+  ghcr.io/0xshug0/audio.cpp-server-frontends:cpu
+```
+
+Vulkan on Linux with AMD/Intel graphics:
+
+```bash
+docker run --rm -p 8080:8080 \
+  --device /dev/dri \
+  --group-add "$(stat -c '%g' /dev/dri/renderD128)" \
+  -v /path/to/models:/app/models \
+  ghcr.io/0xshug0/audio.cpp-server-frontends:vulkan
+```
+
+Use your GPU's render node if it is not `renderD128`. The image includes the
+Vulkan loader and Mesa drivers; the host must provide a supported GPU and kernel
+driver. The supplementary group grants the container's non-root user access to
+the render node. NVIDIA Vulkan requires the NVIDIA container runtime and its
+graphics driver libraries instead of Mesa's AMD/Intel drivers.
+
+CUDA:
 
 ```bash
 docker run --rm --gpus all -p 8080:8080 \
@@ -68,7 +95,7 @@ it and pass `--config /path/in/container/server.json --host 0.0.0.0 --port 8080
 the container's `ubuntu` user when downloading through the UI.
 
 The build runners do not have GPUs. Publishing checks build/link dependencies,
-not CUDA inference; MP3 and GPU end-to-end testing still requires a running
+not GPU inference; MP3 and GPU end-to-end testing still requires a running
 server and model weights.
 
 ## Supported Frontends
