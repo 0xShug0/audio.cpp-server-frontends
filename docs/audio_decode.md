@@ -24,6 +24,18 @@ cmake -S . -B build/debug \
 `audio_decode` uses the vendored miniaudio header and does not add a system
 library dependency.
 
+## Open WebUI
+
+Use the standard (full) Open WebUI image, such as
+`ghcr.io/open-webui/open-webui:main`, for microphone transcription. Its slim
+images omit FFmpeg and bypass audio preprocessing, so browser recordings can
+reach audio.cpp as WebM and receive HTTP 400. This frontend accepts MP3/FLAC in
+addition to the core's WAV input; it does not decode WebM/Opus.
+
+The full Open WebUI image can transcode these recordings to MP3 before sending
+them. Leave `BYPASS_PYDUB_PREPROCESSING` unset or `false` in Open WebUI. FFmpeg
+in the audio.cpp container does not perform this client-side conversion.
+
 ## Request
 
 Multipart upload:

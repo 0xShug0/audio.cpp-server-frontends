@@ -66,9 +66,14 @@ docker run --rm -p 8080:8080 \
 Vulkan on Linux with AMD/Intel graphics:
 
 ```bash
+mkdir -p ./vulkan-cache
+
 docker run --rm -p 8080:8080 \
+  --user "$(id -u):$(id -g)" \
   --device /dev/dri \
   --group-add "$(stat -c '%g' /dev/dri/renderD128)" \
+  -e XDG_CACHE_HOME=/cache \
+  -v "$PWD/vulkan-cache:/cache" \
   -v /path/to/models:/app/models \
   ghcr.io/0xshug0/audio.cpp-server-frontends:vulkan
 ```
@@ -78,6 +83,13 @@ Vulkan loader and Mesa drivers; the host must provide a supported GPU and kernel
 driver. The supplementary group grants the container's non-root user access to
 the render node. NVIDIA Vulkan requires the NVIDIA container runtime and its
 graphics driver libraries instead of Mesa's AMD/Intel drivers.
+
+The cache mount preserves Mesa's shader cache when the container is recreated.
+`--user` matches the host user's ownership of `vulkan-cache`; if you use another
+UID/GID or an existing volume, ensure that user can write to it. Setting
+`XDG_CACHE_HOME` explicitly also avoids attempts to write to `//.cache` when a
+custom container user has no home directory. An unwritable cache disables Mesa's
+disk cache and produces a warning.
 
 CUDA:
 
@@ -92,11 +104,15 @@ Use `:cuda12` instead for the CUDA 12 image.
 The default command opens the full WebUI. To use a server configuration, mount
 it and pass `--config /path/in/container/server.json --host 0.0.0.0 --port 8080
 --log` after the image name. The mounted model directory must be writable by
-the container's `ubuntu` user when downloading through the UI.
+the container user (`ubuntu` by default) when downloading through the UI.
 
 The build runners do not have GPUs. Publishing checks build/link dependencies,
 not GPU inference; MP3 and GPU end-to-end testing still requires a running
 server and model weights.
+
+For Open WebUI microphone transcription, use its standard (full) image rather
+than a slim image so recordings can be transcoded before upload. See
+[Open WebUI input formats](docs/audio_decode.md#open-webui).
 
 ## Supported Frontends
 
