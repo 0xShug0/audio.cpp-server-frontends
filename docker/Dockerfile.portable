@@ -67,7 +67,7 @@ RUN case "$BACKEND" in \
         *) echo "Unsupported backend: $BACKEND" >&2; exit 1 ;; \
     esac && \
     apt-get update && apt-get install -y --no-install-recommends \
-        libgomp1 libmp3lame0 libespeak-ng1 ca-certificates ffmpeg $vulkan_packages && \
+        libgomp1 libmp3lame0 libespeak-ng1 ca-certificates curl ffmpeg $vulkan_packages && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ /app/
 COPY audio.cpp/model_specs/ /app/model_specs/
