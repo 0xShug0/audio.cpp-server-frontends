@@ -52,7 +52,7 @@ LABEL org.opencontainers.image.source=$IMAGE_SOURCE \
       io.audiocpp.core.revision=$AUDIOCPP_REVISION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 libmp3lame0 libespeak-ng1 ca-certificates ffmpeg \
+    libgomp1 libmp3lame0 libespeak-ng1 ca-certificates curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ /app/
 COPY audio.cpp/model_specs/ /app/model_specs/
