@@ -42,14 +42,19 @@ def c_api_test(library, model, audio, output):
     class Backend(ctypes.Structure):
         _fields_ = [('backend', ctypes.c_char_p), ('device', ctypes.c_int), ('threads', ctypes.c_int)]
 
+    class ModelConfig(ctypes.Structure):
+        _fields_ = [(key, ctypes.c_char_p) for key in
+                    ('family_hint', 'config_id', 'weight_id', 'model_spec_override')]
+
     registry, loaded, session, result = pointer(), pointer(), pointer(), pointer()
     request = bind('request_create', [], pointer)()
     try:
         check(bind('registry_create', [ctypes.c_char_p, out_pointer])(None, ctypes.byref(registry)))
         families = bind('registry_family_count', [pointer], ctypes.c_size_t)(registry)
         assert families > 50, families
-        check(bind('model_load', [pointer, ctypes.c_char_p, pointer, pointer, out_pointer])(
-            registry, os.fsencode(model), None, None, ctypes.byref(loaded)))
+        config = ModelConfig(b'moonshine_asr', None, None, None)
+        check(bind('model_load', [pointer, ctypes.c_char_p, ctypes.POINTER(ModelConfig), pointer, out_pointer])(
+            registry, os.fsencode(model), ctypes.byref(config), None, ctypes.byref(loaded)))
         backend = Backend(b'hip', 0, 4)
         check(bind('session_create', [pointer, ctypes.c_char_p, ctypes.c_char_p,
                                      ctypes.POINTER(Backend), pointer, out_pointer])(
@@ -139,7 +144,7 @@ def main():
     moonshine = root / 'inputs/moonshine-tiny-q8_0.gguf'
     asr = [cli, '--task', 'asr', '--family', 'moonshine_asr', '--model', moonshine,
            '--backend', 'hip', '--threads', '4', '--log', '--metrics']
-    run(asr + ['--audio', root / 'inputs/jfk.wav', '--text-out', results / 'jfk.txt'], 'jfk')
+    jfk_log = run(asr + ['--audio', root / 'inputs/jfk.wav', '--text-out', results / 'jfk.txt'], 'jfk')
 
     def wer(reference, hypothesis):
         ref = re.findall(r'[a-z]+', reference.lower())
@@ -163,7 +168,7 @@ def main():
         assert hashlib.file_digest(file, 'sha256').hexdigest() == 'c8ac3f94b6e73f137c0e7ecc9270bc8faec7a476ff799b87e48844d1d0987ac3'
     download_sec = time.monotonic() - download_start
     text = 'The morning train arrives at the quiet station. Please bring your ticket and meet us beside the blue clock.'
-    run([cli, '--task', 'tts', '--family', 'qwen3_tts', '--model', qwen,
+    qwen_log = run([cli, '--task', 'tts', '--family', 'qwen3_tts', '--model', qwen,
          '--backend', 'hip', '--threads', '4', '--voice-id', 'ryan', '--language', 'English',
          '--text', text, '--request-option', 'seed=1234', '--out', results / 'qwen.wav',
          '--log', '--metrics'], 'qwen', timeout=600)
@@ -186,10 +191,15 @@ def main():
     env.pop('GGML_BACKEND_PATH')
     if not windows:
         env['LD_LIBRARY_PATH'] = rocm_root + '/lib'
-    # Test native UI/management startup from the extracted bundle.
+    # Exercise the server with an ordinary model configuration and HTTP request.
+    config = results / 'server.json'
+    config.write_text(json.dumps(dict(host='127.0.0.1', port=18080, backend='hip', threads=4,
+                                     lazy_load=True, ui=True, ui_management=True,
+                                     models=[dict(id='moonshine', family='moonshine_asr',
+                                                  path=str(moonshine), task='asr', mode='offline')]), indent=2))
     with (results / 'server.log').open('w') as log:
         server = subprocess.Popen([str(binary / ('audiocpp_server' + executable)),
-                                   '--ui', '--ui-management', '--backend', 'hip', '--port', '18080', '--log'],
+                                   '--config', str(config), '--log'],
                                   cwd=binary, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             for _ in range(60):
@@ -204,12 +214,22 @@ def main():
                     time.sleep(1)
             else:
                 raise RuntimeError('server UI did not start')
+            request = urllib.request.Request('http://127.0.0.1:18080/v1/audio/transcriptions',
+                                             data=json.dumps(dict(model='moonshine', audio=str(root / 'inputs/jfk.wav'))).encode(),
+                                             headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(request, timeout=300) as response:
+                transcription = json.load(response)
+            (results / 'server-response.json').write_text(json.dumps(transcription, indent=2))
+            server_wer = wer(expected_jfk, transcription['text'])
+            assert server_wer <= 0.10, transcription
         finally:
             server.terminate()
             server.wait(timeout=20)
-    summary = dict(jfk_wer=jfk_wer, tts_wer=tts_wer, audio_sec=duration,
+    jfk_rtf = float(re.search(r'^metrics\.rtf=(.+)$', jfk_log, re.M)[1])
+    qwen_rtf = float(re.search(r'^metrics\.rtf=(.+)$', qwen_log, re.M)[1])
+    summary = dict(jfk_wer=jfk_wer, jfk_rtf=jfk_rtf, tts_wer=tts_wer, qwen_rtf=qwen_rtf, audio_sec=duration,
                    qwen_download_sec=download_sec, c_api_wer=c_api_wer,
-                   server_ui=True, source_sha=manifest['source_sha'])
+                   server_ui=True, server_wer=server_wer, source_sha=manifest['source_sha'])
     (results / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2), flush=True)
     summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
