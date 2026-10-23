@@ -36,6 +36,8 @@ jobs:
       SOURCE_REPOSITORY: ${{ inputs.source_repository }}
       RELEASE_VERSION: ${{ inputs.version }}
       GPU_TARGETS: ${{ inputs.gpu_targets }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,6 +59,10 @@ jobs:
           sudo apt-get install -y ninja-build libssl-dev patchelf
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
+      - uses: ggml-org/ccache-action@v1.2.24
+        with:
+          key: hip-release-${{ runner.os }}-rocm10
+          max-size: 2G
       - name: Build and package full deployment
         run: python release-flow/scripts/ci/build_hip_release.py --source source --output dist
       - uses: actions/upload-artifact@v4

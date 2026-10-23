@@ -46,7 +46,7 @@ def main():
             if process.wait():
                 raise RuntimeError(f'{name} failed: {process.returncode}; see {log.name}')
 
-    run([sys.executable, '-m', 'pip', 'install', '--index-url',
+    run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--index-url',
          'https://stable.repo.amd.com/rocm/whl-next/',
          f'rocm[libraries,devel]=={rocm_version}'], 'install-rocm')
     run(['rocm-sdk', 'init'], 'init-rocm')
@@ -69,6 +69,8 @@ def main():
                f'-DGPU_TARGETS={targets}', f'-DCMAKE_PREFIX_PATH={rocm_cmake}']
     if windows:
         llvm = rocm / 'lib' / 'llvm' / 'bin'
+        env['HIP_DEVICE_LIB_PATH'] = str(rocm / 'lib' / 'llvm' / 'amdgcn' / 'bitcode')
+        env['LLVM_PATH'] = str(rocm / 'lib' / 'llvm')
         command += [f'-DCMAKE_C_COMPILER={llvm / "clang.exe"}',
                     f'-DCMAKE_CXX_COMPILER={llvm / "clang++.exe"}',
                     '-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types',
@@ -77,6 +79,9 @@ def main():
         llvm = Path(subprocess.check_output([str(Path(rocm_bin) / 'hipconfig'), '-l'], env=env, text=True).strip())
         command += [f'-DCMAKE_HIP_COMPILER={llvm / "clang"}',
                     '-DCMAKE_INSTALL_RPATH=$ORIGIN', '-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON']
+    if shutil.which('ccache'):
+        command += ['-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
+                    '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache']
     run(command, 'configure')
     run(['cmake', '--build', build, '--parallel', str(min(os.cpu_count() or 2, 8)),
          '--target', 'audiocpp_cli', 'audiocpp_server', 'audiocpp_gguf', 'audiocpp'], 'build')

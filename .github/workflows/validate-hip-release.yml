@@ -1,9 +1,6 @@
 name: Validate HIP release artifacts on AMD
 
 on:
-  push:
-    branches: [experiment/halo-kernels]
-    paths: [.github/workflows/validate-hip-release.yml]
   workflow_dispatch:
     inputs:
       source_sha:
