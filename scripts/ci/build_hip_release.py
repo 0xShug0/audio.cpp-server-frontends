@@ -71,6 +71,7 @@ def main():
         llvm = rocm / 'lib' / 'llvm' / 'bin'
         command += [f'-DCMAKE_C_COMPILER={llvm / "clang.exe"}',
                     f'-DCMAKE_CXX_COMPILER={llvm / "clang++.exe"}',
+                    '-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types',
                     '-DGGML_HIP_NO_VMM=ON']
     else:
         llvm = Path(subprocess.check_output([str(Path(rocm_bin) / 'hipconfig'), '-l'], env=env, text=True).strip())
@@ -98,7 +99,7 @@ def main():
         for path in binary_dir.iterdir():
             is_library = path.suffix in ('.dll', '.lib') if windows else '.so' in path.name
             if path.is_file() and (is_library or kind == 'bin' and path.name in ('audiocpp_cli', 'audiocpp_server', 'audiocpp_gguf', 'audiocpp_cli.exe', 'audiocpp_server.exe', 'audiocpp_gguf.exe')):
-                shutil.copy2(path, destination / path.name)
+                shutil.copy2(path, destination / path.name, follow_symlinks=False)
         if windows:
             # Match the HIP DLL to the build toolchain, not a driver-installed DLL.
             for name in ('amdhip64_7.dll', 'rocm_kpack.dll', 'amd_comgr.dll'):
@@ -136,7 +137,8 @@ def main():
         archives.append(archive)
     with (output / 'SHA256SUMS').open('w', encoding='utf-8') as sums:
         for path in archives:
-            digest = hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
+            with path.open('rb') as file:
+                digest = hashlib.file_digest(file, 'sha256').hexdigest()
             sums.write(f'{digest}  {path.name}\n')
 
 

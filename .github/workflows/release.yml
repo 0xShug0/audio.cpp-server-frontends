@@ -1,8 +1,8 @@
 # audio.cpp - release.yml
 #
 # Ported from llama.cpp's release workflow and stripped to the backends
-# audio.cpp ships: CPU, CUDA, Vulkan, Metal (ROCm kept as best-effort,
-# disabled like llama.cpp). Windows CUDA uses the GGML_BACKEND_DL model so the
+# audio.cpp ships: CPU, CUDA, Vulkan, Metal and HIP/ROCm.
+# Windows CUDA uses the GGML_BACKEND_DL model so the
 # CUDA backend is shipped once as ggml-cuda.dll (thin cli/server/gguf shells)
 # with the heavy CUDA runtime DLLs in a separate cudart...zip, and the release
 # job publishes.
@@ -933,12 +933,6 @@ jobs:
           name: audio-${{ needs.get-version.outputs.tag }}-cudart-windows-x64-cuda${{ matrix.label }}
           path: build/cudart/*
 
-  # Best-effort ROCm builds. Kept OUT of the release `needs` and commented by
-  # default (llama.cpp ships its ROCm job disabled as well) because GitHub
-  # runners have no AMD GPU and HIP toolchain provisioning is heavy. Enable by
-  # uncommenting and pointing at a runner that can provide a ROCm/HIP runtime.
-  #   linux-rocm:
-  #     ...
       - name: Build and stage C API library
         shell: pwsh
         run: |
@@ -961,6 +955,14 @@ jobs:
           name: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cuda${{ matrix.label }}
           path: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cuda${{ matrix.label }}.zip
 
+  hip:
+    needs: [check-release, get-version]
+    if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    uses: ./.github/workflows/release-hip.yml
+    with:
+      source_repository: ${{ inputs.source_repository || github.repository }}
+      source_sha: ${{ needs.get-version.outputs.source_sha }}
+      version: ${{ needs.get-version.outputs.tag }}
 
   release:
     name: Create release
@@ -980,6 +982,7 @@ jobs:
       - linux-cuda-colab
       - linux-cuda-library
       - windows-vulkan-portable
+      - hip
     if: >-
       ${{
         always() &&
@@ -997,7 +1000,8 @@ jobs:
         needs.windows-vulkan.result == 'success' &&
         needs.windows-cuda.result == 'success' &&
         needs.linux-cuda-library.result == 'success' &&
-        needs.windows-vulkan-portable.result == 'success'
+        needs.windows-vulkan-portable.result == 'success' &&
+        needs.hip.result == 'success'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -1012,6 +1016,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+          pattern: '{audio-*,hip-release-*}'
       # Each artifact downloads into release-assets/<artifact-name>/ holding the raw
       # bundle (binaries + tools/ + model_specs/). Archive per platform here so
       # the release ships the same zip/tar.gz layout as before; artifact names
@@ -1028,6 +1033,10 @@ jobs:
             name="${d%/}"
             echo "Packing ${name}"
             case "$name" in
+              hip-release-*)
+                # HIP packages are archived before upload to preserve permissions.
+                find "$d" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} . \;
+                ;;
               *-lib-*|*-cudart-ubuntu-*|*-server-config-examples)
                 mv "$d"* .
                 ;;

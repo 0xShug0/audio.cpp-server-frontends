@@ -14,6 +14,14 @@ on:
         description: 'Compiled architectures (use the release list for final multi-architecture validation)'
         type: string
         default: 'gfx1151'
+      artifact_run_id:
+        description: 'Retest packages from an earlier run without rebuilding (also provide source_sha)'
+        type: string
+        default: ''
+      platforms:
+        description: 'Build/test OS list (JSON): ubuntu-24.04 and/or windows-2022'
+        type: string
+        default: '["ubuntu-24.04", "windows-2022"]'
 
 permissions:
   contents: read
@@ -30,9 +38,13 @@ jobs:
       - id: source
         env:
           REQUESTED_SHA: ${{ inputs.source_sha }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
         run: |
           set -euo pipefail
           sha="$REQUESTED_SHA"
+          if [[ -n "$ARTIFACT_RUN_ID" ]]; then
+            [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ && -n "$sha" ]]
+          fi
           if [[ -z "$sha" ]]; then
             sha=$(git ls-remote https://github.com/0xShug0/audio.cpp.git refs/heads/main | cut -f1)
           fi
@@ -55,30 +67,30 @@ jobs:
           compression-level: 0
   packages:
     needs: prepare
+    if: inputs.artifact_run_id == ''
     uses: ./.github/workflows/release-hip.yml
     with:
       source_repository: 0xShug0/audio.cpp
       source_sha: ${{ needs.prepare.outputs.source_sha }}
       version: validation-${{ github.run_number }}
       gpu_targets: ${{ inputs.gpu_targets || 'gfx1151' }}
+      platforms: ${{ inputs.platforms || '["ubuntu-24.04", "windows-2022"]' }}
   user-test:
     needs: [prepare, packages]
     if: always() && needs.prepare.result == 'success'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: Linux
-            runner: '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]'
-          - os: Windows
-            runner: '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]'
-    runs-on: ${{ fromJSON(matrix.runner) }}
+        os: ${{ fromJSON(inputs.platforms || '["ubuntu-24.04", "windows-2022"]') }}
+    runs-on: ${{ fromJSON(matrix.os == 'windows-2022' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
     timeout-minutes: 35
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: hip-release-${{ matrix.os }}
+          name: hip-release-${{ runner.os }}
           path: packages
+          run-id: ${{ inputs.artifact_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@v4
         with:
           name: hip-user-inputs
@@ -90,9 +102,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p results
-          python3 inputs/test_hip_release.py 2>&1 | tee results/validation.log
+          ${{ runner.os == 'Windows' && 'python' || 'python3' }} inputs/test_hip_release.py 2>&1 | tee results/validation.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hip-user-results-${{ matrix.os }}
+          name: hip-user-results-${{ runner.os }}
           path: results/

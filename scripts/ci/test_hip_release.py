@@ -2,6 +2,7 @@
 """Test downloaded HIP archives outside a checkout/build environment."""
 
 import ctypes
+import array
 import hashlib
 import json
 import os
@@ -15,6 +16,61 @@ import time
 import urllib.request
 import wave
 import zipfile
+
+
+def c_api_test(library, model, audio, output):
+    windows = sys.platform == 'win32'
+    if windows:
+        dll_dir = os.add_dll_directory(str(library))
+        runtime_dir = os.add_dll_directory(os.environ['HIP_RUNTIME_BIN'])
+    lib = ctypes.CDLL(str(library / ('audiocpp.dll' if windows else 'libaudiocpp.so')))
+    pointer = ctypes.c_void_p
+    out_pointer = ctypes.POINTER(pointer)
+
+    def bind(name, arguments, result=ctypes.c_int):
+        function = getattr(lib, 'audiocpp_' + name)
+        function.argtypes = arguments
+        function.restype = result
+        return function
+
+    error = bind('last_error', [], ctypes.c_char_p)
+
+    def check(status):
+        if status:
+            raise RuntimeError(error().decode())
+
+    class Backend(ctypes.Structure):
+        _fields_ = [('backend', ctypes.c_char_p), ('device', ctypes.c_int), ('threads', ctypes.c_int)]
+
+    registry, loaded, session, result = pointer(), pointer(), pointer(), pointer()
+    request = bind('request_create', [], pointer)()
+    try:
+        check(bind('registry_create', [ctypes.c_char_p, out_pointer])(None, ctypes.byref(registry)))
+        families = bind('registry_family_count', [pointer], ctypes.c_size_t)(registry)
+        assert families > 50, families
+        check(bind('model_load', [pointer, ctypes.c_char_p, pointer, pointer, out_pointer])(
+            registry, os.fsencode(model), None, None, ctypes.byref(loaded)))
+        backend = Backend(b'hip', 0, 4)
+        check(bind('session_create', [pointer, ctypes.c_char_p, ctypes.c_char_p,
+                                     ctypes.POINTER(Backend), pointer, out_pointer])(
+            loaded, b'asr', b'offline', ctypes.byref(backend), None, ctypes.byref(session)))
+        with wave.open(str(audio)) as wav:
+            assert wav.getsampwidth() == 2 and wav.getnchannels() == 1
+            samples = array.array('h', wav.readframes(wav.getnframes()))
+            pcm = (ctypes.c_float * len(samples))(*(x / 32768 for x in samples))
+            check(bind('request_set_audio', [pointer, ctypes.POINTER(ctypes.c_float),
+                                            ctypes.c_size_t, ctypes.c_int, ctypes.c_int])(
+                request, pcm, len(samples), wav.getframerate(), 1))
+        check(bind('session_run', [pointer, pointer, out_pointer])(session, request, ctypes.byref(result)))
+        text = ctypes.c_char_p()
+        check(bind('result_text', [pointer, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(ctypes.c_char_p)])(
+            result, ctypes.byref(text), None))
+        output.write_text(text.value.decode(), encoding='utf-8')
+        print(f'C API: {families} families; ASR: {text.value.decode()}', flush=True)
+    finally:
+        for name, handle in [('result', result), ('request', request), ('session', session),
+                             ('model', loaded), ('registry', registry)]:
+            bind(name + '_free', [pointer], None)(handle)
 
 
 def main():
@@ -65,10 +121,10 @@ def main():
         (results / f'{kind}-BUILD.json').write_text(json.dumps(manifest, indent=2))
     cli = binary / ('audiocpp_cli' + executable)
 
-    def run(command, name, timeout=300):
+    def run(command, name, timeout=300, cwd=None):
         print('+', subprocess.list2cmdline([str(x) for x in command]), flush=True)
         with (results / (name + '.log')).open('w') as log:
-            subprocess.run([str(x) for x in command], cwd=binary, env=env, stdout=log,
+            subprocess.run([str(x) for x in command], cwd=cwd or binary, env=env, stdout=log,
                            stderr=subprocess.STDOUT, check=True, timeout=timeout)
         text = (results / (name + '.log')).read_text(errors='replace')
         print(text[-6000:], flush=True)
@@ -118,24 +174,18 @@ def main():
     run(asr + ['--audio', results / 'qwen.wav', '--text-out', results / 'qwen-asr.txt'], 'qwen-asr')
     tts_wer = wer(text, (results / 'qwen-asr.txt').read_text())
     assert tts_wer <= 0.20, tts_wer
-    # Load only the library archive, not libraries in the CLI package.
-    if windows:
-        dll_dir = os.add_dll_directory(str(library / 'libs'))
-        runtime_dir = os.add_dll_directory(rocm_bin)
-    else:
-        dll_dir = runtime_dir = None
-    lib = ctypes.CDLL(str(library / 'libs' / ('audiocpp.dll' if windows else 'libaudiocpp.so')))
-    lib.audiocpp_abi_version.restype = ctypes.c_uint32
-    assert lib.audiocpp_abi_version() > 0
-    registry = ctypes.c_void_p()
-    lib.audiocpp_registry_create.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
-    assert lib.audiocpp_registry_create(None, ctypes.byref(registry)) == 0
-    lib.audiocpp_registry_family_count.argtypes = [ctypes.c_void_p]
-    lib.audiocpp_registry_family_count.restype = ctypes.c_size_t
-    families = lib.audiocpp_registry_family_count(registry)
-    assert families > 50, families
-    lib.audiocpp_registry_free.argtypes = [ctypes.c_void_p]
-    lib.audiocpp_registry_free(registry)
+    # A separate process loads only the library package and its runtime.
+    env['HIP_RUNTIME_BIN'] = rocm_bin
+    env['GGML_BACKEND_PATH'] = str(library / 'libs')
+    if not windows:
+        env['LD_LIBRARY_PATH'] = str(library / 'libs') + ':' + rocm_root + '/lib'
+    run([sys.executable, Path(__file__).resolve(), '--c-api', library / 'libs', moonshine,
+         root / 'inputs/jfk.wav', results / 'c-api-jfk.txt'], 'c-api', cwd=library / 'libs')
+    c_api_wer = wer(expected_jfk, (results / 'c-api-jfk.txt').read_text())
+    assert c_api_wer <= 0.10, c_api_wer
+    env.pop('GGML_BACKEND_PATH')
+    if not windows:
+        env['LD_LIBRARY_PATH'] = rocm_root + '/lib'
     # Test native UI/management startup from the extracted bundle.
     with (results / 'server.log').open('w') as log:
         server = subprocess.Popen([str(binary / ('audiocpp_server' + executable)),
@@ -158,7 +208,7 @@ def main():
             server.terminate()
             server.wait(timeout=20)
     summary = dict(jfk_wer=jfk_wer, tts_wer=tts_wer, audio_sec=duration,
-                   qwen_download_sec=download_sec, c_api_families=families,
+                   qwen_download_sec=download_sec, c_api_wer=c_api_wer,
                    server_ui=True, source_sha=manifest['source_sha'])
     (results / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2), flush=True)
@@ -169,4 +219,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == '--c-api':
+        c_api_test(*(Path(x) for x in sys.argv[2:]))
+    else:
+        main()
