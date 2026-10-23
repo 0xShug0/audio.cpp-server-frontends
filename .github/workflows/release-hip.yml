@@ -1,0 +1,72 @@
+name: HIP release packages
+
+on:
+  workflow_call:
+    inputs:
+      source_repository:
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      gpu_targets:
+        type: string
+        default: 'gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      ROCM_VERSION: '10.0.0'
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      GPU_TARGETS: ${{ inputs.gpu_targets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: release-flow
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libssl-dev patchelf
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Build and package full deployment
+        run: python release-flow/scripts/ci/build_hip_release.py --source source --output dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-build-logs-${{ runner.os }}
+          path: dist/logs/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hip-release-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
