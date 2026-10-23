@@ -2,7 +2,7 @@ name: Halo isolated kernel iteration
 
 on:
   push:
-    branches: [test/devlab-dispatch]
+    branches: [experiment/halo-kernels]
     paths:
       - .github/workflows/hip-halo-probe.yml
       - external/ggml/src/ggml-hip/halo/sgemm.*

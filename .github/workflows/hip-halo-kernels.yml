@@ -2,7 +2,7 @@ name: Experimental Halo kernels A-B
 
 on:
   push:
-    branches: [test/devlab-dispatch]
+    branches: [experiment/halo-kernels]
     paths:
       - .github/workflows/hip-halo-kernels.yml
       - .github/tests/halo_requests.json
@@ -29,6 +29,7 @@ permissions:
 
 jobs:
   prepare:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
