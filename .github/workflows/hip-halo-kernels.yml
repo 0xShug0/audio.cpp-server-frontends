@@ -143,7 +143,9 @@ jobs:
             cmake --build "build-$mode" --target audiocpp_cli -j 8 2>&1 | tee "results/$mode-build.log"
             cp "build-$mode/CMakeCache.txt" "results/$mode-CMakeCache.txt"
           done
-          cmake --build build-on --target hip_halo_im2col_test -j 8 2>&1 | tee results/test-build.log
+          cmake --build build-on --target hip_halo_im2col_test hip_halo_sgemm_test -j 8 2>&1 | tee results/test-build.log
+          ctest --test-dir build-on -R '^hip_halo_sgemm' --output-on-failure \
+            2>&1 | tee results/sgemm-ctest.log
           cmake --build build-on --target tiled_conv_graph_test -j 8 2>&1 | tee results/graph-test-build.log
           build-on/bin/tiled_conv_graph_test 2>&1 | tee results/graph-cpu-test.log
           build-on/bin/tiled_conv_graph_test hip 2>&1 | tee results/graph-hip-test.log

@@ -15,8 +15,8 @@
 static void run(int m, int n, int k, int pad) {
     const int lda=k+pad, ldb=k+pad+1, ldc=m+pad;
     std::vector<float> a(size_t(lda)*m), b(size_t(ldb)*n), out(size_t(ldc)*n), ref(out.size());
-    for (size_t i=0;i<a.size();++i) a[i]=float(int((i*17+13)%251)-125)/128;
-    for (size_t i=0;i<b.size();++i) b[i]=float(int((i*31+7)%257)-128)/128;
+    for (size_t i=0;i<a.size();++i) a[i]=float(int((i*17+13)%251)-125)/127.13f;
+    for (size_t i=0;i<b.size();++i) b[i]=float(int((i*31+7)%257)-128)/131.73f;
     float *da,*db,*dc;
     CHECK(hipMalloc(&da,a.size()*4)); CHECK(hipMalloc(&db,b.size()*4)); CHECK(hipMalloc(&dc,out.size()*4));
     CHECK(hipMemcpy(da,a.data(),a.size()*4,hipMemcpyHostToDevice));
