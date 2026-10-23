@@ -1,0 +1,26 @@
+name: DevLab AMD runner access check
+
+on:
+  push:
+    branches: [test/devlab-access-20261023]
+    paths: [.github/workflows/devlab-access-check.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  amd-halo:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 5
+    steps:
+      - name: Verify runner and AMD GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          lscpu
+          /opt/rocm/bin/rocminfo > "$RUNNER_TEMP/rocminfo.txt"
+          cat "$RUNNER_TEMP/rocminfo.txt"
+          grep -q 'gfx1151' "$RUNNER_TEMP/rocminfo.txt"
+          echo 'DevLab Strix Halo runner and gfx1151 GPU are accessible.'
