@@ -41,7 +41,7 @@ jobs:
           "$rocm/bin/hipcc" --version | tee results/environment.log
           arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
           echo "arch=$arch" | tee -a results/environment.log
-          cat /sys/fs/cgroup/memory.max | tee -a results/environment.log
+          cat /proc/self/cgroup /proc/meminfo | tee -a results/environment.log
           cmake -S source -B source/build/debug -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
