@@ -54,14 +54,15 @@ jobs:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
     timeout-minutes: 40
-    env:
-      PROBE_ROOT: ${{ runner.temp }}/pr1070-${{ github.run_id }}-${{ github.run_attempt }}
     defaults:
       run:
         shell: bash
     steps:
       - name: Create isolated probe directory
-        run: mkdir -p "$PROBE_ROOT"
+        run: |
+          root="$RUNNER_TEMP/pr1070-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$root"
+          echo "PROBE_ROOT=$root" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         timeout-minutes: 5
         with:
