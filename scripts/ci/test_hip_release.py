@@ -79,6 +79,8 @@ def c_api_test(library, model, audio, output):
 
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     root = Path.cwd()
     results = root / 'results'
     results.mkdir(exist_ok=True)
@@ -105,6 +107,7 @@ def main():
     env.pop('CMAKE_PREFIX_PATH', None)
     env.pop('HIP_PATH', None)
     env.pop('ROCM_PATH', None)
+    env.pop('GGML_BACKEND_PATH', None)
     if not windows:
         env['LD_LIBRARY_PATH'] = rocm_root + '/lib'
     (results / 'runtime.json').write_text(json.dumps(dict(root=rocm_root, bin=rocm_bin), indent=2))
@@ -183,14 +186,12 @@ def main():
     assert tts_wer <= 0.20, tts_wer
     # A separate process loads only the library package and its runtime.
     env['HIP_RUNTIME_BIN'] = rocm_bin
-    env['GGML_BACKEND_PATH'] = str(library / 'libs')
     if not windows:
         env['LD_LIBRARY_PATH'] = str(library / 'libs') + ':' + rocm_root + '/lib'
     run([sys.executable, Path(__file__).resolve(), '--c-api', library / 'libs', moonshine,
          root / 'inputs/jfk.wav', results / 'c-api-jfk.txt'], 'c-api', cwd=library / 'libs')
     c_api_wer = wer(expected_jfk, (results / 'c-api-jfk.txt').read_text())
     assert c_api_wer <= 0.10, c_api_wer
-    env.pop('GGML_BACKEND_PATH')
     if not windows:
         env['LD_LIBRARY_PATH'] = rocm_root + '/lib'
     # Exercise the server with an ordinary model configuration and HTTP request.

@@ -15,6 +15,8 @@ import zipfile
 
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -41,9 +43,12 @@ def main():
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, encoding='utf-8', errors='replace')
             for line in process.stdout:
-                print(line, end='', flush=True)
                 log.write(line)
+                if name != 'build' or line.startswith('[') or 'error:' in line:
+                    print(line, end='', flush=True)
             if process.wait():
+                log.flush()
+                print(''.join((logs / (name + '.log')).read_text(encoding='utf-8').splitlines(keepends=True)[-80:]), flush=True)
                 raise RuntimeError(f'{name} failed: {process.returncode}; see {log.name}')
 
     run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--index-url',

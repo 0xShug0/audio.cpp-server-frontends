@@ -36,7 +36,9 @@ $env:PATH = "$(& .\rocm-runtime\Scripts\rocm-sdk.exe path --bin);$env:PATH"
 Open the server UI at http://127.0.0.1:8080. Keep the shared libraries beside
 the executables. The library archive has `include/audiocpp.h` and `libs/` for
 embedding. Its libraries must stay together; configure the application's
-library search path to include `libs/` and the ROCm runtime.
+library search path to include `libs/` and the ROCm runtime. For Windows
+applications, place the contents of `libs/` beside the application executable
+so the GGML backend plugins are discovered.
 
 The native model manager and UI are included. Models using eSpeak additionally
 need eSpeak-ng and its data installed. No models or Python inference engine are
