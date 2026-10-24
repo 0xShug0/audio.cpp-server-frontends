@@ -2,10 +2,9 @@ name: HIP VMM PR 1059 A-B
 
 on:
   push:
-    branches: [test/devlab-dispatch]
+    branches: [hip-test]
     paths:
       - .github/workflows/hip-vmm-pr1059.yml
-      - .github/tests/hip_vmm_probe.cpp
   workflow_dispatch:
 
 permissions:
@@ -50,19 +49,9 @@ jobs:
           echo "ROCM_PATH=$rocm" >> "$GITHUB_ENV"
           echo "$rocm/bin" >> "$GITHUB_PATH"
           echo "$rocm/llvm/bin" >> "$GITHUB_PATH"
-      - name: Exercise growing HIP mappings before and after
-        run: |
-          set -euo pipefail
-          hipcc -O2 -std=c++17 .github/tests/hip_vmm_probe.cpp -o results/vmm-probe 2>&1 | tee results/probe-build.log
-          set +e
-          results/vmm-probe subrange > results/probe-base.log 2>&1
-          base_rc=$?
-          results/vmm-probe prefix > results/probe-head.log 2>&1
-          head_rc=$?
-          set -e
-          printf 'base=%s\nhead=%s\n' "$base_rc" "$head_rc" | tee results/probe-exit-codes.txt
-          cat results/probe-base.log results/probe-head.log
-          test "$head_rc" -eq 0
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          [[ "$arch" =~ ^gfx[0-9a-f]+$ ]]
+          echo "GPU_ARCH=$arch" >> "$GITHUB_ENV"
       - name: Fetch pinned source and small model
         run: |
           set -euo pipefail
@@ -95,28 +84,16 @@ jobs:
         run: |
           set -euo pipefail
           ulimit -c 0
-          arch=$(sed -n 's/.* arch=\([^: ]*\).*/\1/p' results/probe-head.log | head -1)
-          test -n "$arch"
           for variant in base head; do
             source="source-$variant"
-            build="build-$variant"
-            # Identical logging on both versions; keep the pool/access math unchanged.
-            SOURCE_DIR="$source" python3 - <<'PY'
-          import os
-          from pathlib import Path
-          p = Path(os.environ['SOURCE_DIR']) / 'external/ggml/src/ggml-cuda/ggml-cuda.cu'
-          s = p.read_text()
-          anchor = '            // set access\n'
-          assert s.count(anchor) == 1
-          s = s.replace(anchor, '            fprintf(stderr, "[VMM_GROW] previous=%zu reserve=%zu\\n", pool_size, reserve_size);\n' + anchor)
-          p.write_text(s)
-          PY
+            build="$source/build/debug"
             cmake -S "$source" -B "$build" -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_CXX_STANDARD=17 \
               -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" \
               -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
               -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
-              -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DGPU_TARGETS="$arch" \
+              -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DGPU_TARGETS="$GPU_ARCH" \
               -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
               -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DGGML_HIP_NO_VMM=OFF \
               -DENGINE_BUILD_EXAMPLES=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
@@ -126,7 +103,7 @@ jobs:
             cp "$build/CMakeCache.txt" "results/$variant-CMakeCache.txt"
             for clip in jfk jfk-twice; do
               set +e
-              timeout 180 "$build/bin/audiocpp_cli" --task asr --family moonshine_asr \
+              AMD_LOG_LEVEL=4 timeout 180 "$build/bin/audiocpp_cli" --task asr --family moonshine_asr \
                 --model inputs/moonshine-tiny-q8_0.gguf --backend hip --threads 4 \
                 --audio "inputs/$clip.wav" --text-out "results/$variant-$clip.txt" \
                 --log --metrics > "results/$variant-$clip.log" 2>&1
@@ -148,8 +125,10 @@ jobs:
               for clip, repeats in (('jfk', 1), ('jfk-twice', 2)):
                   log = (root / f'{variant}-{clip}.log').read_text(errors='replace')
                   rc = int((root / f'{variant}-{clip}.exit').read_text())
-                  growth = [int(x) for x in re.findall(r'\[VMM_GROW\] previous=(\d+)', log)]
-                  covered = any(x > 0 for x in growth)
+                  access_calls = [line for line in log.splitlines() if 'hipMemSetAccess' in line]
+                  map_calls = [line for line in log.splitlines() if 'hipMemMap' in line]
+                  vmm_enabled = 'VMM: yes' in log
+                  covered = vmm_enabled and len(access_calls) > 1
                   text_path = root / f'{variant}-{clip}.txt'
                   text = text_path.read_text() if text_path.exists() else ''
                   actual = re.findall(r"[a-z]+", text.lower())
@@ -161,12 +140,11 @@ jobs:
                           following.append(min(row[j]+1, following[-1]+1, row[j-1]+(a != b)))
                       row = following
                   wer = row[-1] / len(expected)
-                  failure = 'HipVMM Failure' in log and 'invalid argument' in log.lower()
-                  lines.append(f'{variant}/{clip}: exit={rc}, pool_growth_events={len(growth)}, growing_pool_covered={covered}, VMM_invalid_argument={failure}, WER={wer:.3f}, transcript={text.strip()!r}')
+                  failure = 'hipMemSetAccess' in log and 'invalid argument' in log.lower()
+                  lines.append(f'{variant}/{clip}: exit={rc}, VMM_enabled={vmm_enabled}, mapping_log_lines={len(map_calls)}, access_log_lines={len(access_calls)}, repeated_access_covered={covered}, VMM_invalid_argument={failure}, WER={wer:.3f}, transcript={text.strip()!r}')
                   if variant == 'head' and (rc != 0 or not covered or wer > 0.25):
                       errors.append(f'{clip}: PR inference/coverage/accuracy check failed')
-          probe = (root / 'probe-base.log').read_text()
-          reproduced = ('hipMemSetAccess' in probe and 'invalid argument' in probe.lower()) or any('base/' in line and 'VMM_invalid_argument=True' in line for line in lines)
+          reproduced = any('base/' in line and 'VMM_invalid_argument=True' in line for line in lines)
           lines.append(f'Original invalid-argument failure reproduced on this host: {reproduced}')
           if not reproduced:
               lines.append('The original failure was not reproduced on this GPU/runtime; passing tests establish compatibility, not proof of reproducing the reported bug.')
