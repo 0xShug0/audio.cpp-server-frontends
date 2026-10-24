@@ -6,16 +6,84 @@ on:
     paths:
       - .github/workflows/hip-vmm-pr1059.yml
   workflow_dispatch:
+    inputs:
+      diagnostics_only:
+        description: Compare bounded transfers without building or running models
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: hip-vmm-pr1059
   cancel-in-progress: false
 
 jobs:
+  network:
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnostics_only
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 5
+    steps:
+      - name: Compare bounded transfers on the same runner
+        timeout-minutes: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          exec > >(tee results/network.log) 2>&1
+          hostname
+          uname -a
+          curl --version
+          python3 - <<'PY'
+          import os
+          for key in ('http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'):
+              print(f'{key}_present={bool(os.environ.get(key))}')
+          PY
+          ip route
+          ip -br link
+          grep '^Tcp:' /proc/net/snmp > results/tcp-before.txt
+          curl -fsSI --connect-timeout 5 --max-time 15 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/0xShug0/audio.cpp-server-frontends/actions/artifacts/12570446738/zip \
+            > results/artifact-headers.txt
+          blob=$(sed -n 's/^[Ll]ocation: //p' results/artifact-headers.txt | tr -d '\r')
+          test -n "$blob"
+          rm results/artifact-headers.txt
+          for target in old-audio new-frontends artifact; do
+            case "$target" in
+              old-audio) url=https://codeload.github.com/0xShug0/audio.cpp/tar.gz/b7b7f1b5958f499c28d6c30d7fcf69737d490bbc ;;
+              new-frontends) url=https://codeload.github.com/0xShug0/audio.cpp-server-frontends/tar.gz/37a7d6018bf82d9546046534d5d0ee680e6201ed ;;
+              artifact) url="$blob" ;;
+            esac
+            for protocol in default ipv4-http1; do
+              args=()
+              if [[ "$protocol" == ipv4-http1 ]]; then args=(--ipv4 --http1.1); fi
+              echo "TARGET=$target MODE=$protocol CAP=1048576 TIMEOUT=20"
+              set +e
+              curl -sS -L "${args[@]}" --connect-timeout 5 --max-time 20 \
+                --range 0-1048575 \
+                -w '%{stderr}http=%{http_code} protocol=%{http_version} remote_ip=%{remote_ip} connect=%{time_connect} tls=%{time_appconnect} first_byte=%{time_starttransfer} total=%{time_total} bytes=%{size_download} speed=%{speed_download}\n' \
+                "$url" 2> "results/$target-$protocol.txt" | head -c 1048576 > /dev/null
+              rc=${PIPESTATUS[0]}
+              set -e
+              cat "results/$target-$protocol.txt"
+              echo "curl_exit=$rc (23 can mean the 1 MiB cap closed the pipe)"
+            done
+          done
+          grep '^Tcp:' /proc/net/snmp > results/tcp-after.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        timeout-minutes: 1
+        with:
+          name: hip-vmm-network-diagnosis
+          path: results/
+          retention-days: 2
   hip-vmm:
+    if: github.event_name != 'workflow_dispatch' || !inputs.diagnostics_only
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
     timeout-minutes: 20
     env:
