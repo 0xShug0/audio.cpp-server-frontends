@@ -16,7 +16,7 @@ provides venv support):
 ```sh
 python3 -m venv rocm-runtime
 rocm-runtime/bin/python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
-export LD_LIBRARY_PATH="$(rocm-runtime/bin/rocm-sdk path --root)/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$(rocm-runtime/bin/python -c 'import os,rocm_sdk; print(os.pathsep.join(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries("amdhip64","hipblas","hipblaslt"))))'):${LD_LIBRARY_PATH:-}"
 ./audiocpp_cli --list-devices
 ./audiocpp_cli --task asr --family moonshine_asr --backend hip --model /path/to/model.gguf --audio /path/to/speech.wav --log --metrics
 ./audiocpp_server --ui --ui-management --backend hip
@@ -27,7 +27,8 @@ Windows PowerShell, after extracting the binary ZIP:
 ```powershell
 py -3 -m venv rocm-runtime
 .\rocm-runtime\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
-$env:PATH = "$(& .\rocm-runtime\Scripts\rocm-sdk.exe path --bin);$env:PATH"
+$rocm = & .\rocm-runtime\Scripts\python.exe -c 'import os,rocm_sdk; print(os.pathsep.join(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries("amdhip64","hipblas","hipblaslt"))))'
+$env:PATH = "$rocm;$env:PATH"
 .\audiocpp_cli.exe --list-devices
 .\audiocpp_cli.exe --task asr --family moonshine_asr --backend hip --model C:\path\to\model.gguf --audio C:\path\to\speech.wav --log --metrics
 .\audiocpp_server.exe --ui --ui-management --backend hip

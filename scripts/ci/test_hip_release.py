@@ -22,7 +22,7 @@ def c_api_test(library, model, audio, output):
     windows = sys.platform == 'win32'
     if windows:
         dll_dir = os.add_dll_directory(str(library))
-        runtime_dir = os.add_dll_directory(os.environ['HIP_RUNTIME_BIN'])
+        runtime_dirs = [os.add_dll_directory(path) for path in os.environ['HIP_RUNTIME_PATHS'].split(os.pathsep)]
     lib = ctypes.CDLL(str(library / ('audiocpp.dll' if windows else 'libaudiocpp.so')))
     pointer = ctypes.c_void_p
     out_pointer = ctypes.POINTER(pointer)
@@ -100,17 +100,19 @@ def main():
         subprocess.run([python, '-m', 'pip', 'install', '--no-cache-dir', '--index-url',
                         'https://stable.repo.amd.com/rocm/whl-next/',
                         'rocm[libraries]==10.0.0'], stdout=log, stderr=subprocess.STDOUT, check=True)
-    sdk = runtime / ('Scripts/rocm-sdk.exe' if windows else 'bin/rocm-sdk')
-    rocm_root = subprocess.check_output([sdk, 'path', '--root'], text=True).strip()
-    rocm_bin = subprocess.check_output([sdk, 'path', '--bin'], text=True).strip()
-    env['PATH'] = rocm_bin + os.pathsep + env['PATH']
+    # The SDK's path command requires devel; this API supports libraries-only installations.
+    discover = "import json, rocm_sdk; print(json.dumps(list(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64', 'hipblas', 'hipblaslt')))))"
+    runtime_paths = json.loads(subprocess.check_output([python, '-c', discover], text=True))
+    runtime_search = os.pathsep.join(runtime_paths)
+    if windows:
+        env['PATH'] = runtime_search + os.pathsep + env['PATH']
     env.pop('CMAKE_PREFIX_PATH', None)
     env.pop('HIP_PATH', None)
     env.pop('ROCM_PATH', None)
     env.pop('GGML_BACKEND_PATH', None)
     if not windows:
-        env['LD_LIBRARY_PATH'] = rocm_root + '/lib'
-    (results / 'runtime.json').write_text(json.dumps(dict(root=rocm_root, bin=rocm_bin), indent=2))
+        env['LD_LIBRARY_PATH'] = runtime_search
+    (results / 'runtime.json').write_text(json.dumps(dict(library_paths=runtime_paths), indent=2))
     scratch = Path(tempfile.mkdtemp(prefix='audiocpp-user-'))
     binary = scratch / 'binary'
     library = scratch / 'library'
@@ -144,6 +146,7 @@ def main():
         for path in (cli, library / 'libs/libaudiocpp.so'):
             dependencies = run(['ldd', path], 'ldd-' + path.name)
             assert 'not found' not in dependencies, dependencies
+            assert '/opt/rocm' not in dependencies, dependencies
     moonshine = root / 'inputs/moonshine-tiny-q8_0.gguf'
     asr = [cli, '--task', 'asr', '--family', 'moonshine_asr', '--model', moonshine,
            '--backend', 'hip', '--threads', '4', '--log', '--metrics']
@@ -185,15 +188,15 @@ def main():
     tts_wer = wer(text, (results / 'qwen-asr.txt').read_text())
     assert tts_wer <= 0.20, tts_wer
     # A separate process loads only the library package and its runtime.
-    env['HIP_RUNTIME_BIN'] = rocm_bin
+    env['HIP_RUNTIME_PATHS'] = runtime_search
     if not windows:
-        env['LD_LIBRARY_PATH'] = str(library / 'libs') + ':' + rocm_root + '/lib'
+        env['LD_LIBRARY_PATH'] = str(library / 'libs') + ':' + runtime_search
     run([sys.executable, Path(__file__).resolve(), '--c-api', library / 'libs', moonshine,
          root / 'inputs/jfk.wav', results / 'c-api-jfk.txt'], 'c-api', cwd=library / 'libs')
     c_api_wer = wer(expected_jfk, (results / 'c-api-jfk.txt').read_text())
     assert c_api_wer <= 0.10, c_api_wer
     if not windows:
-        env['LD_LIBRARY_PATH'] = rocm_root + '/lib'
+        env['LD_LIBRARY_PATH'] = runtime_search
     # Exercise the server with an ordinary model configuration and HTTP request.
     config = results / 'server.json'
     config.write_text(json.dumps(dict(host='127.0.0.1', port=18080, backend='hip', threads=4,
