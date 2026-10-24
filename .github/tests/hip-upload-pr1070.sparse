@@ -1,0 +1,17 @@
+/CMakeLists.txt
+/app/
+/include/
+/src/
+/model_specs/
+/external/ggml/
+/external/sentencepiece/
+!/external/sentencepiece/data/
+!/external/sentencepiece/doc/
+!/external/sentencepiece/python/
+/external/cJSON/
+/external/libyaml/
+/external/llama_tokenizer/
+/external/utf8proc/
+/tools/cmake/
+/tests/perf/
+/webui/native/demo_voices/

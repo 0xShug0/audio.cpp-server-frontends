@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/hip-upload-pr1070.yml
       - .github/tests/hip-upload-pr1070.cpp
+      - .github/tests/hip-upload-pr1070.sparse
   workflow_dispatch:
 permissions:
   contents: read
@@ -16,14 +17,27 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Download pinned audio.cpp and the small test source
+      - name: Partially clone only the required build files
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           mkdir -p results source
-          curl --fail --location --connect-timeout 20 --max-time 120 --retry 1 \
-            -o source.tar.gz https://codeload.github.com/0xShug0/audio.cpp/tar.gz/dd92e32b6e268178ff43f4fa3ca36f0b380491e0 \
-            2>&1 | tee results/source-download.log
-          tar -xzf source.tar.gz --strip-components=1 -C source
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 120 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin \
+              dd92e32b6e268178ff43f4fa3ca36f0b380491e0
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = dd92e32b6e268178ff43f4fa3ca36f0b380491e0
+            git -C source count-objects -vH
+            du -sh source
+          } 2>&1 | tee results/source-download.log
           curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
             -o source/hip-upload-pr1070.cpp \
             "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.cpp"
