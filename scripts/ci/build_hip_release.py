@@ -70,6 +70,7 @@ def main():
                f'-DENGINE_ENABLE_CPU_ALL_VARIANTS={"ON" if windows else "OFF"}',
                '-DENGINE_ENABLE_OPENMP=OFF', '-DGGML_OPENMP=OFF',
                '-DAUDIOCPP_DEPLOYMENT_BUILD=ON', '-DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON',
+               '-DAUDIOCPP_MODEL_SET=full',
                '-DAUDIOCPP_BUILD_C_API=ON', '-DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF',
                '-DENGINE_ENABLE_CUDA_GRAPHS=ON', f'-DAUDIOCPP_VERSION={version}',
                f'-DGPU_TARGETS={targets}', f'-DCMAKE_PREFIX_PATH={rocm_cmake}']
