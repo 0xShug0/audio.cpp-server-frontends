@@ -1,0 +1,146 @@
+name: HIP upload PR 1070 synthetic 256 MiB A-B
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 40
+    env:
+      BASE_REF: dd92e32b6e268178ff43f4fa3ca36f0b380491e0
+      HEAD_REF: 46b2836f7ec5b168a9345f22acdf20e844d705c2
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record AMD environment and fetch pinned source
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          exec > >(tee results/environment.log) 2>&1
+          uname -a
+          id
+          /opt/rocm/bin/hipcc --version
+          /opt/rocm/bin/rocminfo
+          cat /proc/self/cgroup
+          cat /sys/fs/cgroup/memory.max || true
+          cat /sys/fs/cgroup/memory.swap.max || true
+          for variant in base head; do
+            ref="$BASE_REF"
+            [[ "$variant" == head ]] && ref="$HEAD_REF"
+            mkdir "source-$variant"
+            curl -fL --retry 2 --connect-timeout 20 --max-time 180 \
+              "https://codeload.github.com/0xShug0/audio.cpp/tar.gz/$ref" \
+              -o "$variant.tar.gz"
+            tar -xzf "$variant.tar.gz" --strip-components=1 -C "source-$variant"
+            echo "$ref" > "results/$variant-ref.txt"
+          done
+          diff -qr source-base source-head > results/source-diff.txt || test "$?" -eq 1
+          cat results/source-diff.txt
+      - name: Build actual base and PR framework probes
+        run: |
+          set -euo pipefail
+          export PATH="/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH"
+          # One build directory: reuse identical GGML objects, rebuild only the
+          # three PR files. No production behavior or upload functions patched.
+          cp .github/tests/hip_upload_probe.cpp source-base/tests/hip_upload_probe.cpp
+          printf '\nadd_executable(hip_upload_probe tests/hip_upload_probe.cpp)\ntarget_link_libraries(hip_upload_probe PRIVATE engine_runtime)\n' >> source-base/CMakeLists.txt
+          cmake -S source-base -B probe-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
+            -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+            -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ \
+            -DCMAKE_PREFIX_PATH=/opt/rocm -DGPU_TARGETS=gfx1151 \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_METAL=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DENGINE_ENABLE_NEON=OFF -DGGML_HIP_NO_VMM=OFF \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_EXAMPLES=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS= \
+            2>&1 | tee results/configure.log
+          cmake --build probe-build --target hip_upload_probe -j 8 2>&1 | tee results/base-build.log
+          cp probe-build/bin/hip_upload_probe results/base-probe
+          files=(include/engine/framework/core/backend.h src/framework/core/backend.cpp src/framework/assets/tensor_source.cpp)
+          test "$(wc -l < results/source-diff.txt)" -eq 3
+          for file in "${files[@]}"; do
+            cp "source-head/$file" "source-base/$file"
+          done
+          cmake --build probe-build --target hip_upload_probe -j 8 2>&1 | tee results/head-build.log
+          cp probe-build/bin/hip_upload_probe results/head-probe
+          cp probe-build/CMakeCache.txt results/
+      - name: Exercise real file-backed uploads without any model
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          results/head-probe generate synthetic.gguf 2>&1 | tee results/generate.log
+          test "$(stat -c %s synthetic.gguf)" -eq 268435456
+          sha256sum synthetic.gguf > results/input-sha256.txt
+          for variant in base head; do
+            for backend in cpu hip; do
+              set +e
+              timeout --signal=TERM --kill-after=10 120 \
+                "results/$variant-probe" "$backend" synthetic.gguf \
+                > "results/$variant-$backend.log" 2>&1 &
+              pid=$!
+              while kill -0 "$pid" 2>/dev/null; do
+                child=$(pgrep -P "$pid" | head -1)
+                if [[ -n "$child" ]]; then
+                  { date -u +%FT%TZ; grep -E 'VmRSS|RssAnon|RssFile' "/proc/$child/status"; \
+                    for task in /proc/"$child"/task/*/wchan; do printf '%s ' "$task"; cat "$task"; echo; done; \
+                  } >> "results/$variant-$backend-process.log" 2>&1
+                fi
+                sleep 1
+              done
+              wait "$pid"
+              rc=$?
+              set -e
+              echo "$rc" > "results/$variant-$backend.exit"
+              cat "results/$variant-$backend.log"
+            done
+          done
+      - name: Summarize reproduction separately from correctness
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          root = Path('results')
+          lines = ['Input: one 256 MiB synthetic GGUF, no model or inference.', 'Four upload/readback rounds reuse the same file and GPU tensors.']
+          failures = []
+          for variant in ('base', 'head'):
+              for backend in ('cpu', 'hip'):
+                  label = f'{variant}-{backend}'
+                  log = (root / f'{label}.log').read_text(errors='replace') if (root / f'{label}.log').exists() else ''
+                  rc = (root / f'{label}.exit').read_text().strip() if (root / f'{label}.exit').exists() else 'missing'
+                  checked = log.count('VERIFY_OK')
+                  rss = [int(x) for x in re.findall(r'RssFile:\s+(\d+)', log)]
+                  lines.append(f'{label}: exit={rc}, verified_tensors={checked}/12, RssFile_kib={rss}, summary={next((s for s in log.splitlines() if s.startswith("PASS ")), "none")}')
+                  if variant == 'head' and (rc != '0' or checked != 12): failures.append(label)
+          base_exit = root / 'base-hip.exit'
+          if base_exit.exists() and base_exit.read_text().strip() == '0':
+              lines.append('Reported upload stall NOT reproduced with this 256 MiB input. A PR pass establishes small-input compatibility/correctness, not proof of resolving the reported stall.')
+          else:
+              lines.append('Base HIP failed or timed out: inspect process wait channels and errors before classifying this as the reported SVM stall.')
+          report = '\n'.join(lines) + '\n'
+          print(report)
+          (root / 'summary.txt').write_text(report)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out: out.write('```text\n' + report + '```\n')
+          if failures: raise SystemExit('PR probe failures: ' + ', '.join(failures))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-upload-pr1070-results
+          path: |
+            results/*.log
+            results/*.txt
+            results/*.exit
+          retention-days: 7
