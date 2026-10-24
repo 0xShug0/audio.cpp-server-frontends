@@ -85,7 +85,8 @@ def main():
         command += [f'-DCMAKE_C_COMPILER={llvm / "clang.exe"}',
                     f'-DCMAKE_CXX_COMPILER={llvm / "clang++.exe"}',
                     '-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types',
-                    '-DCMAKE_CXX_FLAGS=-Wno-language-extension-token',
+                    # cpp-httplib uses MSVC integer spellings on Windows.
+                    f'-DCMAKE_CXX_FLAGS=-isystem "{(source / "external/cpp-httplib").as_posix()}"',
                     '-DGGML_HIP_NO_VMM=ON']
     else:
         llvm = Path(subprocess.check_output([str(Path(rocm_bin) / 'hipconfig'), '-l'], env=env, text=True).strip())
