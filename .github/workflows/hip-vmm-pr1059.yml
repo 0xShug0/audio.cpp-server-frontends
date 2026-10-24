@@ -10,147 +10,162 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: hip-vmm-pr1059
+  cancel-in-progress: false
+
 jobs:
-  prepare:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: 0xShug0/audio.cpp
-          ref: c8365f391307a97bfe133e0872e632fe572ecace
-          path: source-base
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          repository: ZeroDot1/audio.cpp
-          ref: b5528d605eae00a82a6140b9358582add712c351
-          path: source-head
-          persist-credentials: false
-      - name: Stage pinned production sources and tiny inputs
-        run: |
-          set -euo pipefail
-          mkdir -p payload/inputs payload/results
-          for variant in base head; do
-            git -C "source-$variant" rev-parse HEAD > "payload/results/$variant-ref.txt"
-            tar --exclude=./.git --exclude=./docs --exclude=./assets --exclude=./resources \
-              --exclude=./reference --exclude=./webui --exclude=./models \
-              -czf "payload/source-$variant.tar.gz" -C "source-$variant" .
-          done
-          curl -fL --retry 2 --max-time 180 -o payload/inputs/moonshine-tiny-q8_0.gguf \
-            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Moonshine-Streaming-GGUF/moonshine-streaming-tiny-q8_0.gguf
-          curl -fL --retry 2 --max-time 60 -o payload/inputs/jfk.wav \
-            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
-          python3 - <<'PY'
-          import wave
-          with wave.open('payload/inputs/jfk.wav', 'rb') as source:
-              params, frames = source.getparams(), source.readframes(source.getnframes())
-          with wave.open('payload/inputs/jfk-twice.wav', 'wb') as target:
-              target.setparams(params)
-              target.writeframes(frames * 2)
-          PY
-          sha256sum payload/inputs/* > payload/results/input-sha256.txt
-          du -h payload/*.tar.gz payload/inputs/*
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hip-vmm-inputs
-          path: payload/
-          compression-level: 0
-          retention-days: 2
   hip-vmm:
-    needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       BASE_REF: c8365f391307a97bfe133e0872e632fe572ecace
       HEAD_REF: b5528d605eae00a82a6140b9358582add712c351
+      POOL_SOURCE: external/ggml/src/ggml-cuda/ggml-cuda.cu
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Check out audio.cpp only
+        uses: actions/checkout@v4
+        timeout-minutes: 3
         with:
-          name: hip-vmm-inputs
-      - name: Extract pinned sources
+          repository: 0xShug0/audio.cpp
+          ref: c8365f391307a97bfe133e0872e632fe572ecace
+          path: source
+          submodules: false
+          persist-credentials: false
+          filter: blob:none
+          sparse-checkout: |
+            app
+            examples
+            external
+            include
+            model_specs
+            scripts
+            src
+            tests
+            tools
+            webui/native/demo_voices
+      - name: Check HIP environment and fetch tiny inputs
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for variant in base head; do
-            mkdir -p "source-$variant"
-            tar -xzf "source-$variant.tar.gz" -C "source-$variant"
-          done
-      - name: Check HIP environment
-        run: |
-          set -euo pipefail
-          mkdir -p results
-          exec > >(tee results/environment.log) 2>&1
-          uname -a
-          lscpu
-          ls -l /dev/kfd /dev/dri
+          mkdir -p results inputs
+          exec > >(tee results/setup.log) 2>&1
           rocm="${ROCM_PATH:-/opt/rocm}"
           if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then
             rocm="$(hipconfig --path)"
           fi
-          test -x "$rocm/bin/hipcc"
           "$rocm/bin/hipcc" --version
-          cmake --version
-          ninja --version
-          echo "ROCM_PATH=$rocm" >> "$GITHUB_ENV"
-          echo "$rocm/bin" >> "$GITHUB_PATH"
-          echo "$rocm/llvm/bin" >> "$GITHUB_PATH"
           arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
           [[ "$arch" =~ ^gfx[0-9a-f]+$ ]]
+          echo "ROCM_PATH=$rocm" >> "$GITHUB_ENV"
           echo "GPU_ARCH=$arch" >> "$GITHUB_ENV"
-      - name: Build and test actual GGML pool on base and PR
+          printf 'arch=%s\n' "$arch"
+          test "$(git -C source rev-parse HEAD)" = "$BASE_REF"
+          printf '%s\n' "$BASE_REF" > results/base-ref.txt
+          printf '%s\n' "$HEAD_REF" > results/head-ref.txt
+          curl -fsSL --connect-timeout 15 --max-time 120 -o inputs/moonshine-tiny-q8_0.gguf \
+            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Moonshine-Streaming-GGUF/moonshine-streaming-tiny-q8_0.gguf
+          curl -fsSL --connect-timeout 15 --max-time 30 -o inputs/jfk.wav \
+            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+          curl -fsSL --connect-timeout 15 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github.diff' \
+            -o results/pr.patch \
+            "https://api.github.com/repos/ZeroDot1/audio.cpp/compare/$BASE_REF...$HEAD_REF"
+          test "$(git -C source apply --numstat ../results/pr.patch | cut -f3)" = "$POOL_SOURCE"
+          curl -fsSL --connect-timeout 15 --max-time 30 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/ZeroDot1/audio.cpp/contents/$POOL_SOURCE?ref=$HEAD_REF" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])' > results/head-pool-blob.txt
+          python3 - <<'PY'
+          import wave
+          with wave.open('inputs/jfk.wav', 'rb') as source:
+              params, frames = source.getparams(), source.readframes(source.getnframes())
+          with wave.open('inputs/jfk-twice.wav', 'wb') as target:
+              target.setparams(params)
+              target.writeframes(frames * 2)
+          PY
+          sha256sum inputs/* > results/input-sha256.txt
+          du -h inputs/* results/pr.patch
+      - name: Build baseline once and incrementally rebuild PR
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           ulimit -c 0
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DGPU_TARGETS="$GPU_ARCH" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DGGML_HIP_NO_VMM=OFF \
+            -DENGINE_BUILD_EXAMPLES=ON -DENGINE_BUILD_TESTS=OFF \
+            -DENGINE_BUILD_MODEL_TESTS=OFF -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
+            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DAUDIOCPP_SERVER_FRONTEND_MODULES= \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=moonshine_asr \
+            2>&1 | tee results/configure.log
+          cp source/build/debug/CMakeCache.txt results/CMakeCache.txt
           for variant in base head; do
-            source="source-$variant"
-            build="$source/build/debug"
-            cmake -S "$source" -B "$build" -G Ninja \
-              -DCMAKE_BUILD_TYPE=Debug \
-              -DCMAKE_CXX_STANDARD=17 \
-              -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" \
-              -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
-              -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
-              -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DGPU_TARGETS="$GPU_ARCH" \
-              -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
-              -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DGGML_HIP_NO_VMM=OFF \
-              -DENGINE_BUILD_EXAMPLES=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
-              -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=moonshine_asr \
-              2>&1 | tee "results/$variant-configure.log"
-            cmake --build "$build" --target audiocpp_cli -j 8 2>&1 | tee "results/$variant-build.log"
-            cp "$build/CMakeCache.txt" "results/$variant-CMakeCache.txt"
+            if [[ "$variant" == head ]]; then
+              git -C source apply --check ../results/pr.patch
+              git -C source apply ../results/pr.patch
+              test "$(git -C source hash-object "$POOL_SOURCE")" = "$(cat results/head-pool-blob.txt)"
+            fi
+            # Identical logging on both versions; no allocation or access logic is replaced.
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path('source/external/ggml/src/ggml-cuda/ggml-cuda.cu')
+          s = p.read_text()
+          anchor = '            // set access\n'
+          assert s.count(anchor) == 1
+          trace = '            GGML_LOG_INFO("hip.vmm.grow previous_bytes=%zu reserve_bytes=%zu\\n", pool_size, reserve_size);\n'
+          p.write_text(s.replace(anchor, trace + anchor))
+          PY
+            timeout 360 cmake --build source/build/debug --target audiocpp_cli -j 8 \
+              2>&1 | tee "results/$variant-build.log"
             for clip in jfk jfk-twice; do
               set +e
-              AMD_LOG_LEVEL=4 timeout 180 "$build/bin/audiocpp_cli" --task asr --family moonshine_asr \
+              timeout 30 source/build/debug/bin/audiocpp_cli --task asr --family moonshine_asr \
                 --model inputs/moonshine-tiny-q8_0.gguf --backend hip --threads 4 \
                 --audio "inputs/$clip.wav" --text-out "results/$variant-$clip.txt" \
                 --log --metrics > "results/$variant-$clip.log" 2>&1
               rc=$?
               set -e
               echo "$rc" > "results/$variant-$clip.exit"
-              tail -n 30 "results/$variant-$clip.log"
+              tail -n 20 "results/$variant-$clip.log"
             done
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path('source/external/ggml/src/ggml-cuda/ggml-cuda.cu')
+          s = p.read_text()
+          trace = '            GGML_LOG_INFO("hip.vmm.grow previous_bytes=%zu reserve_bytes=%zu\\n", pool_size, reserve_size);\n'
+          assert s.count(trace) == 1
+          p.write_text(s.replace(trace, ''))
+          PY
           done
-      - name: Check coverage, reproduction and ASR accuracy
+      - name: Check actual pool growth and transcription
         run: |
           python3 - <<'PY'
-          import re
+          import os, re
           from pathlib import Path
           root = Path('results')
           reference = 'and so my fellow americans ask not what your country can do for you ask what you can do for your country'.split()
-          lines, errors = [], []
+          lines, errors, reproduced = [], [], False
           for variant in ('base', 'head'):
               for clip, repeats in (('jfk', 1), ('jfk-twice', 2)):
                   log = (root / f'{variant}-{clip}.log').read_text(errors='replace')
                   rc = int((root / f'{variant}-{clip}.exit').read_text())
-                  access_calls = [line for line in log.splitlines() if 'hipMemSetAccess' in line]
-                  map_calls = [line for line in log.splitlines() if 'hipMemMap' in line]
-                  vmm_enabled = 'VMM: yes' in log
-                  covered = vmm_enabled and len(access_calls) > 1
-                  text_path = root / f'{variant}-{clip}.txt'
-                  text = text_path.read_text() if text_path.exists() else ''
-                  actual = re.findall(r"[a-z]+", text.lower())
+                  growth = [int(x) for x in re.findall(r'hip.vmm.grow previous_bytes=(\d+)', log)]
+                  covered = any(x > 0 for x in growth)
+                  path = root / f'{variant}-{clip}.txt'
+                  text = path.read_text() if path.exists() else ''
+                  actual = re.findall(r'[a-z]+', text.lower())
                   expected = reference * repeats
                   row = list(range(len(actual) + 1))
                   for i, a in enumerate(expected, 1):
@@ -159,25 +174,28 @@ jobs:
                           following.append(min(row[j]+1, following[-1]+1, row[j-1]+(a != b)))
                       row = following
                   wer = row[-1] / len(expected)
-                  failure = 'hipMemSetAccess' in log and 'invalid argument' in log.lower()
-                  lines.append(f'{variant}/{clip}: exit={rc}, VMM_enabled={vmm_enabled}, mapping_log_lines={len(map_calls)}, access_log_lines={len(access_calls)}, repeated_access_covered={covered}, VMM_invalid_argument={failure}, WER={wer:.3f}, transcript={text.strip()!r}')
-                  if variant == 'head' and (rc != 0 or not covered or wer > 0.25):
-                      errors.append(f'{clip}: PR inference/coverage/accuracy check failed')
-          reproduced = any('base/' in line and 'VMM_invalid_argument=True' in line for line in lines)
-          lines.append(f'Original invalid-argument failure reproduced on this host: {reproduced}')
+                  wall = re.search(r'^metrics.wall_ms=([0-9.]+)$', log, re.M)
+                  failure = rc != 0 and 'HipVMM Failure: invalid argument' in log
+                  reproduced |= variant == 'base' and failure and covered
+                  lines.append(f'{variant}/{clip}: exit={rc}, pool_growth={covered}, VMM_failure={failure}, WER={wer:.3f}, transcript={text.strip()!r}')
+                  if wall:
+                      lines.append(f'  session.wall_ms={wall.group(1)} (source: CLI metrics.wall_ms)')
+                  if variant == 'head' and (rc != 0 or not covered or wer > 0.25 or wall is None):
+                      errors.append(f'{clip}: PR inference, pool-growth, accuracy or timing coverage failed')
+          lines.append(f'Original production-code failure reproduced: {reproduced}')
           if not reproduced:
-              lines.append('The original failure was not reproduced on this GPU/runtime; passing tests establish compatibility, not proof of reproducing the reported bug.')
-          lines.extend(errors)
-          report = '\n'.join(lines) + '\n'
+              lines.append('Compatibility only: this run did not reproduce the reported baseline failure.')
+          report = '\n'.join(lines + errors) + '\n'
           print(report)
           (root / 'summary.txt').write_text(report)
-          with open(__import__('os').environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('```text\n' + report + '```\n')
           if errors:
               raise SystemExit(1)
           PY
-      - name: Upload all evidence
+      - name: Upload evidence
         if: always()
+        timeout-minutes: 2
         uses: actions/upload-artifact@v4
         with:
           name: hip-vmm-pr1059-${{ github.run_attempt }}
