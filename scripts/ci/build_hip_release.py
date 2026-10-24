@@ -104,7 +104,7 @@ def main():
              '-BuildType', 'Release', '-NoNativeCpu', '-DeploymentBuild',
              '-NativeModelManager', '-Graphs', '-ConfigureOnly'], 'configure-hip')
     run(command, 'configure')
-    run(['cmake', '--build', build, '--parallel', str(min(os.cpu_count() or 2, 8)),
+    run(['cmake', '--build', build, '--parallel', str(min(os.cpu_count() or 2, 16)),
          '--target', 'audiocpp_cli', 'audiocpp_server', 'audiocpp_gguf', 'audiocpp'], 'build')
     shutil.copy2(build / 'CMakeCache.txt', logs / 'CMakeCache.txt')
     binary_dir = build / 'bin'
