@@ -41,6 +41,9 @@ jobs:
             tar -czf "inputs/$variant.tar.gz" -C staged .
             rm -rf staged
           done
+          cd inputs
+          gzip -t base.tar.gz head.tar.gz
+          sha256sum base.tar.gz head.tar.gz hip_upload_probe.cpp > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: pr1070-source
@@ -51,19 +54,27 @@ jobs:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
     timeout-minutes: 40
+    env:
+      PROBE_ROOT: ${{ runner.temp }}/pr1070-${{ github.run_id }}-${{ github.run_attempt }}
     defaults:
       run:
         shell: bash
     steps:
+      - name: Create isolated probe directory
+        run: mkdir -p "$PROBE_ROOT"
       - uses: actions/download-artifact@v4
         timeout-minutes: 5
         with:
           name: pr1070-source
+          path: ${{ env.PROBE_ROOT }}
       - name: Record AMD environment and unpack pinned source
         run: |
           set -euo pipefail
+          cd "$PROBE_ROOT"
           mkdir -p results
           exec > >(tee results/environment.log) 2>&1
+          sha256sum -c SHA256SUMS
+          gzip -t base.tar.gz head.tar.gz
           uname -a
           id
           /opt/rocm/bin/hipcc --version
@@ -83,6 +94,7 @@ jobs:
       - name: Build actual base and PR framework probes
         run: |
           set -euo pipefail
+          cd "$PROBE_ROOT"
           export PATH="/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH"
           # One build directory: reuse identical GGML objects, rebuild only the
           # three PR files. No production behavior or upload functions patched.
@@ -115,6 +127,7 @@ jobs:
       - name: Exercise real file-backed uploads without any model
         run: |
           set -euo pipefail
+          cd "$PROBE_ROOT"
           ulimit -c 0
           results/head-probe generate synthetic.gguf 2>&1 | tee results/generate.log
           test "$(stat -c %s synthetic.gguf)" -eq 268435456
@@ -145,10 +158,12 @@ jobs:
       - name: Summarize reproduction separately from correctness
         if: always()
         run: |
+          cd "$PROBE_ROOT"
           python3 - <<'PY'
           import os, re
           from pathlib import Path
           root = Path('results')
+          root.mkdir(exist_ok=True)
           lines = ['Input: one 256 MiB synthetic GGUF, no model or inference.', 'Four upload/readback rounds reuse the same file and GPU tensors.']
           failures = []
           for variant in ('base', 'head'):
@@ -178,13 +193,13 @@ jobs:
         with:
           name: hip-upload-pr1070-results
           path: |
-            results/*.log
-            results/*.txt
-            results/*.exit
+            ${{ env.PROBE_ROOT }}/results/*.log
+            ${{ env.PROBE_ROOT }}/results/*.txt
+            ${{ env.PROBE_ROOT }}/results/*.exit
           retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: hip-upload-pr1070-probes
-          path: results/*-probe
+          path: ${{ env.PROBE_ROOT }}/results/*-probe
           retention-days: 3
