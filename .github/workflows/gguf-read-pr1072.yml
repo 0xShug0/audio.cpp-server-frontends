@@ -1,0 +1,50 @@
+name: GGUF numeric read PR 1072 CPU A-B
+on:
+  push:
+    branches: [test/gguf-pr1072]
+    paths:
+      - .github/workflows/gguf-read-pr1072.yml
+      - .github/tests/gguf-pr1072/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: harness
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: dd92e32b6e268178ff43f4fa3ca36f0b380491e0
+          path: main
+          submodules: false
+          sparse-checkout: external/ggml
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: 939705db702aee9c8c3ecc24df17a11f86918ffe
+          path: pr
+          submodules: false
+          sparse-checkout: external/ggml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and measure production GGUF reader
+        run: python harness/.github/tests/gguf-pr1072/run.py
+      - name: Upload logs and timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gguf-pr1072-${{ matrix.os }}
+          path: results/
+          retention-days: 7
