@@ -34,6 +34,12 @@ jobs:
             curl -fL --retry 2 --connect-timeout 20 --max-time 180 \
               "https://codeload.github.com/0xShug0/audio.cpp/tar.gz/$ref" \
               -o "inputs/$variant.tar.gz"
+            mkdir staged
+            tar -xzf "inputs/$variant.tar.gz" --strip-components=1 -C staged
+            # Upload probing needs no bundled weights, audio assets or docs.
+            rm -rf staged/assets staged/docs
+            tar -czf "inputs/$variant.tar.gz" -C staged .
+            rm -rf staged
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -50,6 +56,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/download-artifact@v4
+        timeout-minutes: 5
         with:
           name: pr1070-source
       - name: Record AMD environment and unpack pinned source
@@ -154,7 +161,9 @@ jobs:
                   lines.append(f'{label}: exit={rc}, verified_tensors={checked}/12, RssFile_kib={rss}, summary={next((s for s in log.splitlines() if s.startswith("PASS ")), "none")}')
                   if variant == 'head' and (rc != '0' or checked != 12): failures.append(label)
           base_exit = root / 'base-hip.exit'
-          if base_exit.exists() and base_exit.read_text().strip() == '0':
+          if not base_exit.exists():
+              lines.append('Base HIP upload test was not executed; this is a harness/environment failure, not a PR result.')
+          elif base_exit.read_text().strip() == '0':
               lines.append('Reported upload stall NOT reproduced with this 256 MiB input. A PR pass establishes small-input compatibility/correctness, not proof of resolving the reported stall.')
           else:
               lines.append('Base HIP failed or timed out: inspect process wait channels and errors before classifying this as the reported SVM stall.')
