@@ -1,0 +1,95 @@
+name: HIP argsort issue 1071 A-B
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-argsort-1071.yml
+      - .github/tests/hip-argsort-1071.cpp
+      - .github/tests/hip-argsort-1071.patch
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  argsort:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fetch only vendored GGML and the probe
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 120 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin \
+              e9303b76983993cc59576bf6d16d8a0635ae4d85
+            git -C source sparse-checkout set external/ggml
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = e9303b76983993cc59576bf6d16d8a0635ae4d85
+            du -sh source
+          } 2>&1 | tee results/source-download.log
+          for file in hip-argsort-1071.cpp hip-argsort-1071.patch; do
+            curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+              -o "results/$file" "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/$file"
+          done
+          cp results/hip-argsort-1071.cpp source/external/ggml/
+          printf '\nadd_executable(hip_argsort_probe hip-argsort-1071.cpp)\ntarget_link_libraries(hip_argsort_probe PRIVATE ggml)\nfind_package(Threads REQUIRED)\nadd_executable(argsort_backend_ops tests/test-backend-ops.cpp)\ntarget_link_libraries(argsort_backend_ops PRIVATE ggml Threads::Threads)\n' >> source/external/ggml/CMakeLists.txt
+      - name: Build and run real GGML before and after the fix
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          echo "arch=$arch" | tee -a results/environment.log
+          cmake -S source/external/ggml -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DGGML_HIP=ON -DGGML_CUDA=OFF -DGGML_VULKAN=OFF \
+            -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
+            -DGGML_CUDA_GRAPHS=ON \
+            2>&1 | tee results/configure.log
+          for variant in main patched; do
+            if [[ "$variant" == patched ]]; then
+              git -C source apply --ignore-space-change --check ../results/hip-argsort-1071.patch
+              git -C source apply --ignore-space-change ../results/hip-argsort-1071.patch
+            fi
+            cmake --build source/build/debug --target hip_argsort_probe argsort_backend_ops -j 8 \
+              2>&1 | tee "results/$variant-build.log"
+            timeout 180 source/build/debug/bin/hip_argsort_probe --log small \
+              2>&1 | tee "results/$variant-small.log"
+            if [[ "$variant" == main ]]; then
+              set +e
+              timeout 60 source/build/debug/bin/hip_argsort_probe --log repro > results/main-repro.log 2>&1
+              rc=$?
+              set -e
+              echo "$rc" | tee results/main-repro.exit
+              cat results/main-repro.log
+              test "$rc" -eq 134
+            else
+              timeout 180 source/build/debug/bin/hip_argsort_probe --log large \
+                2>&1 | tee results/patched-large.log
+              timeout 180 source/build/debug/bin/argsort_backend_ops test -o ARGSORT -b ROCm0 \
+                2>&1 | tee results/patched-backend-ops.log
+              grep -q '65536 rows=6 order=desc correct=true' results/patched-large.log
+              grep -q '4096 rows=1 order=desc correct=true' results/patched-large.log
+            fi
+          done
+      - name: Upload logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-argsort-1071-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
