@@ -66,6 +66,12 @@ def main():
                CMAKE_PREFIX_PATH=rocm_cmake, PATH=rocm_bin + os.pathsep + env['PATH'])
     if not windows:
         env['LD_LIBRARY_PATH'] = str(rocm / 'lib') + ':' + env.get('LD_LIBRARY_PATH', '')
+    else:
+        # Use the activated toolchain, including Visual Studio Build Tools installs.
+        redist = Path(env['VCToolsRedistDir']) / 'x64/Microsoft.VC143.CRT'
+        for name in ('vcruntime140.dll', 'msvcp140.dll'):
+            if not (redist / name).is_file():
+                raise RuntimeError(f'missing compiler redistributable: {redist / name}')
     build = output / 'build'
     command = ['cmake', '-S', source, '-B', build, '-G', 'Ninja',
                '-DCMAKE_BUILD_TYPE=Release', '-DENGINE_ENABLE_HIP=ON',
@@ -132,9 +138,6 @@ def main():
             # Match the HIP DLL to the build toolchain, not a driver-installed DLL.
             for name in ('amdhip64_7.dll', 'rocm_kpack.dll', 'amd_comgr.dll'):
                 shutil.copy2(Path(rocm_bin) / name, destination / name)
-            vswhere = Path(os.environ['ProgramFiles(x86)']) / 'Microsoft Visual Studio/Installer/vswhere.exe'
-            vs = Path(subprocess.check_output([vswhere, '-latest', '-property', 'installationPath'], text=True).strip())
-            redist = sorted((vs / 'VC/Redist/MSVC').glob('*/x64/Microsoft.VC143.CRT'))[-1]
             for pattern in ('vcruntime140*.dll', 'msvcp140*.dll'):
                 for dll in redist.glob(pattern):
                     shutil.copy2(dll, destination / dll.name)
