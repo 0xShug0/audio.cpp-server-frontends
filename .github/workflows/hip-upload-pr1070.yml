@@ -28,6 +28,7 @@ jobs:
           {
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
             git -C source config remote.origin.promisor true
             git -C source config remote.origin.partialclonefilter blob:none
             timeout 120 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin \
