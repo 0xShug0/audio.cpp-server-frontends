@@ -82,19 +82,22 @@ jobs:
         os: ${{ fromJSON(inputs.platforms || '["ubuntu-24.04", "windows-2022"]') }}
     runs-on: ${{ fromJSON(matrix.os == 'windows-2022' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
     timeout-minutes: 35
+    env:
+      USER_TEST_ROOT: ${{ runner.temp }}/hip-release-user-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: hip-release-${{ runner.os }}
-          path: packages
+          path: ${{ env.USER_TEST_ROOT }}/packages
           run-id: ${{ inputs.artifact_run_id || github.run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@v4
         with:
           name: hip-user-inputs
-          path: inputs
+          path: ${{ env.USER_TEST_ROOT }}/inputs
       - name: Run extracted CLI, server and C library as a user
         shell: bash
+        working-directory: ${{ env.USER_TEST_ROOT }}
         env:
           EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
@@ -105,4 +108,4 @@ jobs:
         if: always()
         with:
           name: hip-user-results-${{ runner.os }}
-          path: results/
+          path: ${{ env.USER_TEST_ROOT }}/results/

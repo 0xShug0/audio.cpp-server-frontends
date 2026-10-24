@@ -27,7 +27,7 @@ Windows PowerShell, after extracting the binary ZIP:
 ```powershell
 py -3 -m venv rocm-runtime
 .\rocm-runtime\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
-$rocm = & .\rocm-runtime\Scripts\python.exe -c 'import os,rocm_sdk; print(os.pathsep.join(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries("amdhip64","hipblas","hipblaslt"))))'
+$rocm = & .\rocm-runtime\Scripts\python.exe -c "import os,rocm_sdk; print(os.pathsep.join(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64','hipblas','hipblaslt'))))"
 $env:PATH = "$rocm;$env:PATH"
 .\audiocpp_cli.exe --list-devices
 .\audiocpp_cli.exe --task asr --family moonshine_asr --backend hip --model C:\path\to\model.gguf --audio C:\path\to\speech.wav --log --metrics
