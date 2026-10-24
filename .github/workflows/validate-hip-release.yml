@@ -49,23 +49,8 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Building clean audio.cpp $sha" >> "$GITHUB_STEP_SUMMARY"
-      - name: Stage user test inputs and harness (no source checkout on AMD)
-        run: |
-          set -euo pipefail
-          mkdir inputs
-          cp scripts/ci/test_hip_release.py inputs/
-          curl -fL --retry 3 --max-time 300 -o inputs/moonshine-tiny-q8_0.gguf https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Moonshine-Streaming-GGUF/moonshine-streaming-tiny-q8_0.gguf
-          curl -fL --retry 3 --max-time 60 -o inputs/jfk.wav https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
-          cd inputs
-          sha256sum *.gguf *.wav > SHA256SUMS
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hip-user-inputs
-          path: inputs/
-          compression-level: 0
   packages:
     needs: prepare
-    if: inputs.artifact_run_id == ''
     uses: ./.github/workflows/release-hip.yml
     with:
       source_repository: 0xShug0/audio.cpp
@@ -73,43 +58,4 @@ jobs:
       version: validation-${{ github.run_number }}
       gpu_targets: ${{ inputs.gpu_targets || 'gfx1151' }}
       platforms: ${{ inputs.platforms || '["ubuntu-24.04", "windows-2022"]' }}
-  user-test:
-    needs: [prepare, packages]
-    if: always() && needs.prepare.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.platforms || '["ubuntu-24.04", "windows-2022"]') }}
-    runs-on: ${{ fromJSON(matrix.os == 'windows-2022' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
-    timeout-minutes: 35
-    steps:
-      - name: Prepare isolated user directory
-        shell: bash
-        run: |
-          root="$RUNNER_TEMP/hip-release-user-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          mkdir -p "$root"
-          printf 'USER_TEST_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
-        with:
-          name: hip-release-${{ runner.os }}
-          path: ${{ env.USER_TEST_ROOT }}/packages
-          run-id: ${{ inputs.artifact_run_id || github.run_id }}
-          github-token: ${{ github.token }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: hip-user-inputs
-          path: ${{ env.USER_TEST_ROOT }}/inputs
-      - name: Run extracted CLI, server and C library as a user
-        shell: bash
-        working-directory: ${{ env.USER_TEST_ROOT }}
-        env:
-          EXPECTED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          mkdir -p results
-          ${{ runner.os == 'Windows' && 'python' || 'python3' }} inputs/test_hip_release.py 2>&1 | tee results/validation.log
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: hip-user-results-${{ runner.os }}
-          path: ${{ env.USER_TEST_ROOT }}/results/
+      artifact_run_id: ${{ inputs.artifact_run_id || '' }}

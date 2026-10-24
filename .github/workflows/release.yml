@@ -958,6 +958,9 @@ jobs:
   hip:
     needs: [check-release, get-version]
     if: ${{ needs.check-release.outputs.should_release == 'true' }}
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/release-hip.yml
     with:
       source_repository: ${{ inputs.source_repository || github.repository }}
