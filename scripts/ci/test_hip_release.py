@@ -99,7 +99,7 @@ def main():
     with (results / 'runtime-install.log').open('w') as log:
         subprocess.run([python, '-m', 'pip', 'install', '--no-cache-dir', '--index-url',
                         'https://stable.repo.amd.com/rocm/whl-next/',
-                        'rocm[libraries]==10.0.0'], stdout=log, stderr=subprocess.STDOUT, check=True)
+                        'rocm[libraries,device-gfx1151]==10.0.0'], stdout=log, stderr=subprocess.STDOUT, check=True)
     # The SDK's path command requires devel; this API supports libraries-only installations.
     discover = "import json, rocm_sdk; print(json.dumps(list(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64', 'hipblas', 'hipblaslt')))))"
     runtime_paths = json.loads(subprocess.check_output([python, '-c', discover], text=True))

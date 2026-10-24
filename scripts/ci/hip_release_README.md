@@ -9,13 +9,16 @@ Models are downloaded separately from audio-cpp on Hugging Face.
 Install the matching runtime below, or use an existing ROCm @ROCM_VERSION@
 installation. The compiler/devel package is only needed to build. Python with
 venv/pip support is needed for the runtime installation commands.
+The commands below select Strix Halo (`device-gfx1151`). Replace that extra with
+your GPU's [device extra](https://github.com/ROCm/TheRock/blob/main/RELEASES.md#supported-python-device--install-extras).
+The device package contains the BLAS GPU kernels; `libraries` alone is insufficient.
 
 Linux, after extracting the binary archive (Ubuntu's `python3-venv` package
 provides venv support):
 
 ```sh
 python3 -m venv rocm-runtime
-rocm-runtime/bin/python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
+rocm-runtime/bin/python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,device-gfx1151]==@ROCM_VERSION@'
 export LD_LIBRARY_PATH="$(rocm-runtime/bin/python -c 'import os,rocm_sdk; print(os.pathsep.join(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries("amdhip64","hipblas","hipblaslt"))))'):${LD_LIBRARY_PATH:-}"
 ./audiocpp_cli --list-devices
 ./audiocpp_cli --task asr --family moonshine_asr --backend hip --model /path/to/model.gguf --audio /path/to/speech.wav --log --metrics
@@ -26,7 +29,7 @@ Windows PowerShell, after extracting the binary ZIP:
 
 ```powershell
 py -3 -m venv rocm-runtime
-.\rocm-runtime\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
+.\rocm-runtime\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,device-gfx1151]==@ROCM_VERSION@'
 $rocm = & .\rocm-runtime\Scripts\python.exe -c "import os,rocm_sdk; print(os.pathsep.join(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64','hipblas','hipblaslt'))))"
 $env:PATH = "$rocm;$env:PATH"
 .\audiocpp_cli.exe --list-devices
