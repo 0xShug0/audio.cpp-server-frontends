@@ -23,7 +23,10 @@ constexpr size_t file_bytes = 256 * mib;
 const std::vector<size_t> sizes = {192 * mib + 4, 63 * mib - 4, mib - 4096};
 
 uint32_t expected(size_t tensor, size_t word) {
-    return 0x3f000000U | ((uint32_t(word) * 2654435761U ^ uint32_t(tensor) * 73244475U) & 0x007fffffU);
+    uint32_t x = uint32_t(word) ^ (uint32_t(tensor) * 73244475U);
+    x = (x ^ (x >> 16)) * 0x7feb352dU;
+    x = (x ^ (x >> 15)) * 0x846ca68bU;
+    return 0x3f000000U | ((x ^ (x >> 16)) & 0x007fffffU);
 }
 
 void rss(const std::string & label) {
