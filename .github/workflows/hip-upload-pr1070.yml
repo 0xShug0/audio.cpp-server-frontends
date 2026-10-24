@@ -1,6 +1,11 @@
 name: HIP upload PR 1070 synthetic 256 MiB A-B
 
 on:
+  push:
+    branches: [experiment/halo-kernels]
+    paths:
+      - .github/workflows/hip-upload-pr1070.yml
+      - .github/tests/hip_upload_probe.cpp
   workflow_dispatch:
 
 permissions:
