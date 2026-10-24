@@ -1,0 +1,79 @@
+name: HIP mapped tensor upload PR 1070 A-B
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-upload-pr1070.yml
+      - .github/tests/hip-upload-pr1070.cpp
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upload:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download pinned audio.cpp and the small test source
+        run: |
+          set -euo pipefail
+          mkdir -p results source
+          curl --fail --location --connect-timeout 20 --max-time 120 --retry 1 \
+            -o source.tar.gz https://codeload.github.com/0xShug0/audio.cpp/tar.gz/dd92e32b6e268178ff43f4fa3ca36f0b380491e0 \
+            2>&1 | tee results/source-download.log
+          tar -xzf source.tar.gz --strip-components=1 -C source
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o source/hip-upload-pr1070.cpp \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.cpp"
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -H 'Accept: application/vnd.github.diff' \
+            -o results/pr.patch \
+            https://api.github.com/repos/0xShug0/audio.cpp/compare/dd92e32b6e268178ff43f4fa3ca36f0b380491e0...46b2836f7ec5b168a9345f22acdf20e844d705c2
+          printf '\nadd_executable(hip_upload_pr1070 hip-upload-pr1070.cpp)\ntarget_link_libraries(hip_upload_pr1070 PRIVATE engine_runtime)\n' >> source/CMakeLists.txt
+      - name: Build and test the actual framework upload path
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          echo "arch=$arch" | tee -a results/environment.log
+          cat /sys/fs/cgroup/memory.max | tee -a results/environment.log
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS= \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
+            2>&1 | tee results/configure.log
+          for variant in main pr; do
+            if [[ "$variant" == pr ]]; then
+              (cd source && patch --batch -p1 < ../results/pr.patch)
+            fi
+            cmake --build source/build/debug --target hip_upload_pr1070 -j 8 \
+              2>&1 | tee "results/$variant-build.log"
+            set +e
+            timeout 180 source/build/debug/bin/hip_upload_pr1070 --log "$PWD/upload-fixture.gguf" \
+              > "results/$variant-upload.log" 2>&1
+            rc=$?
+            set -e
+            echo "$rc" > "results/$variant.exit"
+            cat "results/$variant-upload.log"
+          done
+          test "$(cat results/pr.exit)" -eq 0
+          test "$(grep -c 'exact_bytes=true' results/pr-upload.log)" -eq 21
+      - name: Upload test logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-upload-pr1070-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
