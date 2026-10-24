@@ -85,7 +85,7 @@ def main():
         command += [f'-DCMAKE_C_COMPILER={llvm / "clang.exe"}',
                     f'-DCMAKE_CXX_COMPILER={llvm / "clang++.exe"}',
                     '-DCMAKE_C_FLAGS=-Wno-error=incompatible-pointer-types',
-                    '-DCMAKE_CXX_FLAGS=-Wno-error=language-extension-token',
+                    '-DCMAKE_CXX_FLAGS=-Wno-language-extension-token',
                     '-DGGML_HIP_NO_VMM=ON']
     else:
         llvm = Path(subprocess.check_output([str(Path(rocm_bin) / 'hipconfig'), '-l'], env=env, text=True).strip())
@@ -97,6 +97,12 @@ def main():
     if shutil.which('ccache'):
         command += ['-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
                     '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache']
+    if windows:
+        # Reuse the project's HIP toolchain setup; release-only options follow.
+        run(['pwsh', '-NoProfile', '-File', source / 'scripts/build_windows_hip.ps1',
+             '-RocmPath', rocm, '-GpuTargets', targets, '-BuildDir', build,
+             '-BuildType', 'Release', '-NoNativeCpu', '-DeploymentBuild',
+             '-NativeModelManager', '-Graphs', '-ConfigureOnly'], 'configure-hip')
     run(command, 'configure')
     run(['cmake', '--build', build, '--parallel', str(min(os.cpu_count() or 2, 8)),
          '--target', 'audiocpp_cli', 'audiocpp_server', 'audiocpp_gguf', 'audiocpp'], 'build')
