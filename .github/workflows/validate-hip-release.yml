@@ -82,9 +82,13 @@ jobs:
         os: ${{ fromJSON(inputs.platforms || '["ubuntu-24.04", "windows-2022"]') }}
     runs-on: ${{ fromJSON(matrix.os == 'windows-2022' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
     timeout-minutes: 35
-    env:
-      USER_TEST_ROOT: ${{ runner.temp }}/hip-release-user-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Prepare isolated user directory
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/hip-release-user-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$root"
+          printf 'USER_TEST_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: hip-release-${{ runner.os }}
