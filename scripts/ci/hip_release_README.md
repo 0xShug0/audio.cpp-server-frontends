@@ -46,4 +46,5 @@ so the GGML backend plugins are discovered.
 
 The native model manager and UI are included. Models using eSpeak additionally
 need eSpeak-ng and its data installed. No models or Python inference engine are
-bundled. `SHA256SUMS` verifies the archive downloads.
+bundled. The CI artifact includes `SHA256SUMS`; the release integration names
+these checksum files `hip-release-Linux-SHA256SUMS` and `hip-release-Windows-SHA256SUMS`.
