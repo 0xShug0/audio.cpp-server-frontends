@@ -32,6 +32,10 @@ def main():
         raise ValueError('version must be an archive-safe version string')
     rocm_version = os.environ['ROCM_VERSION']
     targets = os.environ['GPU_TARGETS']
+    if targets == 'release':
+        # Match llama.cpp's ROCm 10 release coverage, including Strix Halo.
+        common = 'gfx1010;gfx1011;gfx1012;gfx1030;gfx1031;gfx1032;gfx1033;gfx1034;gfx1035;gfx1036;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1200;gfx1201'
+        targets = common + ';gfx1153' if windows else 'gfx908;gfx90a;gfx942;gfx950;' + common
     if not targets or any(not arch.startswith('gfx') or not arch.isalnum() for arch in targets.split(';')):
         raise ValueError('GPU_TARGETS must be semicolon-separated gfx architecture names')
     env = os.environ.copy()

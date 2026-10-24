@@ -14,7 +14,7 @@ on:
         required: true
       gpu_targets:
         type: string
-        default: 'gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201'
+        default: release
       platforms:
         type: string
         default: '["ubuntu-24.04", "windows-2022"]'

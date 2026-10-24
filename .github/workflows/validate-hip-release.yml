@@ -8,7 +8,7 @@ on:
         type: string
         default: ''
       gpu_targets:
-        description: 'Compiled architectures (use the release list for final multi-architecture validation)'
+        description: 'Compiled architectures, or release for the full per-OS release list'
         type: string
         default: 'gfx1151'
       artifact_run_id:
