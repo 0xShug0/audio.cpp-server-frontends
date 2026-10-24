@@ -11,7 +11,53 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: c8365f391307a97bfe133e0872e632fe572ecace
+          path: source-base
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ZeroDot1/audio.cpp
+          ref: b5528d605eae00a82a6140b9358582add712c351
+          path: source-head
+          persist-credentials: false
+      - name: Stage pinned production sources and tiny inputs
+        run: |
+          set -euo pipefail
+          mkdir -p payload/inputs payload/results
+          for variant in base head; do
+            git -C "source-$variant" rev-parse HEAD > "payload/results/$variant-ref.txt"
+            tar --exclude=./.git --exclude=./docs --exclude=./assets --exclude=./resources \
+              --exclude=./reference --exclude=./webui --exclude=./models \
+              -czf "payload/source-$variant.tar.gz" -C "source-$variant" .
+          done
+          curl -fL --retry 2 --max-time 180 -o payload/inputs/moonshine-tiny-q8_0.gguf \
+            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Moonshine-Streaming-GGUF/moonshine-streaming-tiny-q8_0.gguf
+          curl -fL --retry 2 --max-time 60 -o payload/inputs/jfk.wav \
+            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+          python3 - <<'PY'
+          import wave
+          with wave.open('payload/inputs/jfk.wav', 'rb') as source:
+              params, frames = source.getparams(), source.readframes(source.getnframes())
+          with wave.open('payload/inputs/jfk-twice.wav', 'wb') as target:
+              target.setparams(params)
+              target.writeframes(frames * 2)
+          PY
+          sha256sum payload/inputs/* > payload/results/input-sha256.txt
+          du -h payload/*.tar.gz payload/inputs/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hip-vmm-inputs
+          path: payload/
+          compression-level: 0
+          retention-days: 2
   hip-vmm:
+    needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
     timeout-minutes: 45
     env:
@@ -21,15 +67,16 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Download workflow test source
-        timeout-minutes: 5
+      - uses: actions/download-artifact@v4
+        with:
+          name: hip-vmm-inputs
+      - name: Extract pinned sources
         run: |
           set -euo pipefail
-          mkdir -p results
-          curl --fail --location --connect-timeout 20 --max-time 120 --retry 1 \
-            -o harness.tar.gz "https://codeload.github.com/$GITHUB_REPOSITORY/tar.gz/$GITHUB_SHA" \
-            2>&1 | tee results/harness-download.log
-          tar -xzf harness.tar.gz --strip-components=1
+          for variant in base head; do
+            mkdir -p "source-$variant"
+            tar -xzf "source-$variant.tar.gz" -C "source-$variant"
+          done
       - name: Check HIP environment
         run: |
           set -euo pipefail
@@ -52,34 +99,6 @@ jobs:
           arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
           [[ "$arch" =~ ^gfx[0-9a-f]+$ ]]
           echo "GPU_ARCH=$arch" >> "$GITHUB_ENV"
-      - name: Fetch pinned source and small model
-        run: |
-          set -euo pipefail
-          for variant in base head; do
-            repo=0xShug0/audio.cpp
-            ref="$BASE_REF"
-            if [[ "$variant" == head ]]; then repo=ZeroDot1/audio.cpp; ref="$HEAD_REF"; fi
-            mkdir -p "source-$variant"
-            curl --fail --location --connect-timeout 20 --max-time 120 --retry 1 \
-              -o "$variant.tar.gz" "https://codeload.github.com/$repo/tar.gz/$ref" \
-              2>&1 | tee "results/$variant-source-download.log"
-            tar -xzf "$variant.tar.gz" --strip-components=1 -C "source-$variant"
-            printf '%s/%s\n' "$repo" "$ref" > "results/$variant-ref.txt"
-          done
-          mkdir -p inputs
-          curl --fail --location --connect-timeout 20 --max-time 180 --retry 2 -o inputs/moonshine-tiny-q8_0.gguf \
-            https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Moonshine-Streaming-GGUF/moonshine-streaming-tiny-q8_0.gguf
-          curl --fail --location --connect-timeout 20 --max-time 60 --retry 2 -o inputs/jfk.wav \
-            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
-          sha256sum inputs/* | tee results/input-sha256.txt
-          python3 - <<'PY'
-          import wave
-          with wave.open('inputs/jfk.wav', 'rb') as source:
-              params, frames = source.getparams(), source.readframes(source.getnframes())
-          with wave.open('inputs/jfk-twice.wav', 'wb') as target:
-              target.setparams(params)
-              target.writeframes(frames * 2)
-          PY
       - name: Build and test actual GGML pool on base and PR
         run: |
           set -euo pipefail
