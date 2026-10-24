@@ -68,7 +68,7 @@ def main():
         env['LD_LIBRARY_PATH'] = str(rocm / 'lib') + ':' + env.get('LD_LIBRARY_PATH', '')
     else:
         # Use the activated toolchain, including Visual Studio Build Tools installs.
-        redist = Path(env['VCToolsRedistDir']) / 'x64/Microsoft.VC143.CRT'
+        redist = Path(os.environ['VCToolsRedistDir']) / 'x64/Microsoft.VC143.CRT'
         for name in ('vcruntime140.dll', 'msvcp140.dll'):
             if not (redist / name).is_file():
                 raise RuntimeError(f'missing compiler redistributable: {redist / name}')
