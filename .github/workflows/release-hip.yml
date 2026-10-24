@@ -55,15 +55,14 @@ jobs:
           python-version: '3.12'
       - name: Linux build dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libssl-dev patchelf
+        run: python -m pip install ninja patchelf
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - uses: ggml-org/ccache-action@v1.2.24
         with:
           key: hip-release-${{ runner.os }}-rocm10
           max-size: 2G
+          install: binary
       - name: Build and package full deployment
         run: python release-flow/scripts/ci/build_hip_release.py --source source --output dist
       - uses: actions/upload-artifact@v4
