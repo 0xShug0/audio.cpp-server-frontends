@@ -1,20 +1,22 @@
 # audio.cpp HIP/ROCm prebuilt
 
 Requires an AMD GPU supported by ROCm @ROCM_VERSION@, its compatible driver,
-and the matching ROCm runtime libraries. Linux requires Ubuntu 24.04 or newer.
+and the matching ROCm runtime libraries. Linux requires Ubuntu 24.04 or newer
+and an AVX2/FMA/F16C-capable x64 CPU. Windows selects a CPU implementation at runtime.
 `BUILD.json` lists the compiled GPU architectures and exact source revision.
 Models are downloaded separately from audio-cpp on Hugging Face.
 
-Install the matching runtime (the compiler/devel package is only needed to build):
+Install the matching runtime below, or use an existing ROCm @ROCM_VERSION@
+installation. The compiler/devel package is only needed to build. Python with
+venv/pip support is needed for the runtime installation commands.
+
+Linux, after extracting the binary archive (Ubuntu's `python3-venv` package
+provides venv support):
 
 ```sh
-python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
-```
-
-Linux, after extracting the binary archive:
-
-```sh
-export LD_LIBRARY_PATH="$(rocm-sdk path --root)/lib:${LD_LIBRARY_PATH:-}"
+python3 -m venv rocm-runtime
+rocm-runtime/bin/python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
+export LD_LIBRARY_PATH="$(rocm-runtime/bin/rocm-sdk path --root)/lib:${LD_LIBRARY_PATH:-}"
 ./audiocpp_cli --list-devices
 ./audiocpp_cli --task asr --family moonshine_asr --backend hip --model /path/to/model.gguf --audio /path/to/speech.wav --log --metrics
 ./audiocpp_server --ui --ui-management --backend hip
@@ -23,7 +25,9 @@ export LD_LIBRARY_PATH="$(rocm-sdk path --root)/lib:${LD_LIBRARY_PATH:-}"
 Windows PowerShell, after extracting the binary ZIP:
 
 ```powershell
-$env:PATH = "$(rocm-sdk path --bin);$env:PATH"
+py -3 -m venv rocm-runtime
+.\rocm-runtime\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries]==@ROCM_VERSION@'
+$env:PATH = "$(& .\rocm-runtime\Scripts\rocm-sdk.exe path --bin);$env:PATH"
 .\audiocpp_cli.exe --list-devices
 .\audiocpp_cli.exe --task asr --family moonshine_asr --backend hip --model C:\path\to\model.gguf --audio C:\path\to\speech.wav --log --metrics
 .\audiocpp_server.exe --ui --ui-management --backend hip

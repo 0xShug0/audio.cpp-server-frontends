@@ -61,7 +61,8 @@ def main():
     command = ['cmake', '-S', source, '-B', build, '-G', 'Ninja',
                '-DCMAKE_BUILD_TYPE=Release', '-DENGINE_ENABLE_HIP=ON',
                '-DENGINE_ENABLE_CUDA=OFF', '-DENGINE_ENABLE_VULKAN=OFF',
-               '-DENGINE_ENABLE_NATIVE_CPU=OFF', '-DENGINE_ENABLE_CPU_ALL_VARIANTS=ON',
+               '-DENGINE_ENABLE_NATIVE_CPU=OFF',
+               f'-DENGINE_ENABLE_CPU_ALL_VARIANTS={"ON" if windows else "OFF"}',
                '-DENGINE_ENABLE_OPENMP=OFF', '-DGGML_OPENMP=OFF',
                '-DAUDIOCPP_DEPLOYMENT_BUILD=ON', '-DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON',
                '-DAUDIOCPP_BUILD_C_API=ON', '-DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF',
@@ -77,7 +78,10 @@ def main():
                     '-DGGML_HIP_NO_VMM=ON']
     else:
         llvm = Path(subprocess.check_output([str(Path(rocm_bin) / 'hipconfig'), '-l'], env=env, text=True).strip())
+        # Fish Audio directly calls a HIP backend symbol; use the supported
+        # linked-backend build on Linux rather than changing model code.
         command += [f'-DCMAKE_HIP_COMPILER={llvm / "clang"}',
+                    '-DGGML_AVX2=ON', '-DGGML_FMA=ON', '-DGGML_F16C=ON',
                     '-DCMAKE_INSTALL_RPATH=$ORIGIN', '-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON']
     if shutil.which('ccache'):
         command += ['-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
@@ -87,14 +91,15 @@ def main():
          '--target', 'audiocpp_cli', 'audiocpp_server', 'audiocpp_gguf', 'audiocpp'], 'build')
     shutil.copy2(build / 'CMakeCache.txt', logs / 'CMakeCache.txt')
     binary_dir = build / 'bin'
-    if not list(binary_dir.glob('ggml-hip*.dll' if windows else 'libggml-hip.so*')):
+    if not (list(binary_dir.glob('ggml-hip*.dll')) if windows else list(build.rglob('libggml-hip.a'))):
         raise RuntimeError('HIP backend library was not produced')
     suffix = 'windows-x64' if windows else 'ubuntu-x64'
     label = f'audio-{version}-{{kind}}-{suffix}-rocm{rocm_version}'
     manifest = dict(source_repository=os.environ.get('SOURCE_REPOSITORY', '0xShug0/audio.cpp'),
                     source_sha=subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip(),
                     rocm_version=rocm_version, gpu_targets=targets.split(';'),
-                    cpu='portable runtime dispatch', deployment=True, full_model_build=True)
+                    cpu='runtime dispatch' if windows else 'AVX2/FMA/F16C',
+                    hip_backend='dynamic' if windows else 'linked', deployment=True, full_model_build=True)
     archives = []
     for kind in ('bin', 'lib'):
         stage = output / label.format(kind=kind)

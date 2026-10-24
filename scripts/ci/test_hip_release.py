@@ -95,7 +95,7 @@ def main():
     subprocess.run([sys.executable, '-m', 'venv', runtime], check=True)
     python = runtime / ('Scripts/python.exe' if windows else 'bin/python')
     with (results / 'runtime-install.log').open('w') as log:
-        subprocess.run([python, '-m', 'pip', 'install', '--index-url',
+        subprocess.run([python, '-m', 'pip', 'install', '--no-cache-dir', '--index-url',
                         'https://stable.repo.amd.com/rocm/whl-next/',
                         'rocm[libraries]==10.0.0'], stdout=log, stderr=subprocess.STDOUT, check=True)
     sdk = runtime / ('Scripts/rocm-sdk.exe' if windows else 'bin/rocm-sdk')
@@ -138,7 +138,7 @@ def main():
     devices = run([cli, '--list-devices'], 'devices')
     assert re.search(r'ROCm|HIP|Radeon', devices, re.I), devices
     if not windows:
-        for path in (cli, binary / 'libggml-hip.so', library / 'libs/libaudiocpp.so'):
+        for path in (cli, library / 'libs/libaudiocpp.so'):
             dependencies = run(['ldd', path], 'ldd-' + path.name)
             assert 'not found' not in dependencies, dependencies
     moonshine = root / 'inputs/moonshine-tiny-q8_0.gguf'
@@ -163,7 +163,9 @@ def main():
     qwen = root / 'inputs/qwen3-customvoice-q8_0.gguf'
     url = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/6f45df32f8fb283e4cfce3d3e1cb7688986fcbe6/Qwen3-TTS-12Hz-1.7B-CustomVoice-GGUF/qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf?download=true'
     download_start = time.monotonic()
-    urllib.request.urlretrieve(url, qwen)
+    with (results / 'qwen-download.log').open('w') as log:
+        subprocess.run(['curl', '--fail', '--location', '--retry', '3', '--max-time', '300',
+                        '--output', str(qwen), url], stdout=log, stderr=subprocess.STDOUT, check=True)
     with qwen.open('rb') as file:
         assert hashlib.file_digest(file, 'sha256').hexdigest() == 'c8ac3f94b6e73f137c0e7ecc9270bc8faec7a476ff799b87e48844d1d0987ac3'
     download_sec = time.monotonic() - download_start
