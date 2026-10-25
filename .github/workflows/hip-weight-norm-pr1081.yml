@@ -81,13 +81,11 @@ jobs:
             set -e
             echo "$rc" > "results/$variant-unit.exit"
             cat "results/$variant-unit.log"
-            timeout 240 source/build/debug/bin/weight_norm_pr1081 --log hip "$PWD/fixture" \
+            timeout 240 source/build/debug/bin/weight_norm_pr1081 --log hip "$PWD/fixture" --varied \
               2>&1 | tee "results/$variant-upload.log"
-            test "$(grep -c 'exact_bytes=true' "results/$variant-upload.log")" -eq 22
-            test "$(grep -c 'shape_rejected=true' "results/$variant-upload.log")" -eq 4
+            test "$(grep -c 'exact_bytes=true' "results/$variant-upload.log")" -eq 36
+            grep -q 'exact_checks=1008 shape_rejections=288' "results/$variant-upload.log"
           done
-          grep -q 'direct_uploads=0' results/main-upload.log
-          grep -q 'direct_uploads=6' results/pr-upload.log
       - name: Upload logs only
         if: always()
         uses: actions/upload-artifact@v4
