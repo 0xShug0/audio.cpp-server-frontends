@@ -1,5 +1,10 @@
 name: HIP weight norm uploads PR 1081 A-B
 on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-weight-norm-pr1081.yml
+      - .github/tests/weight-norm-pr1081.cpp
   workflow_dispatch:
 permissions:
   contents: read
