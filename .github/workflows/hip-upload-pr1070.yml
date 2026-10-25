@@ -11,7 +11,12 @@ permissions:
   contents: read
 jobs:
   upload:
-    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [linux, windows]
+    runs-on: ${{ fromJSON(matrix.os == 'windows' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
     timeout-minutes: 40
     defaults:
       run:
@@ -29,12 +34,15 @@ jobs:
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             git -C source config http.version HTTP/1.1
+            git -C source config core.autocrlf false
+            git -C source config http.lowSpeedLimit 1024
+            git -C source config http.lowSpeedTime 60
             git -C source config remote.origin.promisor true
             git -C source config remote.origin.partialclonefilter blob:none
-            timeout 120 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin \
+            git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin \
               dd92e32b6e268178ff43f4fa3ca36f0b380491e0
             git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
-            timeout 600 git -C source checkout --detach FETCH_HEAD
+            git -C source checkout --detach FETCH_HEAD
             test "$(git -C source rev-parse HEAD)" = dd92e32b6e268178ff43f4fa3ca36f0b380491e0
             git -C source count-objects -vH
             du -sh source
@@ -47,7 +55,11 @@ jobs:
             -o results/pr.patch \
             https://api.github.com/repos/0xShug0/audio.cpp/compare/dd92e32b6e268178ff43f4fa3ca36f0b380491e0...46b2836f7ec5b168a9345f22acdf20e844d705c2
           printf '\nadd_executable(hip_upload_pr1070 hip-upload-pr1070.cpp)\ntarget_link_libraries(hip_upload_pr1070 PRIVATE engine_runtime)\n' >> source/CMakeLists.txt
-      - name: Build and test the actual framework upload path
+          printf '\nif(WIN32)\n target_link_libraries(hip_upload_pr1070 PRIVATE psapi)\nendif()\n' >> source/CMakeLists.txt
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Build and pressure-test real framework uploads on Linux
+        if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           ulimit -c 0
@@ -57,8 +69,16 @@ jobs:
           arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
           echo "arch=$arch" | tee -a results/environment.log
           cat /proc/self/cgroup /proc/meminfo | tee -a results/environment.log
+          if sudo -n true 2>/dev/null; then
+            scope=(sudo -n systemd-run)
+          else
+            scope=(systemd-run --user)
+          fi
+          printf 'memory-limit launcher: %s\n' "${scope[*]}" | tee -a results/environment.log
+          "${scope[@]}" --wait --pipe --unit="audiocpp1070-preflight-$GITHUB_RUN_ID" \
+            -p MemoryMax=12G -p MemorySwapMax=0 /usr/bin/true
           cmake -S source -B source/build/debug -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 \
             -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
             -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
             -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
@@ -75,8 +95,15 @@ jobs:
             fi
             cmake --build source/build/debug --target hip_upload_pr1070 -j 8 \
               2>&1 | tee "results/$variant-build.log"
+            if [[ "$variant" == main ]]; then
+              source/build/debug/bin/hip_upload_pr1070 --log "$PWD/upload-fixture.gguf" --prepare \
+                2>&1 | tee results/fixture.log
+            fi
             set +e
-            timeout 180 source/build/debug/bin/hip_upload_pr1070 --log "$PWD/upload-fixture.gguf" \
+            "${scope[@]}" --wait --pipe --unit="audiocpp1070-$GITHUB_RUN_ID-$variant" \
+              -p MemoryMax=12G -p MemorySwapMax=0 -p RuntimeMaxSec=180 -p TimeoutStopSec=5 \
+              --setenv="LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" \
+              "$PWD/source/build/debug/bin/hip_upload_pr1070" --log "$PWD/upload-fixture.gguf" --pressure \
               > "results/$variant-upload.log" 2>&1
             rc=$?
             set -e
@@ -84,11 +111,86 @@ jobs:
             cat "results/$variant-upload.log"
           done
           test "$(cat results/pr.exit)" -eq 0
-          test "$(grep -c 'exact_bytes=true' results/pr-upload.log)" -eq 21
+          test "$(grep -c 'exact_bytes=true' results/pr-upload.log)" -eq 69
+      - name: Configure and pressure-test real framework uploads on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rocm = $env:HIP_PATH
+          if (!$rocm) {
+            $compiler = Get-ChildItem 'C:\Program Files\AMD\ROCm\*\bin\clang++.exe', 'C:\TheRock\build\lib\llvm\bin\clang++.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($compiler) {
+              $bin = $compiler.Directory.FullName
+              $rocm = if ($bin -like '*\lib\llvm\bin') { [IO.Path]::GetFullPath("$bin\..\..\..") } else { [IO.Path]::GetFullPath("$bin\..") }
+            }
+          }
+          if (!$rocm) {
+            python -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,devel]==10.0.0'
+            if ($LASTEXITCODE -ne 0) { throw 'ROCm SDK installation failed' }
+            rocm-sdk init
+            if ($LASTEXITCODE -ne 0) { throw 'ROCm SDK initialization failed' }
+            $rocm = (rocm-sdk path --root).Trim()
+            $rocmCmake = (rocm-sdk path --cmake).Trim()
+            $rocmBin = (rocm-sdk path --bin).Trim()
+          } else {
+            $rocmCmake = $rocm
+            $rocmBin = Join-Path $rocm bin
+          }
+          $llvm = @("$rocm\bin", "$rocm\lib\llvm\bin") | Where-Object { Test-Path "$_\clang++.exe" } | Select-Object -First 1
+          if (!$llvm) { throw "ROCm compiler missing under $rocm" }
+          $env:HIP_PATH = $rocm
+          $env:ROCM_PATH = $rocm
+          $env:HIP_PLATFORM = 'amd'
+          $env:PATH = "$llvm;$rocmBin;$rocm\bin;$env:PATH"
+          if (Test-Path "$rocm\lib\llvm\amdgcn\bitcode") {
+            $env:HIP_DEVICE_LIB_PATH = "$rocm\lib\llvm\amdgcn\bitcode"
+            $env:LLVM_PATH = "$rocm\lib\llvm"
+          }
+          & "$llvm\clang++.exe" --version | Tee-Object results/environment.log
+          Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion | Out-String | Tee-Object -Append results/environment.log
+          "ROCm=$rocm" | Tee-Object -Append results/environment.log
+          cmake -S source -B source/build/debug -G Ninja `
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 `
+            "-DCMAKE_C_COMPILER=$llvm/clang.exe" "-DCMAKE_CXX_COMPILER=$llvm/clang++.exe" `
+            "-DCMAKE_PREFIX_PATH=$rocmCmake" -DGPU_TARGETS=gfx1151 `
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF `
+            -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF `
+            -DGGML_HIP_NO_VMM=ON -DAUDIOCPP_MODEL_SET=custom '-DAUDIOCPP_MODELS=' `
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF `
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF 2>&1 | Tee-Object results/configure.log
+          if ($LASTEXITCODE -ne 0) { throw 'Configure failed' }
+          $fixture = Join-Path $PWD 'upload-fixture.gguf'
+          $exe = Join-Path $PWD 'source/build/debug/bin/hip_upload_pr1070.exe'
+          foreach ($variant in @('main', 'pr')) {
+            if ($variant -eq 'pr') {
+              git -C source apply ../results/pr.patch
+              if ($LASTEXITCODE -ne 0) { throw 'PR patch did not apply' }
+            }
+            cmake --build source/build/debug --target hip_upload_pr1070 -j 8 2>&1 | Tee-Object "results/$variant-build.log"
+            if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+            if ($variant -eq 'main') {
+              & $exe --log $fixture --prepare 2>&1 | Tee-Object results/fixture.log
+              if ($LASTEXITCODE -ne 0) { throw 'Fixture creation failed' }
+            }
+            $process = Start-Process -FilePath $exe -ArgumentList @('--log', "`"$fixture`"", '--pressure') -PassThru -NoNewWindow -RedirectStandardOutput "results/$variant-upload.log" -RedirectStandardError "results/$variant-stderr.log"
+            if (!$process.WaitForExit(180000)) {
+              Stop-Process -Id $process.Id -Force
+              $process.WaitForExit()
+              $code = 124
+            } else { $code = $process.ExitCode }
+            "$code" | Set-Content "results/$variant.exit"
+            Get-Content "results/$variant-upload.log", "results/$variant-stderr.log"
+          }
+          if ([int](Get-Content results/pr.exit) -ne 0) { throw 'PR upload failed' }
+          if ((Select-String -Path results/pr-upload.log -Pattern 'exact_bytes=true').Count -ne 69) { throw 'Incomplete PR byte verification' }
+      - name: Remove synthetic weights
+        if: always()
+        run: rm -f upload-fixture.gguf
       - name: Upload test logs only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hip-upload-pr1070-${{ github.run_attempt }}
+          name: hip-upload-pr1070-${{ runner.os }}-${{ github.run_attempt }}
           path: results/
           retention-days: 7
