@@ -58,8 +58,12 @@ int main(int argc, char ** argv) {
     }
 #ifndef _WIN32
     // Charge fresh file faults to the limited test cgroup, not the fixture writer.
-    const int fd = open(file.c_str(), O_RDONLY);
+    const int fd = open(file.c_str(), mode == "--prepare" ? O_RDWR : O_RDONLY);
     if (fd < 0) throw std::runtime_error("Cannot open fixture to evict clean page cache");
+    if (mode == "--prepare" && fsync(fd) != 0) {
+        close(fd);
+        throw std::runtime_error("Cannot sync fixture before clean page-cache eviction");
+    }
     const int advice = posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
     close(fd);
     if (advice != 0) throw std::runtime_error("Cannot request clean page-cache eviction");
@@ -68,6 +72,7 @@ int main(int argc, char ** argv) {
         std::cout << "fixture.prepared=true tensor_count=" << sizes.size() << std::endl;
         return 0;
     }
+    std::string cgroup_root;
     if (pressure) {
         constexpr uint64_t limit = uint64_t{12} * 1024 * 1024 * 1024;
 #ifdef _WIN32
@@ -88,6 +93,7 @@ int main(int argc, char ** argv) {
         }
         if (group.empty()) throw std::runtime_error("Cannot identify test cgroup");
         const std::string root = "/sys/fs/cgroup" + group;
+        cgroup_root = root;
         std::ifstream memory_max(root + "/memory.max");
         uint64_t actual_limit = 0;
         memory_max >> actual_limit;
@@ -136,6 +142,13 @@ int main(int argc, char ** argv) {
         for (std::string line; std::getline(status, line);) {
             if (line.rfind("RssFile:", 0) == 0 || line.rfind("RssAnon:", 0) == 0 || line.rfind("VmRSS:", 0) == 0)
                 std::cout << line << std::endl;
+        }
+        if (pressure) {
+            std::ifstream current(cgroup_root + "/memory.current");
+            uint64_t bytes = 0;
+            current >> bytes;
+            if (!current) throw std::runtime_error("Cannot read cgroup memory accounting");
+            std::cout << "memory.cgroup_current_bytes=" << bytes << std::endl;
         }
 #endif
     }
