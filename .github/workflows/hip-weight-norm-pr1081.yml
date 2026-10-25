@@ -1,0 +1,92 @@
+name: HIP weight norm uploads PR 1081 A-B
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upload:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Partially clone required audio.cpp source only
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          printf '\n/tests/unittests/\n' >> results/source.sparse
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 120 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin \
+              44c566f96b87e3f77b37fba64d54c22d5e14a04e
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            git -C source rev-parse HEAD
+            du -sh source
+          } 2>&1 | tee results/source-download.log
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o source/tests/unittests/test_gguf_tensor_source.cpp \
+            https://raw.githubusercontent.com/0xShug0/audio.cpp/655b223545c09a24f984283d495eb7035fb43da3/tests/unittests/test_gguf_tensor_source.cpp
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o source/weight-norm-pr1081.cpp \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/weight-norm-pr1081.cpp"
+          printf '\nadd_executable(weight_norm_pr1081 weight-norm-pr1081.cpp)\ntarget_link_libraries(weight_norm_pr1081 PRIVATE engine_runtime)\n' >> source/CMakeLists.txt
+          printf '\nadd_executable(gguf_tensor_source_test tests/unittests/test_gguf_tensor_source.cpp)\ntarget_include_directories(gguf_tensor_source_test PRIVATE tests/unittests)\ntarget_link_libraries(gguf_tensor_source_test PRIVATE engine_runtime ggml)\n' >> source/CMakeLists.txt
+      - name: Test real framework uploads before and after the PR
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          echo "arch=$arch" | tee -a results/environment.log
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS= \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
+            2>&1 | tee results/configure.log
+          for variant in main pr; do
+            if [[ "$variant" == pr ]]; then
+              curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+                -o source/src/framework/assets/weight_norm_folding.cpp \
+                https://raw.githubusercontent.com/0xShug0/audio.cpp/655b223545c09a24f984283d495eb7035fb43da3/src/framework/assets/weight_norm_folding.cpp
+            fi
+            cmake --build source/build/debug --target weight_norm_pr1081 gguf_tensor_source_test -j 8 \
+              2>&1 | tee "results/$variant-build.log"
+            set +e
+            timeout 180 source/build/debug/bin/gguf_tensor_source_test > "results/$variant-unit.log" 2>&1
+            rc=$?
+            set -e
+            echo "$rc" > "results/$variant-unit.exit"
+            cat "results/$variant-unit.log"
+            timeout 240 source/build/debug/bin/weight_norm_pr1081 --log hip "$PWD/fixture" \
+              2>&1 | tee "results/$variant-upload.log"
+            test "$(grep -c 'exact_bytes=true' "results/$variant-upload.log")" -eq 22
+            test "$(grep -c 'shape_rejected=true' "results/$variant-upload.log")" -eq 4
+          done
+          grep -q 'direct_uploads=0' results/main-upload.log
+          grep -q 'direct_uploads=6' results/pr-upload.log
+      - name: Upload logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-weight-norm-pr1081-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
