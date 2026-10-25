@@ -26,10 +26,10 @@ int main(int argc, char ** argv) {
     ggml_time_init();
     const auto started = ggml_time_us();
     const std::string mode = argc == 4 ? argv[3] : "";
-    if (!mode.empty() && mode != "--prepare" && mode != "--pressure") return 2;
-    const bool pressure = !mode.empty();
+    if (!mode.empty() && mode != "--prepare" && mode != "--pressure" && mode != "--unlimited") return 2;
+    const bool pressure = mode == "--pressure";
     std::vector<size_t> sizes = {16, 64, 65, 128, 256};
-    if (pressure) sizes.insert(sizes.end(), 64, 256);
+    if (!mode.empty()) sizes.insert(sizes.end(), 64, 256);
     else sizes.insert(sizes.end(), 16, 128);
     constexpr size_t MiB = 1024 * 1024;
     std::vector<unsigned char> pattern(MiB);
@@ -122,8 +122,11 @@ int main(int argc, char ** argv) {
         const auto begin = ggml_time_us();
         source->set_backend_tensor(tensor, "weight_" + std::to_string(i), engine::assets::TensorStorageType::Native,
                                    {static_cast<int64_t>(sizes[i] * MiB / 4)});
+        engine::debug::trace_log_scalar("upload.set_done", i);
         ggml_backend_synchronize(execution.backend());
+        engine::debug::trace_log_scalar("upload.sync_done", i);
         const auto elapsed = ggml_time_us() - begin;
+        engine::debug::trace_log_scalar("upload.readback_begin", i);
         for (size_t offset = 0; offset < ggml_nbytes(tensor); offset += MiB) {
             ggml_backend_tensor_get(tensor, received.data(), offset, received.size());
             if (received != pattern) throw std::runtime_error("Uploaded tensor bytes differ at index " + std::to_string(i));

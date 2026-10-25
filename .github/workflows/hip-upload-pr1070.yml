@@ -7,6 +7,11 @@ on:
       - .github/tests/hip-upload-pr1070.cpp
       - .github/tests/hip-upload-pr1070.sparse
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Runner OS list as JSON'
+        default: '["linux", "windows"]'
+        type: string
 permissions:
   contents: read
 jobs:
@@ -15,7 +20,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        os: [linux, windows]
+        os: ${{ fromJSON(inputs.platforms || '["linux", "windows"]') }}
     runs-on: ${{ fromJSON(matrix.os == 'windows' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
     timeout-minutes: 40
     defaults:
@@ -173,17 +178,30 @@ jobs:
               & $exe --log $fixture --prepare 2>&1 | Tee-Object results/fixture.log
               if ($LASTEXITCODE -ne 0) { throw 'Fixture creation failed' }
             }
-            $process = Start-Process -FilePath $exe -ArgumentList @('--log', "`"$fixture`"", '--pressure') -PassThru -NoNewWindow -RedirectStandardOutput "results/$variant-upload.log" -RedirectStandardError "results/$variant-stderr.log"
-            if (!$process.WaitForExit(180000)) {
-              Stop-Process -Id $process.Id -Force
-              $process.WaitForExit()
-              $code = 124
-            } else { $code = $process.ExitCode }
-            "$code" | Set-Content "results/$variant.exit"
-            Get-Content "results/$variant-upload.log", "results/$variant-stderr.log"
+            foreach ($mode in @('unlimited', 'pressure')) {
+              $label = "$variant-$mode"
+              $process = Start-Process -FilePath $exe -ArgumentList @('--log', "`"$fixture`"", "--$mode") -PassThru -NoNewWindow -RedirectStandardOutput "results/$label-upload.log" -RedirectStandardError "results/$label-stderr.log"
+              if (!$process.WaitForExit(180000)) {
+                Stop-Process -Id $process.Id -Force
+                $process.WaitForExit()
+                $code = 124
+              } else { $code = $process.ExitCode }
+              "$code" | Set-Content "results/$label.exit"
+              Get-Content "results/$label-upload.log", "results/$label-stderr.log"
+              if ($code -eq -1073741819) {
+                $cdb = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($cdb) {
+                  & $cdb.FullName -o -G -c 'sxd av; g; .ecxr; kb; q' $exe --log $fixture "--$mode" 2>&1 | Tee-Object "results/$label-debugger.log"
+                } else {
+                  'CDB unavailable; no debugger stack collected.' | Tee-Object "results/$label-debugger.log"
+                }
+              }
+            }
           }
-          if ([int](Get-Content results/pr.exit) -ne 0) { throw 'PR upload failed' }
-          if ((Select-String -Path results/pr-upload.log -Pattern 'exact_bytes=true').Count -ne 69) { throw 'Incomplete PR byte verification' }
+          if ([int](Get-Content results/pr-unlimited.exit) -ne 0) { throw 'Unrestricted PR upload failed' }
+          if ((Select-String -Path results/pr-unlimited-upload.log -Pattern 'exact_bytes=true').Count -ne 69) { throw 'Incomplete unrestricted PR byte verification' }
+          if ([int](Get-Content results/pr-pressure.exit) -ne 0) { throw 'Constrained PR upload failed' }
+          if ((Select-String -Path results/pr-pressure-upload.log -Pattern 'exact_bytes=true').Count -ne 69) { throw 'Incomplete constrained PR byte verification' }
       - name: Remove synthetic weights
         if: always()
         run: rm -f upload-fixture.gguf
