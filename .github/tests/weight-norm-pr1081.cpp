@@ -62,7 +62,7 @@ int main(int argc, char ** argv) {
                 {1}, {37}, {2, 3}, {3, 32}, {2, 256},
                 {2, 3, 5}, {2, 1, 32}, {1, 3, 64},
                 {2, 3, 4, 5}, {2, 1, 1, 32},
-                {257, 1024}, {64, 64, 32},
+                {1025, 1024}, {64, 64, 256},
             };
             size_t checks = 0, rejected = 0;
             for (size_t shape_index = 0; shape_index < shapes.size(); ++shape_index) {
@@ -78,7 +78,7 @@ int main(int argc, char ** argv) {
                         if (values[i] == 0.0F) values[i] = -0.125F;
                     }
                     for (size_t i = 0; i < scales.size(); ++i)
-                        scales[i] = (i % 3 == 0 ? 0.0F : i % 3 == 1 ? -0.75F : 1.25F);
+                        scales[i] = ((i + pattern) % 3 == 0 ? 0.0F : (i + pattern) % 3 == 1 ? -0.75F : 1.25F);
                     const auto as_bytes = [](const std::vector<float> & x) {
                         std::vector<unsigned char> out(x.size() * sizeof(float));
                         std::memcpy(out.data(), x.data(), out.size());
