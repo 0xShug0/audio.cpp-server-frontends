@@ -30,7 +30,7 @@ compiled and linked into `audiocpp_server`.
 ## Docker images
 
 The **Docker (all frontends)** workflow builds CPU, Vulkan, CUDA 12.9.2, and CUDA 13.0.2 images
-for Linux amd64 and arm64. Use CUDA 13 for DGX Spark. All four modules below are compiled in. Images
+for Linux amd64 and arm64. Use CUDA 13 for DGX Spark. The `audio_decode`, `mp3_encode`, `https`, and `websocket` modules below are compiled in. Images
 use a Debug build and include all model families; no model weights are included.
 Plain HTTP remains the default; HTTPS and WebSocket listeners require explicit
 runtime selection.
@@ -118,6 +118,7 @@ than a slim image so recordings can be transcoded before upload. See
 
 | Name | Type | Purpose | Docs |
 |---|---|---|---|
+| `bearer_auth` | pre-processing module | Require a bearer token and optionally restrict routes, before the core handler | [bearer_auth.md](docs/bearer_auth.md) |
 | `audio_decode` | pre-processing module | Accept MP3/FLAC ASR input and rewrite it to core WAV input | [audio_decode.md](docs/audio_decode.md) |
 | `mp3_encode` | pre/post-processing module | Honor TTS `response_format=mp3` by encoding core WAV output to MP3 | [mp3_encode.md](docs/mp3_encode.md) |
 | `https` | listener capability | Serve the same in-process server over HTTPS | [https.md](docs/https.md) |
