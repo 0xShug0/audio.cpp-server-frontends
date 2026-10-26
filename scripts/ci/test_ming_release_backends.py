@@ -98,11 +98,12 @@ def main():
         else:
             with tarfile.open(archive) as package:
                 package.extractall(target, filter='data')
-        candidates = list(target.rglob('audiocpp_cli.exe' if windows else 'audiocpp_cli'))
-        assert len(candidates) == 1, candidates
-        cli = candidates[0]
+        cli = target / ('audiocpp_cli.exe' if windows else 'audiocpp_cli')
+        assert cli.is_file(), cli
         version, _ = run([cli, '--version'], backend + '-version', cwd=cli.parent)
-        assert '0.9.3' in version and SOURCE_SHA[:8] in version, version
+        reported_sha = re.search(r'^git: ([0-9a-f]{7,40})\b', version, re.M)
+        assert re.search(r'^audio\.cpp 0\.9\.3$', version, re.M), version
+        assert reported_sha and SOURCE_SHA.startswith(reported_sha[1]), version
         devices, _ = run([cli, '--list-devices'], backend + '-devices', cwd=cli.parent)
         assert 'Radeon' in devices or 'gfx1151' in devices, devices
         binaries[backend] = cli
