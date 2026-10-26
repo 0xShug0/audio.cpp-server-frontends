@@ -33,6 +33,7 @@ jobs:
             scripts
             src
             tests
+            webui/native/demo_voices
             assets/framework/models/earshot_vad
             assets/framework/models/silero_vad
             assets/asr_validation/librispeech
