@@ -1,5 +1,11 @@
 name: Earshot Windows ROCm Clang link A-B
 on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-earshot-windows.yml
+      - .github/tests/earshot-windows-clang.py
+      - .github/tests/earshot-windows-clang.patch
   workflow_dispatch:
 permissions:
   contents: read
