@@ -1,6 +1,11 @@
 name: Ming v0.9.3 prebuilt HIP vs Vulkan
 
 on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/ming-release-backends.yml
+      - scripts/ci/test_ming_release_backends.py
   workflow_dispatch:
 
 permissions:
