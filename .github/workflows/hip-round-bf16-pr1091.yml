@@ -1,0 +1,118 @@
+name: HIP default-path PR 1091 A-B
+
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-round-bf16-pr1091.yml
+      - .github/tests/pr1091-hip.cpp
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hip:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 30
+    env:
+      BASE_REF: 062c770be908ebc360edfc1742bdfdfb75378e3e
+      HEAD_REF: f62d5c93f39b61b6b993596441c271ab9f0a84a5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout vendored GGML only
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config http.lowSpeedLimit 1024
+            git -C source config http.lowSpeedTime 60
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$BASE_REF" "$HEAD_REF"
+            git -C source sparse-checkout set external/ggml
+            timeout 600 git -C source checkout --detach "$BASE_REF"
+            test ! -d source/assets
+            test ! -d source/tests
+            git -C source count-objects -vH
+            du -sh source
+          } 2>&1 | tee results/source-download.log
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o results/pr1091-hip.cpp \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/pr1091-hip.cpp"
+          sha256sum results/pr1091-hip.cpp | tee results/probe-sha256.txt
+
+      - name: Build HIP and compare default-path outputs
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          echo "arch=$arch" | tee -a results/environment.log
+          uname -a | tee -a results/environment.log
+          for variant in base head; do
+            ref="$BASE_REF"
+            if [[ "$variant" == head ]]; then ref="$HEAD_REF"; fi
+            git -C source checkout -- external/ggml/CMakeLists.txt external/ggml/src/ggml-cuda/norm.cu
+            git -C source checkout --detach "$ref"
+            test "$(git -C source rev-parse HEAD)" = "$ref"
+            test ! -d source/assets
+            echo "$ref" > "results/$variant-ref.txt"
+            cp results/pr1091-hip.cpp source/external/ggml/pr1091-hip.cpp
+            printf '\nadd_executable(pr1091_hip_probe pr1091-hip.cpp)\ntarget_link_libraries(pr1091_hip_probe PRIVATE ggml)\n' >> source/external/ggml/CMakeLists.txt
+            # Identical one-time coverage logging; leave kernel math and dispatch unchanged.
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path('source/external/ggml/src/ggml-cuda/norm.cu')
+          s = p.read_bytes().decode()
+          for function in ('ggml_cuda_op_rms_norm_fused', 'ggml_cuda_op_rms_norm_fused_add'):
+              start = s.index('void ' + function + '(')
+              brace = s.index('{', start)
+              log = ('\n    static bool coverage_logged = false;\n'
+                     '    if (!coverage_logged) {\n'
+                     '        coverage_logged = true;\n'
+                     f'        fprintf(stderr, "[PR1091_COVERAGE] {function}\\n");\n'
+                     '    }\n')
+              s = s[:brace+1] + log + s[brace+1:]
+          p.write_bytes(s.encode())
+          PY
+            git -C source diff -- external/ggml/CMakeLists.txt external/ggml/src/ggml-cuda/norm.cu > "results/$variant-instrumentation.patch"
+            cmake -S source/external/ggml -B source/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 \
+              -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+              -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+              -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+              -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+              -DGGML_HIP=ON -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_VULKAN=OFF \
+              -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
+              -DGGML_HIP_GRAPHS=ON \
+              2>&1 | tee "results/$variant-configure.log"
+            cmake --build source/build --target pr1091_hip_probe -j 8 \
+              2>&1 | tee "results/$variant-build.log"
+            cp source/build/CMakeCache.txt "results/$variant-CMakeCache.txt"
+            timeout 180 source/build/bin/pr1091_hip_probe "results/$variant-output.bin" \
+              2>&1 | tee "results/$variant-probe.log"
+            grep -q 'PASS cases=252' "results/$variant-probe.log"
+            grep -q '\[PR1091_COVERAGE\] ggml_cuda_op_rms_norm_fused$' "results/$variant-probe.log"
+            grep -q '\[PR1091_COVERAGE\] ggml_cuda_op_rms_norm_fused_add$' "results/$variant-probe.log"
+          done
+          cmp results/base-output.bin results/head-output.bin
+          sha256sum results/*-output.bin | tee results/output-sha256.txt
+          echo 'HIP base/head built successfully. 252 cases x 3 executions each; independent scalar checks pass; exact cross-revision output parity. Both shared RMS fusion entry points were exercised. No CUDA optimization enabled, no models or assets downloaded.' | tee results/summary.txt
+          cat results/summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build and numerical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-round-bf16-pr1091-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
