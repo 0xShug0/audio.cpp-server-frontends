@@ -19,6 +19,16 @@ function(audiocpp_external_frontend_require_cpp_httplib)
         "${CMAKE_CURRENT_BINARY_DIR}/audio.cpp-server-frontends/cpp-httplib")
 endfunction()
 
+audiocpp_external_frontend_requested(bearer_auth AUDIOCPP_EXTERNAL_FRONTEND_BEARER_AUTH)
+if (AUDIOCPP_EXTERNAL_FRONTEND_BEARER_AUTH)
+    audiocpp_register_server_frontend(bearer_auth
+        REGISTER_FUNCTION register_bearer_auth_module
+        SOURCES
+            "${AUDIOCPP_EXTERNAL_SERVER_FRONTENDS_SOURCE_DIR}/modules/bearer_auth.cpp"
+        INCLUDE_DIRS
+            "${AUDIOCPP_EXTERNAL_SERVER_FRONTENDS_SOURCE_DIR}/modules")
+endif()
+
 audiocpp_external_frontend_requested(audio_decode AUDIOCPP_EXTERNAL_FRONTEND_AUDIO_DECODE)
 if (AUDIOCPP_EXTERNAL_FRONTEND_AUDIO_DECODE)
     audiocpp_register_server_frontend(audio_decode
