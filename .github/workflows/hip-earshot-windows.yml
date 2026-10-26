@@ -1,0 +1,50 @@
+name: Earshot Windows ROCm Clang link A-B
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: [self-hosted, windows, devlab-dispatch, strix-halo]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/tests
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: d867dc2abf63bb2270531824988698773fe29df7
+          path: source
+          filter: blob:none
+          sparse-checkout: |
+            app
+            cmake
+            external
+            include
+            model_specs
+            scripts
+            src
+            tests
+            assets/framework/models/earshot_vad
+            assets/framework/models/silero_vad
+            assets/asr_validation/librispeech
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ggml-org/ccache-action@v1.2.24
+        with:
+          key: earshot-windows-rocm10-debug
+          max-size: 2G
+          install: binary
+      - name: Reproduce link failure, apply exact patch, test real CLI and server
+        run: python .github/tests/earshot-windows-clang.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: earshot-windows-clang-results
+          path: results/
+          retention-days: 7
