@@ -1,0 +1,47 @@
+name: Ming v0.9.3 prebuilt HIP vs Vulkan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ming-release-backends
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [linux, windows]
+    runs-on: [self-hosted, '${{ matrix.os }}', devlab-dispatch, strix-halo]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: qwen3-tts
+          python-version: '3.12'
+          auto-activate-base: false
+      - name: Compare published packages sequentially
+        shell: bash -el {0}
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/ming-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$root/results"
+          echo "RESULT_ROOT=$root/results" >> "$GITHUB_ENV"
+          python scripts/ci/test_ming_release_backends.py --root "$root" 2>&1 | tee "$root/results/validation.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ming-v093-${{ matrix.os }}
+          path: ${{ env.RESULT_ROOT }}/
+          retention-days: 14
