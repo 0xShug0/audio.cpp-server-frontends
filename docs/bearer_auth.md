@@ -60,6 +60,19 @@ uses to select a handler, so a request that does not match an entry exactly
 cannot reach that entry's handler either. The query string is not part of
 the path.
 
+Each entry must be exactly a method and a path:
+
+- the method is `*` or an uppercase HTTP method (`GET`, `POST`, …);
+- the path starts with `/`, contains no whitespace, and may use `*` only as
+  its last character.
+
+Anything else stops the server at startup, with the offending entry in the
+error. That includes a missing comma, such as
+`POST /v1/ui/browse-directories POST /v1/ui/models-root`, which would
+otherwise read as one rule that can never match. A rule that parses but never
+matches would be a deny rule that silently does nothing. Empty entries, as
+left by a trailing comma, are ignored.
+
 ## Remote deployment
 
 Allow the inference API and model load/unload/upload, while denying the

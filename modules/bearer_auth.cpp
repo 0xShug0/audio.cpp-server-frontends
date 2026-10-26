@@ -20,14 +20,33 @@ constexpr const char * allow_routes_env = "AUDIOCPP_BEARER_AUTH_ALLOW_ROUTES";
 constexpr const char * deny_routes_env = "AUDIOCPP_BEARER_AUTH_DENY_ROUTES";
 constexpr const char * default_public_routes = "GET /health";
 
+constexpr std::string_view whitespace = " \t\r\n";
+
 std::string_view trim(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+    while (!text.empty() && whitespace.find(text.front()) != std::string_view::npos) {
         text.remove_prefix(1);
     }
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
+    while (!text.empty() && whitespace.find(text.back()) != std::string_view::npos) {
         text.remove_suffix(1);
     }
     return text;
+}
+
+// An HTTP method token as core compares it: exact and case-sensitive, so
+// "post" would never match a request and is rejected rather than ignored.
+bool valid_method(std::string_view method) {
+    if (method == "*") {
+        return true;
+    }
+    if (method.empty()) {
+        return false;
+    }
+    for (const char ch : method) {
+        if (ch < 'A' || ch > 'Z') {
+            return false;
+        }
+    }
+    return true;
 }
 
 // One "METHOD /path" entry. Method "*" matches any method; a path ending in
@@ -49,6 +68,15 @@ struct RoutePattern {
     }
 };
 
+[[noreturn]] void bad_route(const char * env_name, std::string_view entry, std::string_view why) {
+    throw std::runtime_error(
+        std::string(env_name) + ": " + std::string(why) +
+        " in '" + std::string(entry) + "'; entries are 'METHOD /path' separated by commas");
+}
+
+// Strict on purpose: a rule that parses but can never match is a deny rule
+// that silently does nothing, so anything that is not exactly
+// "METHOD /path" fails startup instead.
 std::vector<RoutePattern> parse_routes(const char * env_name, std::string_view text) {
     std::vector<RoutePattern> routes;
     while (!text.empty()) {
@@ -58,19 +86,43 @@ std::vector<RoutePattern> parse_routes(const char * env_name, std::string_view t
         if (entry.empty()) {
             continue;
         }
-        const auto space = entry.find_first_of(" \t");
-        const auto path = space == std::string_view::npos ? std::string_view() : trim(entry.substr(space));
-        if (path.empty() || path.front() != '/') {
-            throw std::runtime_error(
-                std::string(env_name) + " entries must be 'METHOD /path', got '" + std::string(entry) + "'");
+
+        std::vector<std::string_view> tokens;
+        for (auto rest = entry; !rest.empty();) {
+            const auto start = rest.find_first_not_of(whitespace);
+            if (start == std::string_view::npos) {
+                break;
+            }
+            rest.remove_prefix(start);
+            const auto end = rest.find_first_of(whitespace);
+            tokens.push_back(rest.substr(0, end));
+            rest = end == std::string_view::npos ? std::string_view() : rest.substr(end);
+        }
+        if (tokens.size() > 2) {
+            bad_route(env_name, entry, "more than one route (missing comma?)");
+        }
+        if (tokens.size() < 2) {
+            bad_route(env_name, entry, "expected a method and a path");
+        }
+
+        const auto method = tokens[0];
+        auto path = tokens[1];
+        if (!valid_method(method)) {
+            bad_route(env_name, entry, "method must be '*' or an uppercase HTTP method");
+        }
+        if (path.front() != '/') {
+            bad_route(env_name, entry, "path must start with '/'");
         }
         RoutePattern route;
-        route.method = std::string(entry.substr(0, space));
-        route.path = std::string(path);
-        if (route.path.back() == '*') {
-            route.path.pop_back();
+        route.method = std::string(method);
+        if (path.back() == '*') {
+            path.remove_suffix(1);
             route.prefix = true;
         }
+        if (path.find('*') != std::string_view::npos) {
+            bad_route(env_name, entry, "'*' is only allowed at the end of a path");
+        }
+        route.path = std::string(path);
         routes.push_back(std::move(route));
     }
     return routes;
