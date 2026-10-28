@@ -1,6 +1,11 @@
 #include "sgemm.cuh"
 #include <stdexcept>
 
+#ifdef F16RAW
+#include "convert.cuh"
+#include "mma.cuh"
+#endif
+
 namespace {
 
 // Reuse each operand tile across output rows/columns. Unlike reduced-
@@ -74,6 +79,95 @@ __global__ __launch_bounds__(256) void halo_sgemm(
     }
 }
 
+#ifdef F16RAW
+// Convert only the current K32 operand tiles in LDS. No converted global buffers.
+// threadIdx.x is the wave32 lane: GGML's fragment coordinates require x < 32.
+template<int TileM, typename Packed>
+__global__ __launch_bounds__(128) void halo_sgemm_wmma(
+    const float * __restrict__ a, const float * __restrict__ b, float * __restrict__ c,
+    int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
+    int64_t sa, int64_t sb, int64_t sc) {
+#if defined(AMD_WMMA_AVAILABLE)
+    using namespace ggml_cuda_mma;
+    using tile_AB = tile<16, 8, Packed, get_input_data_layout()>;
+    using tile_C = tile<16, 16, float, DATA_LAYOUT_J_MAJOR>;
+    static_assert(TileM == 64 || TileM == 128, "WMMA probe requires M64 or M128");
+    static_assert(tile_AB::supported() && tile_C::supported(), "unsupported WMMA fragments");
+    // 16 packed pairs cover K32; four padding pairs keep every row 16-byte aligned.
+    constexpr int pitch = 20;
+    constexpr int fragments_m = TileM / 32;
+    __shared__ __align__(16) Packed aa[TileM][pitch];
+    __shared__ __align__(16) Packed bb[64][pitch];
+    const int tid = threadIdx.x + 32 * threadIdx.y;
+    const int wave_row = (threadIdx.y % 2) * (TileM / 2);
+    const int wave_col = (threadIdx.y / 2) * 32;
+    const int64_t row0 = int64_t(blockIdx.x) * TileM;
+    const int64_t col0 = int64_t(blockIdx.y) * 64;
+    a += int64_t(blockIdx.z) * sa;
+    b += int64_t(blockIdx.z) * sb;
+    c += int64_t(blockIdx.z) * sc;
+    tile_C acc[fragments_m][2];
+
+    for (int64_t base = 0; base < k; base += 32) {
+#pragma unroll
+        for (int index = tid; index < TileM * 16; index += 128) {
+            const int row = index / 16;
+            const int64_t kk = base + 2 * (index % 16);
+            const float lo = row0 + row < m && kk < k ? a[(row0 + row) * lda + kk] : 0.0f;
+            const float hi = row0 + row < m && kk + 1 < k ? a[(row0 + row) * lda + kk + 1] : 0.0f;
+            aa[row][index % 16] = ggml_cuda_cast<Packed>(make_float2(lo, hi));
+        }
+#pragma unroll
+        for (int index = tid; index < 64 * 16; index += 128) {
+            const int col = index / 16;
+            const int64_t kk = base + 2 * (index % 16);
+            const float lo = col0 + col < n && kk < k ? b[(col0 + col) * ldb + kk] : 0.0f;
+            const float hi = col0 + col < n && kk + 1 < k ? b[(col0 + col) * ldb + kk + 1] : 0.0f;
+            bb[col][index % 16] = ggml_cuda_cast<Packed>(make_float2(lo, hi));
+        }
+        __syncthreads();
+#pragma unroll
+        for (int kp = 0; kp < 16; kp += 8) {
+            tile_AB a_frag[fragments_m];
+            tile_AB b_frag[2];
+#pragma unroll
+            for (int i = 0; i < fragments_m; ++i) {
+                load_ldmatrix(a_frag[i], &aa[wave_row + 16 * i][kp], pitch);
+            }
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                load_ldmatrix(b_frag[j], &bb[wave_col + 16 * j][kp], pitch);
+            }
+#pragma unroll
+            for (int i = 0; i < fragments_m; ++i) {
+#pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    mma(acc[i][j], a_frag[i], b_frag[j]);
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < fragments_m; ++i) {
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+#pragma unroll
+            for (int l = 0; l < tile_C::ne; ++l) {
+                const int64_t row = row0 + wave_row + 16 * i + tile_C::get_i(l);
+                const int64_t col = col0 + wave_col + 16 * j + tile_C::get_j(l);
+                if (row < m && col < n) {
+                    c[col * ldc + row] = acc[i][j].x[l];
+                }
+            }
+        }
+    }
+#else
+    NO_DEVICE_CODE;
+#endif
+}
+#endif
+
 } // namespace
 
 void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
@@ -107,7 +201,29 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
             halo_sgemm<64, 64, true><<<dim3((m + 63) / 64, (n + 63) / 64, batches), 256, 0, stream>>>(
                 a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
             break;
+#ifdef F16RAW
+        case 5:
+            halo_sgemm_wmma<64, nv_bfloat162><<<dim3((m + 63) / 64, (n + 63) / 64, batches), dim3(32, 4), 0, stream>>>(
+                a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+            break;
+        case 6:
+            halo_sgemm_wmma<64, half2><<<dim3((m + 63) / 64, (n + 63) / 64, batches), dim3(32, 4), 0, stream>>>(
+                a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+            break;
+        case 7:
+            halo_sgemm_wmma<128, nv_bfloat162><<<dim3((m + 127) / 128, (n + 63) / 64, batches), dim3(32, 4), 0, stream>>>(
+                a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+            break;
+        case 8:
+            halo_sgemm_wmma<128, half2><<<dim3((m + 127) / 128, (n + 63) / 64, batches), dim3(32, 4), 0, stream>>>(
+                a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+            break;
+#endif
         default:
+#ifdef F16RAW
+            throw std::invalid_argument("SGEMM tile index must be 0..8");
+#else
             throw std::invalid_argument("SGEMM tile index must be 0..4");
+#endif
     }
 }

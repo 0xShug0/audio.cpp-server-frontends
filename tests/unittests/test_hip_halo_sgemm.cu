@@ -17,7 +17,8 @@
 
 #define CHECK(x) do { const auto status=(x); if (status != 0) { std::fprintf(stderr, "API failure %s:%d: %s status=%d\n", __FILE__, __LINE__, #x, int(status)); std::exit(1); } } while (0)
 
-static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = false, bool blas = false, int lowp = 0) {
+static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = false, bool blas = false, int lowp = 0, int fused_index = 0) {
+    const bool fused=fused_index != 0;
     const bool vector_lds=tile_index == 4;
     const bool library_candidate=plans || blas || lowp != 0;
     const bool three_modes=vector_lds || library_candidate;
@@ -67,7 +68,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
     to_fp16_nc_cuda_t to_f16=nullptr;
     to_bf16_nc_cuda_t to_bf16=nullptr;
     size_t scratch_bytes=0;
-    if (lowp) {
+    if (lowp && !fused) {
         if (lowp == 1) to_f16=ggml_get_to_fp16_nc_cuda(GGML_TYPE_F32);
         else to_bf16=ggml_get_to_bf16_nc_cuda(GGML_TYPE_F32);
         if (!(lowp == 1 ? bool(to_f16) : bool(to_bf16))) {
@@ -90,8 +91,12 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 #endif
     auto launch=[&](int mode) {
 #ifdef F16RAW
+        if (fused && mode == 2) {
+            ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr,fused_index);
+            return;
+        }
         // Mode 2 always converts both inputs; modes 3/4 diagnose conversion/GEMM separately.
-        if (lowp && (mode == 2 || mode == 3)) {
+        if (lowp && !fused && (mode == 2 || mode == 3)) {
             if (lowp == 1) {
                 to_f16(da,reinterpret_cast<half *>(low_a_base+low_guard),k,m,1,1,lda,0,0,nullptr);
                 to_f16(db,reinterpret_cast<half *>(low_b_base+low_guard),k,n,1,1,ldb,0,0,nullptr);
@@ -101,7 +106,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
             }
             if (mode == 3) return;
         }
-        if (lowp && (mode == 2 || mode == 4)) {
+        if (lowp && !fused && (mode == 2 || mode == 4)) {
             CHECK(hipblasLtMatmul(handle,desc,&alpha,low_a_base+low_guard,low_la,low_b_base+low_guard,low_lb,&beta,dc,lc,dc,lc,&low_algo.algo,work,worksize,nullptr));
             return;
         }
@@ -198,8 +203,10 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
         double nmse=0,max_abs=0,cosine=0;
 #ifdef F16RAW
         double double_max_abs=0,quantized_double_max_abs=0;
+        double worst_quantized_ratio=0,worst_quantized_value=0,worst_quantized_reference=0,worst_quantized_limit=0,worst_quantized_l1=0;
+        int worst_quantized_row=-1,worst_quantized_col=-1;
 #endif
-        const char * result_tag=lowp ? "SGEMM_LOWP" : blas ? "SGEMM_BLAS" : "SGEMM_PLAN";
+        const char * result_tag=fused ? "SGEMM_FUSED" : lowp ? "SGEMM_LOWP" : blas ? "SGEMM_BLAS" : "SGEMM_PLAN";
         if (plans) {
             std::printf("SGEMM_PLAN_BEGIN,algo_index=%d,status=%d\n",plan_index,int(alternatives[plan_index].state));
             if (alternatives[plan_index].state != HIPBLAS_STATUS_SUCCESS) {
@@ -221,25 +228,28 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
             std::vector<uint16_t> low_a_host,low_b_host;
             if (lowp) {
                 low_a_host.resize(low_a_elements+2*low_guard); low_b_host.resize(low_b_elements+2*low_guard);
-                CHECK(hipMemcpy(low_a_host.data(),low_a_base,low_a_host.size()*sizeof(uint16_t),hipMemcpyDeviceToHost));
-                CHECK(hipMemcpy(low_b_host.data(),low_b_base,low_b_host.size()*sizeof(uint16_t),hipMemcpyDeviceToHost));
+                if (!fused) {
+                    CHECK(hipMemcpy(low_a_host.data(),low_a_base,low_a_host.size()*sizeof(uint16_t),hipMemcpyDeviceToHost));
+                    CHECK(hipMemcpy(low_b_host.data(),low_b_base,low_b_host.size()*sizeof(uint16_t),hipMemcpyDeviceToHost));
+                }
                 for (int operand=0;operand<2;++operand) {
-                    const auto & packed=operand ? low_b_host : low_a_host;
+                    auto & packed=operand ? low_b_host : low_a_host;
                     const auto & source=operand ? b : a;
                     const int rows=operand ? n : m, stride=operand ? ldb : lda;
-                    for (size_t i=0;i<low_guard;++i) {
+                    for (size_t i=0;!fused && i<low_guard;++i) {
                         if (packed[i]!=0xa5a5 || packed[packed.size()-low_guard+i]!=0xa5a5) {
                             std::fprintf(stderr,"SGEMM_LOWP_ERROR,stage=conversion_guard,operand=%d\n",operand); std::exit(4);
                         }
                     }
                     for (int row=0;row<rows;++row) for (int q=0;q<k;++q) {
+                        const float value=source[guard+size_t(row)*stride+q];
+                        const uint16_t expected=lowp == 1 ? ggml_fp32_to_fp16(value) : ggml_fp32_to_bf16(value).bits;
+                        if (fused) packed[low_guard+size_t(row)*k+q]=expected;
                         const uint16_t bits=packed[low_guard+size_t(row)*k+q];
                         const uint16_t exponent=lowp == 1 ? 0x7c00 : 0x7f80;
                         if ((bits & exponent)==exponent) {
                             std::fprintf(stderr,"SGEMM_LOWP_ERROR,stage=conversion_nonfinite,dtype=%s,operand=%d,row=%d,k=%d\n",lowp == 1 ? "f16" : "bf16",operand,row,q); std::exit(3);
                         }
-                        const float value=source[guard+size_t(row)*stride+q];
-                        const uint16_t expected=lowp == 1 ? ggml_fp32_to_fp16(value) : ggml_fp32_to_bf16(value).bits;
                         if (!std::isfinite(value) || bits!=expected) {
                             std::fprintf(stderr,"SGEMM_LOWP_ERROR,stage=conversion_mismatch,operand=%d,row=%d,k=%d\n",operand,row,q); std::exit(3);
                         }
@@ -259,15 +269,22 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 #ifdef F16RAW
                     double_max_abs=std::max(double_max_abs,std::abs(value-exact));
                     if (lowp) {
-                        double quantized=0;
+                        double quantized=0,quantized_l1=0;
                         for (int q=0;q<k;++q) {
                             const uint16_t aa=low_a_host[low_guard+size_t(i)*k+q], bb=low_b_host[low_guard+size_t(j)*k+q];
                             const double av=lowp == 1 ? ggml_fp16_to_fp32(aa) : ggml_bf16_to_fp32(ggml_bf16_t{aa});
                             const double bv=lowp == 1 ? ggml_fp16_to_fp32(bb) : ggml_bf16_to_fp32(ggml_bf16_t{bb});
                             quantized+=av*bv;
+                            quantized_l1+=std::abs(av*bv);
                         }
-                        quantized_double_max_abs=std::max(quantized_double_max_abs,std::abs(value-quantized));
-                        valid &= std::abs(value-quantized)<=2e-4+2e-5*std::abs(quantized);
+                        const double error=std::abs(value-quantized),limit=2e-4+2e-5*std::abs(quantized);
+                        quantized_double_max_abs=std::max(quantized_double_max_abs,error);
+                        if (error/limit>worst_quantized_ratio) {
+                            worst_quantized_ratio=error/limit; worst_quantized_row=i; worst_quantized_col=j;
+                            worst_quantized_value=value; worst_quantized_reference=quantized;
+                            worst_quantized_limit=limit; worst_quantized_l1=quantized_l1;
+                        }
+                        valid &= error<=limit;
                     } else
 #endif
                     valid &= std::abs(value-exact)<=2e-4+2e-5*std::abs(exact);
@@ -277,6 +294,11 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
             valid &= std::isfinite(nmse) && std::isfinite(cosine);
             if (lowp) valid &= nmse <= (lowp == 1 ? 1e-6 : 1e-4);
             if (!valid) {
+#ifdef F16RAW
+                if (lowp) std::fprintf(stderr,"SGEMM_QUANTIZED_CHECK,dtype=%s,row=%d,col=%d,value=%.17g,reference=%.17g,error=%.12g,limit=%.12g,error_ratio=%.12g,sum_abs_products=%.12g,quantized_double_max_abs=%.12g\n",
+                    lowp == 1 ? "f16" : "bf16",worst_quantized_row,worst_quantized_col,worst_quantized_value,worst_quantized_reference,
+                    std::abs(worst_quantized_value-worst_quantized_reference),worst_quantized_limit,worst_quantized_ratio,worst_quantized_l1,quantized_double_max_abs);
+#endif
                 std::fprintf(stderr,"%s_ERROR,algo_index=%d,status=2,stage=numerics,nmse=%.12g,max_abs=%.12g,cosine=%.12g\n",result_tag,plan_index,nmse,max_abs,cosine); std::exit(2);
             }
         }
@@ -309,7 +331,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
         }
 #ifdef F16RAW
         float conversion_ms=0,gemm_ms=0;
-        if (lowp) {
+        if (lowp && !fused) {
             std::vector<float> stage_times[2];
             for (int round=0;round<6;++round) for (int order=0;order<2;++order) {
                 const int stage=(round+order)%2, mode=stage == 0 ? 3 : 4;
@@ -340,7 +362,12 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
         check_input_guards(db_base,b_elements,"B");
         const float library_ms=medians[0], candidate_ms=medians[candidate_mode];
 #ifdef F16RAW
-        if (lowp) {
+        if (fused) {
+            const size_t explicit_device_bytes=(a.size()+b.size()+out.size())*sizeof(float)+worksize;
+            std::printf("SGEMM_FUSED,dtype=%s,tile_index=%d,m=%d,n=%d,k=%d,pad=%d,first1_ms=%.6f,reference64_ms=%.6f,candidate_ms=%.6f,speedup_vs_first1=%.4f,speedup_vs_reference64=%.4f,scratch_payload_bytes=0,scratch_bytes=0,explicit_device_bytes=%zu,nmse_limit=%.12g,nmse=%.12g,max_abs=%.12g,cosine=%.12g,double_max_abs=%.12g,quantized_double_max_abs=%.12g,global_conversion_passes=0\n",
+                        lowp == 1 ? "f16" : "bf16",fused_index,m,n,k,pad,library_ms,medians[1],candidate_ms,library_ms/candidate_ms,medians[1]/candidate_ms,
+                        explicit_device_bytes,lowp == 1 ? 1e-6 : 1e-4,nmse,max_abs,cosine,double_max_abs,quantized_double_max_abs);
+        } else if (lowp) {
             const size_t payload_bytes=(low_a_elements+low_b_elements)*sizeof(uint16_t);
             const size_t explicit_device_bytes=(a.size()+b.size()+out.size())*sizeof(float)+worksize+scratch_bytes;
             std::printf("SGEMM_LOWP,dtype=%s,m=%d,n=%d,k=%d,pad=%d,first1_ms=%.6f,reference64_ms=%.6f,candidate_ms=%.6f,conversion_ms=%.6f,gemm_ms=%.6f,speedup_vs_first1=%.4f,speedup_vs_reference64=%.4f,scratch_payload_bytes=%zu,scratch_bytes=%zu,explicit_device_bytes=%zu,nmse_limit=%.12g,nmse=%.12g,max_abs=%.12g,cosine=%.12g,double_max_abs=%.12g,quantized_double_max_abs=%.12g,conversions_per_call=2\n",
@@ -368,7 +395,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
     CHECK(hipblasLtMatrixLayoutDestroy(lb));CHECK(hipblasLtMatrixLayoutDestroy(lc));
     CHECK(hipblasLtMatmulDescDestroy(desc));CHECK(hipblasLtDestroy(handle));
 #ifdef F16RAW
-    if (lowp) {
+    if (lowp && !fused) {
         CHECK(hipblasLtMatrixLayoutDestroy(low_la)); CHECK(hipblasLtMatrixLayoutDestroy(low_lb));
         CHECK(hipFree(low_a_base)); CHECK(hipFree(low_b_base));
     }
@@ -380,7 +407,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc != 1 && argc != 2 && argc != 5 && argc != 6) {
-        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16]] (f16/bf16 require F16RAW)\n",argv[0]);
+        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16]] (low precision requires F16RAW)\n",argv[0]);
         return 1;
     }
     int devices=0;
@@ -394,14 +421,18 @@ int main(int argc, char **argv) {
         size_t parsed=0;
         const bool plans=argc == 6 && std::string(argv[5]) == "plans";
         const bool blas=argc == 6 && std::string(argv[5]) == "blas";
-        const int lowp=argc == 6 ? (std::string(argv[5]) == "f16" ? 1 : std::string(argv[5]) == "bf16" ? 2 : 0) : 0;
+        const std::string mode=argc == 6 ? argv[5] : "";
+        const int fused_index=mode == "fused-bf16" ? 5 : mode == "fused-f16" ? 6 :
+                              mode == "fused128-bf16" ? 7 : mode == "fused128-f16" ? 8 : 0;
+        const int lowp=(mode == "f16" || fused_index == 6 || fused_index == 8) ? 1 :
+                       (mode == "bf16" || fused_index == 5 || fused_index == 7) ? 2 : 0;
 #ifndef F16RAW
         if (lowp) { std::fprintf(stderr,"f16/bf16 require a -DF16RAW build\n"); return 1; }
 #endif
         const int tile_index=argc == 6 && !plans && !blas && !lowp ? std::stoi(argv[5],&parsed) : -1;
         if (m <= 0 || n <= 0 || k <= 0 || pad < 0) return 1;
         if (argc == 6 && !plans && !blas && !lowp && (tile_index < 0 || tile_index > 4 || parsed != std::string(argv[5]).size())) return 1;
-        run(m, n, k, pad, tile_index, plans, blas, lowp);
+        run(m, n, k, pad, tile_index, plans, blas, lowp, fused_index);
         std::puts("PASS selected SGEMM shape");
         return 0;
     }

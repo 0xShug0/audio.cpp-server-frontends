@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -49,7 +49,7 @@ builds = [
          '-o', 'build/debug/raw-im2col']]),
 ]
 builds.append(dict(id='matrix-candidate', build_type='Debug', depends_on=['ggml'], timeout_s=180,
-    commands=[hipcc + ['-DF16RAW', '-DGGML_USE_HIP',
+    commands=[hipcc + ['-DF16RAW', '-DGGML_USE_HIP', '-Rpass-analysis=kernel-resource-usage',
         '-Iexternal/ggml/include', '-Iexternal/ggml/src', '-Iexternal/ggml/src/ggml-cuda',
         '-Iexternal/ggml/src/ggml-hip/halo', 'tests/unittests/test_hip_halo_sgemm.cu',
         'external/ggml/src/ggml-hip/halo/sgemm.cu',
@@ -231,7 +231,23 @@ elif args.focus == 'matrix':
                  '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
             for i in [0,1,5,124,125,189,190,191]]),
     ]
-if args.focus != 'matrix':
+elif args.focus == 'fused':
+    builds = [build for build in builds if build['id'] in {'device-health','ggml','matrix-candidate'}]
+    shapes = [(m,n,k,pad) for m,n,k in (
+        (67,131,97),(128,8192,1792),(128,8192,5376),(256,1024,3584),
+        (256,1024,5376),(512,768,5376),(2048,768,896),(2080,768,768),
+        (64,32768,896),(129,769,5376),(193,1024,4096)) for pad in (0,3)]
+    suites = [
+        dict(id='correctness', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-before', argv=health['argv'])]),
+        dict(id='matrix', build='matrix-candidate', gpu=True, timeout_s=60, cases=[
+            dict(id=mode+'-'+'-'.join(map(str,shape)), argv=['build/debug/raw-matrix']+
+                 list(map(str,shape))+[mode]) for shape in shapes for mode in [
+                     'fused-bf16','fused-f16','fused128-bf16','fused128-f16']]),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+    ]
+if args.focus not in {'matrix','fused'}:
     builds = [build for build in builds if build['id'] != 'matrix-candidate']
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')

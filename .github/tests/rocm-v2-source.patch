@@ -27,7 +27,7 @@ index f592d404..54ceea0b 100644
      ~ggml_backend_cuda_context();
  
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 539f5807..313053ac 100644
+index 539f5807..ae2730c4 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,4 +1,7 @@
@@ -38,15 +38,7 @@ index 539f5807..313053ac 100644
  #include "ggml-impl.h"
  #include "ggml-backend-impl.h"
  
-@@ -74,6 +77,7 @@
- #include <atomic>
- #include <charconv>
- #include <cinttypes>
-+#include <climits>
- #include <condition_variable>
- #include <cstddef>
- #include <cstdint>
-@@ -2755,6 +2759,46 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+@@ -2755,6 +2758,25 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
  
  static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
      const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
@@ -55,33 +47,12 @@ index 539f5807..313053ac 100644
 +        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
 +        if (ggml_backend_buffer_get_type(src0->buffer) == buft &&
 +            ggml_backend_buffer_get_type(src1->buffer) == buft &&
-+            ggml_backend_buffer_get_type(dst->buffer) == buft) {
-+#if defined(GGML_HIP_USE_HIPBLASLT)
-+            if (dst->op == GGML_OP_MUL_MAT &&
-+                dst->op_params[0] == GGML_PREC_DEFAULT &&
-+                ggml_get_op_params_i32(dst, 1) == GGML_MUL_MAT_LOWERING_DEFAULT &&
-+                src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
-+                src0->ne[2] == 1 && src0->ne[3] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1 &&
-+                src0->nb[0] == sizeof(float) && src1->nb[0] == sizeof(float) &&
-+                src0->nb[1] % sizeof(float) == 0 && src1->nb[1] % sizeof(float) == 0 &&
-+                src0->nb[1] >= size_t(src0->ne[0]) * sizeof(float) &&
-+                src1->nb[1] >= size_t(src1->ne[0]) * sizeof(float) && ggml_is_contiguous(dst)) {
-+                const int64_t m = src0->ne[1], n = src1->ne[1], k = src0->ne[0];
-+                if (m >= 64 && n >= 768 && k >= 256 && m <= INT_MAX && n <= INT_MAX && k <= INT_MAX &&
-+                    m * n >= ((int64_t{512} << 20) + k - 1) / k &&
-+                    ((m + 63) / 64) * ((n + 63) / 64) >= 64) {
-+                    ggml_cuda_pool_alloc<nv_bfloat16> a(ctx.pool(), size_t(m) * k);
-+                    ggml_cuda_pool_alloc<nv_bfloat16> b(ctx.pool(), size_t(n) * k);
-+                    const auto convert = ggml_get_to_bf16_nc_cuda(GGML_TYPE_F32);
-+                    convert(src0->data, a.get(), k, m, 1, 1, src0->nb[1] / sizeof(float), 0, 0, ctx.stream());
-+                    convert(src1->data, b.get(), k, n, 1, 1, src1->nb[1] / sizeof(float), 0, 0, ctx.stream());
-+                    ggml_hipblaslt_gemm(ctx, ctx.stream(), m, n, k,
-+                            a.get(), CUDA_R_16BF, k, 0, b.get(), CUDA_R_16BF, k, 0,
-+                            dst->data, CUDA_R_32F, m, 0, 1);
-+                    ++ctx.rocm_v2_sgemm_launches;
-+                    return;
-+                }
-+            }
++            ggml_backend_buffer_get_type(dst->buffer) == buft &&
++            ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
++            ++ctx.rocm_v2_sgemm_launches;
++            return;
++        }
++    }
 +#endif
 +            if (ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
 +                ++ctx.rocm_v2_sgemm_launches;
@@ -93,7 +64,7 @@ index 539f5807..313053ac 100644
  
      if (dst->type == GGML_TYPE_F16) {
          GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
-@@ -5047,6 +5091,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5047,6 +5069,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
  
      ggml_cuda_set_device(cuda_ctx->device);
@@ -106,7 +77,7 @@ index 539f5807..313053ac 100644
  
      bool use_cuda_graph             = false;
      bool cuda_graph_update_required = false;
-@@ -5062,6 +5112,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5062,6 +5090,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
          const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
          if (graph_compatible) {
              const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
@@ -122,7 +93,7 @@ index 539f5807..313053ac 100644
  
              if (!graph->warmup_complete) {
                  // Warmup: need at least 2 calls with no property change on the 2nd call
-@@ -5087,6 +5146,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5087,6 +5124,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      }
  #endif // USE_CUDA_GRAPH
  
@@ -146,7 +117,7 @@ index 539f5807..313053ac 100644
      if (use_cuda_graph && cuda_graph_update_required) {
          // Start CUDA graph capture
          {
-@@ -5659,9 +5735,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
+@@ -5659,9 +5713,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
  }
  
  static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t dev, const char * params) {
@@ -175,7 +146,7 @@ index 539f5807..313053ac 100644
  }
  
  static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
-@@ -6263,8 +6357,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -6263,8 +6335,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
