@@ -25,8 +25,19 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
 // clamped to K. Empty slices write zeros. A/B retain their full-K row strides.
 // Reduce planes with existing GGML add operations on the same HIP context stream;
 // these probes perform no atomics, allocation, or reduction.
+// Indices 19=BF16/20=F16 are unsplit 128x128, eight-wave aligned-load probes.
+// They load eight F32 values per group with two float4 loads. Eligibility:
+// A/B bases aligned to 16 bytes, lda/ldb multiples of four floats, K multiple
+// of 32, and (for multiple batches) stride_a/stride_b multiples of four floats.
+// M/N tails are zero-filled; output addressing and WMMA scheduling are unchanged.
+// Optional F16RAW route output is "aligned_f32x8" or "wide_guarded" for 19/20,
+// and nullptr for 0..18. Ineligible inputs use the existing same-dtype wide kernel.
 // Keep explicit-F32 requests on the original overload or indices 0..4.
 void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
     int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
     int64_t stride_a, int64_t stride_b, int64_t stride_c, int64_t batches,
-    hipStream_t stream, int tile_index);
+    hipStream_t stream, int tile_index
+#ifdef F16RAW
+    , const char ** route = nullptr
+#endif
+    );

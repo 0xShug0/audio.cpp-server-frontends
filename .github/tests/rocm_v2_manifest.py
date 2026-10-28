@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -324,7 +324,36 @@ elif args.focus == 'split':
         dict(id='framework', build='device-health', gpu=True, timeout_s=15,
              cases=[dict(id='device-after', argv=health['argv'])]),
     ]
-if args.focus not in {'matrix','fused','dispatch','split'}:
+elif args.focus == 'loads':
+    builds = [build for build in builds if build['id'] in {
+        'device-health','ggml','matrix-candidate','vulkan'}]
+    shapes = [(m,n,k,pad) for m,n,k in sorted(captured_shapes | {
+        (128,8192,1792),(128,8192,5376),(256,1024,3584),
+        (129,769,5376),(129,769,5377),(67,131,97)}) for pad in (0,3)]
+    suites = [
+        dict(id='correctness', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-before', argv=health['argv'])]),
+        dict(id='matrix', build='matrix-candidate', gpu=True, timeout_s=90, cases=[
+            dict(id=mode+'-'+'-'.join(map(str,shape)), argv=['build/debug/raw-matrix']+
+                 list(map(str,shape))+[mode]) for shape in shapes
+            for mode in ['fusedwide-bf16','fusedwide-f16','vector-bf16','vector-f16']]),
+        dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
+                 '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
+            for i in list(range(221,238)) + [0,1,5]]),
+        dict(id='counters', build='matrix-candidate', gpu=True, required=False, timeout_s=90, cases=[
+            dict(id=group+'-'+mode, argv=['/opt/rocm/bin/rocprofv3','--pmc'] + metrics +
+                 ['--kernel-include-regex','Cijk_|halo_sgemm',
+                  '--kernel-iteration-range','[5-8]',
+                  '--output-format','csv','--output-directory','../results/pmc-'+group+'-'+mode,'--',
+                  'build/debug/raw-matrix','2080','768','5376','0',mode])
+            for group,metrics in [('fetch',['FETCH_SIZE']),('lds',['LDSBankConflict']),
+                ('cache',['L2CacheHit','MemUnitBusy']),('occupancy',['MeanOccupancyPerCU','VALUInsts'])]
+            for mode in ['fusedwide-bf16','vector-bf16']]),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+    ]
+if args.focus not in {'matrix','fused','dispatch','split','loads'}:
     builds = [build for build in builds if build['id'] != 'matrix-candidate']
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')

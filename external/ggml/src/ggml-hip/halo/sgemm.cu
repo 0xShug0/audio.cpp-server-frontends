@@ -83,7 +83,8 @@ __global__ __launch_bounds__(256) void halo_sgemm(
 // Convert only the current K32 operand tiles in LDS. No converted global buffers.
 // threadIdx.x is the wave32 lane: GGML's fragment coordinates require x < 32.
 template<int TileM, typename Packed, int TileN = 64,
-         int Nwarps = (TileM == 128 && TileN == 128 ? 8 : 4), int SplitK = 1>
+         int Nwarps = (TileM == 128 && TileN == 128 ? 8 : 4), int SplitK = 1,
+         bool AlignedLoads = false>
 __global__ __launch_bounds__(32 * Nwarps) void halo_sgemm_wmma(
     const float * __restrict__ a, const float * __restrict__ b, float * __restrict__ c,
     int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
@@ -127,21 +128,62 @@ __global__ __launch_bounds__(32 * Nwarps) void halo_sgemm_wmma(
 
     // Empty slices still store the zero-initialized accumulator plane below.
     for (int64_t base = start_k; base < end_k; base += 32) {
+        if constexpr (AlignedLoads) {
+            // Eligibility guarantees full K32 chunks and aligned rows/batches.
+            // Each group loads eight F32 values, then writes four packed pairs.
 #pragma unroll
-        for (int index = tid; index < TileM * 16; index += threads) {
-            const int row = index / 16;
-            const int64_t kk = base + 2 * (index % 16);
-            const float lo = row0 + row < m && kk < end_k ? a[(row0 + row) * lda + kk] : 0.0f;
-            const float hi = row0 + row < m && kk + 1 < end_k ? a[(row0 + row) * lda + kk + 1] : 0.0f;
-            aa[row][index % 16] = ggml_cuda_cast<Packed>(make_float2(lo, hi));
-        }
+            for (int i = 0; i < TileM * 4 / threads; ++i) {
+                const int index = tid + i * threads;
+                const int row = index / 4;
+                const int pair = 4 * (index % 4);
+                const int64_t kk = base + 2 * pair;
+                float4 lo = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                float4 hi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                if (row0 + row < m) {
+                    const float * src = a + (row0 + row) * lda + kk;
+                    lo = *reinterpret_cast<const float4 *>(src);
+                    hi = *reinterpret_cast<const float4 *>(src + 4);
+                }
+                aa[row][pair + 0] = ggml_cuda_cast<Packed>(make_float2(lo.x, lo.y));
+                aa[row][pair + 1] = ggml_cuda_cast<Packed>(make_float2(lo.z, lo.w));
+                aa[row][pair + 2] = ggml_cuda_cast<Packed>(make_float2(hi.x, hi.y));
+                aa[row][pair + 3] = ggml_cuda_cast<Packed>(make_float2(hi.z, hi.w));
+            }
 #pragma unroll
-        for (int index = tid; index < TileN * 16; index += threads) {
-            const int col = index / 16;
-            const int64_t kk = base + 2 * (index % 16);
-            const float lo = col0 + col < n && kk < end_k ? b[(col0 + col) * ldb + kk] : 0.0f;
-            const float hi = col0 + col < n && kk + 1 < end_k ? b[(col0 + col) * ldb + kk + 1] : 0.0f;
-            bb[col][index % 16] = ggml_cuda_cast<Packed>(make_float2(lo, hi));
+            for (int i = 0; i < TileN * 4 / threads; ++i) {
+                const int index = tid + i * threads;
+                const int col = index / 4;
+                const int pair = 4 * (index % 4);
+                const int64_t kk = base + 2 * pair;
+                float4 lo = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                float4 hi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                if (col0 + col < n) {
+                    const float * src = b + (col0 + col) * ldb + kk;
+                    lo = *reinterpret_cast<const float4 *>(src);
+                    hi = *reinterpret_cast<const float4 *>(src + 4);
+                }
+                bb[col][pair + 0] = ggml_cuda_cast<Packed>(make_float2(lo.x, lo.y));
+                bb[col][pair + 1] = ggml_cuda_cast<Packed>(make_float2(lo.z, lo.w));
+                bb[col][pair + 2] = ggml_cuda_cast<Packed>(make_float2(hi.x, hi.y));
+                bb[col][pair + 3] = ggml_cuda_cast<Packed>(make_float2(hi.z, hi.w));
+            }
+        } else {
+#pragma unroll
+            for (int index = tid; index < TileM * 16; index += threads) {
+                const int row = index / 16;
+                const int64_t kk = base + 2 * (index % 16);
+                const float lo = row0 + row < m && kk < end_k ? a[(row0 + row) * lda + kk] : 0.0f;
+                const float hi = row0 + row < m && kk + 1 < end_k ? a[(row0 + row) * lda + kk + 1] : 0.0f;
+                aa[row][index % 16] = ggml_cuda_cast<Packed>(make_float2(lo, hi));
+            }
+#pragma unroll
+            for (int index = tid; index < TileN * 16; index += threads) {
+                const int col = index / 16;
+                const int64_t kk = base + 2 * (index % 16);
+                const float lo = col0 + col < n && kk < end_k ? b[(col0 + col) * ldb + kk] : 0.0f;
+                const float hi = col0 + col < n && kk + 1 < end_k ? b[(col0 + col) * ldb + kk + 1] : 0.0f;
+                bb[col][index % 16] = ggml_cuda_cast<Packed>(make_float2(lo, hi));
+            }
         }
         __syncthreads();
 #pragma unroll
@@ -197,8 +239,15 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
 
 void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
     int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
-    int64_t sa, int64_t sb, int64_t sc, int64_t batches, hipStream_t stream, int tile_index) {
+    int64_t sa, int64_t sb, int64_t sc, int64_t batches, hipStream_t stream, int tile_index
 #ifdef F16RAW
+    , const char ** route
+#endif
+    ) {
+#ifdef F16RAW
+    if (route != nullptr) {
+        *route = nullptr;
+    }
     if (tile_index >= 13 && tile_index <= 18 && batches != 1) {
         throw std::invalid_argument("split-K SGEMM probes require batches == 1");
     }
@@ -281,10 +330,39 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
             halo_sgemm_wmma<128, half2, 128, 8, 8><<<dim3((m + 127) / 128, (n + 127) / 128, 8), dim3(32, 8), 0, stream>>>(
                 a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
             break;
+        case 19:
+        case 20: {
+            const bool aligned = reinterpret_cast<std::uintptr_t>(a) % 16 == 0 &&
+                reinterpret_cast<std::uintptr_t>(b) % 16 == 0 &&
+                lda % 4 == 0 && ldb % 4 == 0 && k % 32 == 0 &&
+                (batches <= 1 || (sa % 4 == 0 && sb % 4 == 0));
+            if (route != nullptr) {
+                *route = aligned ? "aligned_f32x8" : "wide_guarded";
+            }
+            const dim3 grid((m + 127) / 128, (n + 127) / 128, batches);
+            if (tile_index == 19) {
+                if (aligned) {
+                    halo_sgemm_wmma<128, nv_bfloat162, 128, 8, 1, true><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<128, nv_bfloat162, 128><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            } else {
+                if (aligned) {
+                    halo_sgemm_wmma<128, half2, 128, 8, 1, true><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<128, half2, 128><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            }
+            break;
+        }
 #endif
         default:
 #ifdef F16RAW
-            throw std::invalid_argument("SGEMM tile index must be 0..18");
+            throw std::invalid_argument("SGEMM tile index must be 0..20");
 #else
             throw std::invalid_argument("SGEMM tile index must be 0..4");
 #endif
