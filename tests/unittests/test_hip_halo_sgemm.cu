@@ -72,11 +72,20 @@ static void run(int m, int n, int k, int pad) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     int devices=0;
     if (hipGetDeviceCount(&devices)!=hipSuccess || devices==0)return 77;
     hipDeviceProp_t props;
     CHECK(hipGetDeviceProperties(&props,0));
     if (std::string(props.gcnArchName).find("gfx1151")!=0)return 77;
+    if (argc == 5) {
+        const int m = std::stoi(argv[1]), n = std::stoi(argv[2]);
+        const int k = std::stoi(argv[3]), pad = std::stoi(argv[4]);
+        if (m <= 0 || n <= 0 || k <= 0 || pad < 0) return 1;
+        run(m, n, k, pad);
+        std::puts("PASS selected SGEMM shape");
+        return 0;
+    }
     if (argc == 2) {
         std::ifstream file(argv[1]);
         if (!file) return 1;

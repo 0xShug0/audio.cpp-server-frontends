@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include <string>
 
 #define CHECK(x) do { if ((x)!=0) { std::fprintf(stderr,"API failure %s:%d: %s\n",__FILE__,__LINE__,#x);std::exit(1); } } while(0)
 
@@ -124,7 +125,16 @@ static void run(int k,int m,bool gated,int pad=0) {
     CHECK(hipFree(dpw));CHECK(hipFree(dpg));CHECK(hipFree(ds));CHECK(hipFree(dgs));
 }
 
-int main() {
+int main(int argc, char ** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc == 5) {
+        const int k = std::stoi(argv[1]), m = std::stoi(argv[2]);
+        const int gate = std::stoi(argv[3]), pad = std::stoi(argv[4]);
+        if (k <= 0 || k % 32 || m <= 0 || gate < 0 || gate > 1 || pad < 0) return 1;
+        run(k, m, gate != 0, pad);
+        std::puts("PASS selected MMVQ shape");
+        return 0;
+    }
     for(bool gate:{false,true}) {
         for(auto shape:std::vector<std::vector<int>>{{32,1},{96,3},{512,67},{512,512},{512,1024},{512,2048},
             {1024,512},{1024,1024},{1024,2048},{1024,3072},{1024,4096},

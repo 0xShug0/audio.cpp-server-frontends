@@ -20,6 +20,18 @@ int main(int argc, char ** argv) {
     hipDeviceProp_t device{};
     CHECK(hipGetDeviceProperties(&device, 0));
     std::printf("GPU=%s arch=%s\n", device.name, device.gcnArchName);
+    if (argc == 2 && std::strcmp(argv[1], "health") == 0) {
+        void * data = nullptr;
+        CHECK(hipMalloc(&data, 4096));
+        CHECK(hipMemset(data, 0x5a, 4096));
+        CHECK(hipDeviceSynchronize());
+        unsigned char value = 0;
+        CHECK(hipMemcpy(&value, data, 1, hipMemcpyDeviceToHost));
+        CHECK(hipFree(data));
+        if (value != 0x5a) return 3;
+        std::puts("PASS: device allocation, execution, synchronization and readback");
+        return 0;
+    }
     int supported = 0;
     CHECK(hipDeviceGetAttribute(&supported, hipDeviceAttributeVirtualMemoryManagementSupported, 0));
     std::printf("VMM supported=%d mode=%s\n", supported, prefix ? "prefix" : "subrange");

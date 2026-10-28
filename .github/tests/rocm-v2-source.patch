@@ -1,0 +1,1167 @@
+diff --git a/external/ggml/src/ggml-cuda/common.cuh b/external/ggml/src/ggml-cuda/common.cuh
+index f592d404..27eb76aa 100644
+--- a/external/ggml/src/ggml-cuda/common.cuh
++++ b/external/ggml/src/ggml-cuda/common.cuh
+@@ -1456,7 +1456,12 @@ struct ggml_backend_cuda_context {
+     // Fold a ROUND_BF16 that directly follows RMS_NORM*MUL, ADD or SwiGLU into
+     // the producing kernel. Off by default; set through
+     // ggml_backend_cuda_set_round_bf16_fusion(), scoped to this backend instance.
+-    bool round_bf16_fusion = false;
++    bool round_bf16_fusion = false;
++#ifdef GGML_USE_HIP
++    bool rocm_v2 = false;
++    uint64_t rocm_v2_sgemm_launches = 0;
++    uint64_t rocm_v2_im2col_launches = 0;
++#endif
+ 
+     ~ggml_backend_cuda_context();
+ 
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 539f5807..ea3c6a57 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -1,4 +1,7 @@
+ #include "ggml-cuda.h"
++#ifdef GGML_USE_HIP
++#include "ggml-hip/rocm_v2/rocm_v2.cuh"
++#endif
+ #include "ggml-impl.h"
+ #include "ggml-backend-impl.h"
+ 
+@@ -2755,6 +2758,12 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+ 
+ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
++#ifdef GGML_USE_HIP
++    if (ctx.rocm_v2 && !split && ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
++        ++ctx.rocm_v2_sgemm_launches;
++        return;
++    }
++#endif
+ 
+     if (dst->type == GGML_TYPE_F16) {
+         GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
+@@ -5047,6 +5056,17 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+ 
+     ggml_cuda_set_device(cuda_ctx->device);
++#ifdef GGML_USE_HIP
++    if (cuda_ctx->rocm_v2) {
++        for (int i = 0; i < ggml_graph_n_nodes(cgraph); ++i) {
++            const ggml_tensor * node = ggml_graph_node(cgraph, i);
++            if (!ggml_backend_supports_op(backend, node)) {
++                GGML_LOG_ERROR("rocm_v2: unsupported %s (%s)\n", ggml_op_name(node->op), node->name);
++                return GGML_STATUS_FAILED;
++            }
++        }
++    }
++#endif
+ 
+     bool use_cuda_graph             = false;
+     bool cuda_graph_update_required = false;
+@@ -5659,9 +5679,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
+ }
+ 
+ static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t dev, const char * params) {
+-    GGML_UNUSED(params);
+     ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *)dev->context;
++#ifdef GGML_USE_HIP
++    const bool v2 = params != nullptr && strcmp(params, "rocm_v2") == 0;
++    if (params != nullptr && params[0] != '\0' && !v2) {
++        GGML_LOG_ERROR("ROCm: unknown backend parameters: %s\n", params);
++        return nullptr;
++    }
++    if (v2 && ggml_cuda_info().devices[ctx->device].cc != GGML_CUDA_CC_OFFSET_AMD + 0x1151) {
++        GGML_LOG_ERROR("rocm_v2 currently requires gfx1151\n");
++        return nullptr;
++    }
++    ggml_backend_t backend = ggml_backend_cuda_init(ctx->device);
++    if (backend != nullptr && v2) {
++        static_cast<ggml_backend_cuda_context *>(backend->context)->rocm_v2 = true;
++        GGML_LOG_INFO("ROCm%d: implementation=rocm_v2\n", ctx->device);
++    }
++    return backend;
++#else
++    GGML_UNUSED(params);
+     return ggml_backend_cuda_init(ctx->device);
++#endif
+ }
+ 
+ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
+@@ -6263,8 +6301,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+     GGML_UNUSED(reg);
+ }
+ 
++#ifdef GGML_USE_HIP
++static void ggml_backend_rocm_v2_route_counts(ggml_backend_t backend, uint64_t * sgemm, uint64_t * im2col) {
++    const auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
++    *sgemm = ctx->rocm_v2_sgemm_launches;
++    *im2col = ctx->rocm_v2_im2col_launches;
++}
++#endif
++
+ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+     GGML_UNUSED(reg);
++#ifdef GGML_USE_HIP
++    if (strcmp(name, "ggml_backend_rocm_v2_init") == 0) {
++        return (void *) ggml_backend_cuda_device_init_backend;
++    }
++    if (strcmp(name, "ggml_backend_rocm_v2_route_counts") == 0) {
++        return (void *) ggml_backend_rocm_v2_route_counts;
++    }
++#endif
+     if (strcmp(name, "ggml_backend_comm_init") == 0) {
+         return (void *)ggml_backend_cuda_comm_init;
+     }
+diff --git a/external/ggml/src/ggml-cuda/im2col.cu b/external/ggml/src/ggml-cuda/im2col.cu
+index 7226f790..6e4acec1 100644
+--- a/external/ggml/src/ggml-cuda/im2col.cu
++++ b/external/ggml/src/ggml-cuda/im2col.cu
+@@ -1,4 +1,7 @@
+ #include "im2col.cuh"
++#ifdef GGML_USE_HIP
++#include "ggml-hip/rocm_v2/rocm_v2.cuh"
++#endif
+ 
+ #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+ static __global__ void im2col_f32_tiled_3x3(
+@@ -297,7 +300,13 @@ static void im2col_cuda_f32(const float * x, float * dst,
+                       s0, s1, p0, p1, d0, d1, lowering, stream);
+ }
+ 
+-void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++#ifdef GGML_USE_HIP
++    if (ctx.rocm_v2 && ggml_rocm_v2_im2col(dst->src[1], dst, ctx.stream())) {
++        ++ctx.rocm_v2_im2col_launches;
++        return;
++    }
++#endif
+     const ggml_tensor * src0 = dst->src[0];
+     const ggml_tensor * src1 = dst->src[1];
+     const float * src1_d = (const float *)src1->data;
+diff --git a/external/ggml/src/ggml-hip/CMakeLists.txt b/external/ggml/src/ggml-hip/CMakeLists.txt
+index deb063b7..0fdd363d 100644
+--- a/external/ggml/src/ggml-hip/CMakeLists.txt
++++ b/external/ggml/src/ggml-hip/CMakeLists.txt
+@@ -95,6 +95,8 @@ else()
+         ../ggml-cuda/template-instances/fattn-vec-instance-bf16-bf16.cu)
+ endif()
+ 
++list(APPEND GGML_SOURCES_ROCM rocm_v2/sgemm.cu rocm_v2/im2col.cu)
++
+ if (CXX_IS_HIPCC)
+     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
+ else()
+diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
+index 725bdc79..fe3df31b 100644
+--- a/external/ggml/tests/test-backend-ops.cpp
++++ b/external/ggml/tests/test-backend-ops.cpp
+@@ -23,6 +23,8 @@
+ #include <algorithm>
+ #include <array>
+ #include <cfloat>
++#include <cerrno>
++#include <cmath>
+ #include <cinttypes>
+ #include <cstdarg>
+ #include <cstdint>
+@@ -814,6 +816,11 @@ struct console_printer : public printer {
+             print_test_console(result);
+         } else if (result.test_mode == "perf") {
+             print_perf_console(result);
++        } else if (result.test_mode == "perf-compare") {
++            printf("  %s(%s): %s%s%s\n", result.op_name.c_str(), result.op_params.c_str(),
++                   result.passed ? "OK" : "FAIL", result.error_message.empty() ? "" : " ",
++                   result.error_message.c_str());
++            fflush(stdout);
+         } else if (result.test_mode == "support") {
+             print_support_console(result);
+         }
+@@ -1296,7 +1303,8 @@ struct test_case {
+     test_status_t eval(ggml_backend_t backend1,
+                        ggml_backend_t backend2,
+                        const char *   op_names_filter,
+-                       printer *      output_printer) {
++                       printer *      output_printer,
++                       bool           report_quality = false) {
+         mode = MODE_TEST;
+ 
+         ggml_init_params params = {
+@@ -1375,6 +1383,10 @@ struct test_case {
+             test_case * tc;
+             ggml_backend_t backend1;
+             ggml_backend_t backend2;
++            bool report_quality;
++            double nmse_max;
++            double max_abs;
++            double cosine_min;
+         };
+ 
+         callback_userdata ud {
+@@ -1382,6 +1394,10 @@ struct test_case {
+             this,
+             backend1,
+             backend2,
++            report_quality,
++            0.0,
++            0.0,
++            1.0,
+         };
+ 
+         auto callback = [](int index, ggml_tensor * t1, ggml_tensor * t2, void * user_data) -> bool {
+@@ -1430,6 +1446,23 @@ struct test_case {
+             }
+ 
+             double err = ud->tc->err(f1.data(), f2.data(), f1.size());
++            if (ud->report_quality) {
++                const double error = nmse(f1.data(), f2.data(), f1.size());
++                double dot = 0, norm_a = 0, norm_b = 0;
++                for (size_t i = 0; i < f1.size(); ++i) {
++                    const double a = f1[i], b = f2[i];
++                    ud->max_abs = std::max(ud->max_abs, std::abs(a - b));
++                    dot += a * b;
++                    norm_a += a * a;
++                    norm_b += b * b;
++                }
++                const double cosine = dot / std::sqrt(norm_a * norm_b);
++                if (!std::isfinite(error) || !std::isfinite(cosine)) {
++                    ud->ok = false;
++                }
++                ud->nmse_max = std::max(ud->nmse_max, error);
++                ud->cosine_min = std::min(ud->cosine_min, cosine);
++            }
+             if (err > ud->tc->max_err(ud->backend1)) {
+                 printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
+                 //for (int i = 0; i < (int) f1.size(); i++) {
+@@ -1461,6 +1494,12 @@ struct test_case {
+         std::string error_msg   = test_passed ? "" : (!cmp_ok ? "compare failed" : "test failed");
+         test_result result(ggml_backend_name(backend1), current_op_name, vars(), "test", supported, test_passed,
+                            error_msg);
++        if (report_quality) {
++            char quality[256];
++            snprintf(quality, sizeof(quality), ",nmse_max=%.12g,nmse_limit=%.12g,max_abs=%.12g,cosine_min=%.12g",
++                     ud.nmse_max, max_nmse_err(backend1), ud.max_abs, ud.cosine_min);
++            result.op_params += quality;
++        }
+ 
+         if (output_printer) {
+             output_printer->print_test_result(result);
+@@ -1469,7 +1508,8 @@ struct test_case {
+         return test_passed ? test_status_t::OK : test_status_t::FAIL;
+     }
+ 
+-    bool eval_perf(ggml_backend_t backend, const char * op_names_filter, printer * output_printer) {
++    bool eval_perf(ggml_backend_t backend, const char * op_names_filter, printer * output_printer,
++                   bool * selected = nullptr, bool strict = false) {
+         mode = MODE_PERF;
+ 
+         static const size_t graph_nodes = 8192;
+@@ -1489,6 +1529,9 @@ struct test_case {
+             return true;
+         }
+ 
++        if (selected) {
++            *selected = true;
++        }
+         if (!ggml_backend_supports_op(backend, out)) {
+             // Create test result for unsupported performance test
+             test_result result(ggml_backend_name(backend), current_op_name, vars(), "perf", false, false,
+@@ -1496,7 +1539,7 @@ struct test_case {
+ 
+             output_printer->print_test_result(result);
+ 
+-            return true;
++            return !strict;
+         }
+ 
+         // allocate
+@@ -1599,7 +1642,177 @@ struct test_case {
+         return true;
+     }
+ 
+-    bool eval_support(ggml_backend_t backend, const char * op_names_filter, printer * output_printer) {
++    test_status_t eval_perf_compare(ggml_backend_t baseline, ggml_backend_t candidate,
++                                    const char * op_names_filter, printer * output_printer) {
++        mode = MODE_PERF;
++        ggml_init_params params = {
++            /* .mem_size = */ ggml_tensor_overhead()*128 + ggml_graph_overhead(),
++            /* .mem_base = */ nullptr,
++            /* .no_alloc = */ true,
++        };
++        ggml_context_ptr ctx(ggml_init(params));
++        GGML_ASSERT(ctx);
++        gf = ggml_new_graph(ctx.get());
++        ggml_tensor * out = build_graph(ctx.get());
++        current_op_name = op_desc(out);
++        if (!matches_filter(out, op_names_filter)) {
++            return test_status_t::SKIPPED;
++        }
++        check_for_f16_tensor(ctx.get());
++        ggml_build_forward_expand(gf, out);
++        test_result result(ggml_backend_name(candidate), current_op_name, vars(), "perf-compare", true, false);
++        ggml_backend_buffer_ptr buf;
++        do {
++            // Check every node: the final output of CONV1D is only a reshape.
++            for (ggml_backend_t backend : {baseline, candidate}) {
++                for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
++                    ggml_tensor * node = ggml_graph_node(gf, i);
++                    if (!ggml_backend_supports_op(backend, node)) {
++                        result.supported = false;
++                        result.error_message = std::string("unsupported ") + ggml_op_desc(node) +
++                                               (backend == baseline ? " on baseline" : " on candidate");
++                        break;
++                    }
++                }
++                if (!result.supported) {
++                    break;
++                }
++            }
++            if (!result.supported) {
++                break;
++            }
++            buf.reset(ggml_backend_alloc_ctx_tensors(ctx.get(), baseline));
++            if (!buf) {
++                result.error_message = "failed to allocate shared tensors";
++                break;
++            }
++            if (!ggml_backend_supports_buft(candidate, ggml_backend_buffer_get_type(buf.get()))) {
++                result.error_message = "candidate cannot use baseline device buffer";
++                break;
++            }
++            // Initialize exactly once. Both instances use these same tensors, addresses and graph.
++            initialize_tensors(ctx.get());
++            std::vector<float> reference;
++            bool compute_ok = true;
++            for (ggml_backend_t backend : {baseline, candidate}) {
++                const ggml_status status = ggml_backend_graph_compute(backend, gf); // synchronizes
++                if (status != GGML_STATUS_SUCCESS) {
++                    result.error_message = std::string(backend == baseline ? "baseline: " : "candidate: ") +
++                                           ggml_status_to_string(status);
++                    compute_ok = false;
++                    break;
++                }
++                std::vector<float> values = tensor_to_float(out);
++                if (!std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); })) {
++                    result.error_message = backend == baseline ? "nonfinite baseline output" : "nonfinite candidate output";
++                    compute_ok = false;
++                    break;
++                }
++                if (backend == baseline) {
++                    reference = std::move(values);
++                } else {
++                    const double error = nmse(reference.data(), values.data(), values.size());
++                    const double tolerance = std::min(max_nmse_err(baseline), max_nmse_err(candidate));
++                    double max_abs = 0, dot = 0, norm_a = 0, norm_b = 0;
++                    for (size_t i = 0; i < values.size(); ++i) {
++                        const double a = reference[i], b = values[i];
++                        max_abs = std::max(max_abs, std::abs(a - b));
++                        dot += a * b;
++                        norm_a += a * a;
++                        norm_b += b * b;
++                    }
++                    const double cosine = dot / std::sqrt(norm_a * norm_b);
++                    char quality[256];
++                    snprintf(quality, sizeof(quality), ",nmse=%.12g,nmse_limit=%.12g,max_abs=%.12g,cosine=%.12g",
++                             error, tolerance, max_abs, cosine);
++                    result.op_params += quality; // Quality remains numeric even on PASS.
++                    if (!std::isfinite(error) || error > tolerance) {
++                        result.error_message = "NMSE exceeds existing test tolerance or is nonfinite";
++                        compute_ok = false;
++                        break;
++                    }
++                }
++            }
++            if (!compute_ok) {
++                break;
++            }
++            // Explicit warmup of both complete graphs after correctness, before any timed call.
++            for (ggml_backend_t backend : {baseline, candidate}) {
++                const ggml_status status = ggml_backend_graph_compute(backend, gf);
++                if (status != GGML_STATUS_SUCCESS) {
++                    result.error_message = std::string("warmup: ") + ggml_status_to_string(status);
++                    compute_ok = false;
++                    break;
++                }
++            }
++            if (!compute_ok) {
++                break;
++            }
++            using route_counts_t = void (*)(ggml_backend_t, uint64_t *, uint64_t *);
++            auto reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(candidate));
++            auto route_counts = (route_counts_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_rocm_v2_route_counts");
++            uint64_t sgemm_before[2] = {}, im2col_before[2] = {};
++            const std::array<ggml_backend_t, 2> backends = {baseline, candidate};
++            if (route_counts) {
++                for (size_t i = 0; i < backends.size(); ++i) {
++                    route_counts(backends[i], &sgemm_before[i], &im2col_before[i]);
++                }
++            }
++            std::array<std::vector<double>, 2> samples;
++            // Five ABBA rounds: ten samples per backend, no concurrent work or graph rebuilding.
++            for (int pair = 0; pair < 5 && compute_ok; ++pair) {
++                for (int i : {0, 1, 1, 0}) {
++                    ggml_backend_synchronize(backends[i]);
++                    const int64_t start = ggml_time_us();
++                    const ggml_status status = ggml_backend_graph_compute(backends[i], gf);
++                    const int64_t elapsed = ggml_time_us() - start;
++                    if (status != GGML_STATUS_SUCCESS || elapsed <= 0) {
++                        result.error_message = std::string(i == 0 ? "baseline timing: " : "candidate timing: ") +
++                                               ggml_status_to_string(status) + " elapsed_us=" + std::to_string(elapsed);
++                        compute_ok = false;
++                        break;
++                    }
++                    samples[i].push_back(elapsed / 1000.0);
++                }
++            }
++            if (!compute_ok) {
++                break;
++            }
++            double medians[2];
++            for (size_t i = 0; i < samples.size(); ++i) {
++                std::sort(samples[i].begin(), samples[i].end());
++                const size_t mid = samples[i].size() / 2;
++                medians[i] = (samples[i][mid - 1] + samples[i][mid]) / 2;
++            }
++            char metrics[256];
++            snprintf(metrics, sizeof(metrics),
++                     ",session.wall_ms=%.6f,baseline_ms=%.6f,candidate_ms=%.6f,ratio=%.6f,pairs=5,samples=10",
++                     medians[1], medians[0], medians[1], medians[1] / medians[0]);
++            result.op_params += metrics;
++            if (route_counts) {
++                for (size_t i = 0; i < backends.size(); ++i) {
++                    uint64_t sgemm, im2col;
++                    route_counts(backends[i], &sgemm, &im2col);
++                    result.op_params += std::string(i == 0 ? ",baseline" : ",candidate") +
++                                        ".sgemm=" + std::to_string(sgemm - sgemm_before[i]);
++                    result.op_params += std::string(i == 0 ? ",baseline" : ",candidate") +
++                                        ".im2col=" + std::to_string(im2col - im2col_before[i]);
++                }
++            } else {
++                result.op_params += ",route_counts=unavailable";
++            }
++            result.time_us = medians[1] * 1000;
++            result.n_runs = (int) samples[1].size();
++            result.passed = true;
++        } while (false);
++        output_printer->print_test_result(result);
++        fflush(stdout);
++        fflush(stderr);
++        return result.passed ? test_status_t::OK : test_status_t::FAIL;
++    }
++
++    bool eval_support(ggml_backend_t backend, const char * op_names_filter, printer * output_printer,
++                      bool * selected = nullptr) {
+         mode = MODE_SUPPORT;
+ 
+         static const size_t graph_nodes = 8192;
+@@ -1621,6 +1834,9 @@ struct test_case {
+             return true;
+         }
+ 
++        if (selected) {
++            *selected = true;
++        }
+         bool supported = ggml_backend_supports_op(backend, out);
+ 
+         std::string device_desc = ggml_backend_dev_description(ggml_backend_get_device(backend));
+@@ -5033,6 +5249,55 @@ struct test_pool1d : public test_case {
+     }
+ };
+ 
++// The v2 preflight must reject this graph with a status, before attempting any kernel.
++struct test_rocm_v2_unsupported : public test_pool1d {
++    std::string vars() override {
++        return test_pool1d::vars() + ",expected_status=GGML_STATUS_FAILED";
++    }
++
++    test_status_t eval_failure(ggml_backend_t backend, bool v2_active, const char * op_names_filter,
++                               printer * output_printer) {
++        mode = MODE_PERF;
++        ggml_init_params params = {ggml_tensor_overhead()*128 + ggml_graph_overhead(), nullptr, true};
++        ggml_context_ptr ctx(ggml_init(params));
++        GGML_ASSERT(ctx);
++        gf = ggml_new_graph(ctx.get());
++        ggml_tensor * out = build_graph(ctx.get());
++        current_op_name = op_desc(out);
++        if (!matches_filter(out, op_names_filter)) {
++            return test_status_t::SKIPPED;
++        }
++        test_result result(ggml_backend_name(backend), current_op_name, vars(), "test", true, false);
++        ggml_backend_buffer_ptr buf;
++        if (!v2_active) {
++            result.error_message = "expected-failure graph requires --backend-params rocm_v2";
++        } else if (ggml_backend_supports_op(backend, out)) {
++            result.error_message = "POOL_1D is supported; cannot assert unsupported-graph rejection";
++        } else {
++            ggml_build_forward_expand(gf, out);
++            buf.reset(ggml_backend_alloc_ctx_tensors(ctx.get(), backend));
++            if (!buf) {
++                result.error_message = "failed to allocate expected-failure graph";
++            } else {
++                initialize_tensors(ctx.get());
++                const ggml_status status = ggml_backend_graph_compute(backend, gf);
++                result.passed = status == GGML_STATUS_FAILED;
++                result.op_params += std::string(",actual_status=") + ggml_status_to_string(status);
++                if (!result.passed) {
++                    result.error_message = "expected GGML_STATUS_FAILED";
++                }
++            }
++        }
++        output_printer->print_test_result(result);
++        if (!result.error_message.empty()) {
++            fprintf(stderr, "%s\n", result.error_message.c_str());
++        }
++        fflush(stdout);
++        fflush(stderr);
++        return result.passed ? test_status_t::OK : test_status_t::FAIL;
++    }
++};
++
+ // GGML_OP_CONV_TRANSPOSE_1D
+ struct test_conv_transpose_1d : public test_case {
+     const std::array<int64_t, 4> ne_input;
+@@ -5146,6 +5411,25 @@ struct test_im2col : public test_case {
+         ggml_tensor * out = ggml_im2col(ctx, kernel, input, s0, s1, p0, p1, d0, d1, is_2D, dst_type);
+         ggml_set_name(out, "out");
+ 
++        return out;
++    }
++};
++
++// A complete lowering graph for correctness and repeated graph replay.
++struct test_rocm_v2_conv_1d : public test_im2col {
++    using test_im2col::test_im2col;
++
++    std::string op_desc(ggml_tensor *) override { return "CONV1D"; }
++    bool run_whole_graph() override { return true; }
++    double max_nmse_err() override { return 5e-4; } // existing matmul tolerance
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * input = ggml_new_tensor(ctx, type_input, 4, ne_input.data());
++        ggml_tensor * kernel = ggml_new_tensor(ctx, type_kernel, 4, ne_kernel.data());
++        ggml_set_name(input, "input");
++        ggml_set_name(kernel, "kernel");
++        ggml_tensor * out = ggml_conv_1d(ctx, kernel, input, s0, p0, d0);
++        ggml_set_name(out, "out");
+         return out;
+     }
+ };
+@@ -9446,8 +9730,68 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+     return test_cases;
+ }
+ 
++// Fixed order is also the public --case-index / --list-cases manifest order.
++static std::vector<std::unique_ptr<test_case>> make_test_cases_rocm_v2() {
++    std::vector<std::unique_ptr<test_case>> cases;
++    const std::array<int64_t, 2> one = {1, 1};
++    const std::array<int64_t, 4> identity = {0, 1, 2, 3};
++    for (const auto & shape : std::vector<std::array<int64_t, 3>> {
++            {128, 8192, 1792}, {256, 1024, 3584}, {512, 128, 1536},
++            {128, 550, 3200}, {2080, 768, 768}, {128, 8192, 5376},
++            {256, 1024, 5376}, {512, 768, 5376}}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32,
++                                           shape[0], shape[1], shape[2], one, one));
++    }
++    for (int64_t m : {127, 128, 129}) {
++        for (int64_t n : {767, 768, 769}) {
++            for (int64_t k : {255, 256, 257}) {
++                cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, n, k, one, one));
++            }
++        }
++    }
++    cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 128, 768, 256, one, one, identity, 288));
++    cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 129, 769, 5376, one, one, identity, 5408));
++    for (const auto & bs : {std::array<int64_t, 2>{2, 1}, std::array<int64_t, 2>{1, 2}}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 128, 768, 256, bs, one));
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 128, 768, 256, one, bs));
++    }
++    for (const auto & per : {std::array<int64_t, 4>{0, 3, 2, 1}, std::array<int64_t, 4>{0, 2, 1, 3},
++                            std::array<int64_t, 4>{0, 1, 3, 2}}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 128, 768, 256,
++                                           std::array<int64_t, 2>{2, 3}, one, per));
++    }
++    for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
++        cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 128, 768, 256, one, one));
++        cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 129, 769, 256, one, one));
++    }
++    // Cover every width/channel/kernel/stride/output type, with bounded representative combinations.
++    for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) {
++        for (int64_t width : {32, 129, 2048, 8193}) {
++            for (int64_t channels : {3, 32, 128}) {
++                for (int kernel : {3, 7}) {
++                    const int stride = kernel == 3 ? 1 : 2;
++                    const int dilation = width == 129 || width == 8193 ? 2 : 1;
++                    const int padding = width == 32 ? 0 : dilation * (kernel / 2);
++                    cases.emplace_back(new test_im2col(GGML_TYPE_F32, type, type,
++                        std::array<int64_t, 4>{width, channels, 1, 1},
++                        std::array<int64_t, 4>{kernel, channels, 1, 1},
++                        stride, 0, padding, 0, dilation, 0, false));
++                }
++            }
++        }
++    }
++    for (int64_t width : {129, 2048}) {
++        cases.emplace_back(new test_rocm_v2_conv_1d(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32,
++            std::array<int64_t, 4>{width, 128, 1, 1}, std::array<int64_t, 4>{7, 128, 768, 1},
++            1, 0, 3, 0, 1, 0, false));
++    }
++    cases.emplace_back(new test_rocm_v2_unsupported());
++    return cases;
++}
++
+ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op_names_filter, const char * params_filter,
+-                         printer * output_printer, const char * test_file_path) {
++                         printer * output_printer, const char * test_file_path, bool rocm_v2_suite = false,
++                         long case_index = -1, ggml_backend_t compare_backend = nullptr, bool v2_active = false) {
+     auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
+         if (params_filter == nullptr) {
+             return;
+@@ -9467,7 +9811,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+ 
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
+-    if (test_file_path == nullptr) {
++    if (rocm_v2_suite) {
++        test_cases = make_test_cases_rocm_v2();
++        if (case_index >= 0) {
++            if ((size_t) case_index >= test_cases.size()) {
++                fprintf(stderr, "--case-index %ld is out of range (cases=%zu)\n", case_index, test_cases.size());
++                return false;
++            }
++            auto selected = std::move(test_cases[case_index]);
++            test_cases.clear();
++            test_cases.emplace_back(std::move(selected));
++        }
++    } else if (test_file_path == nullptr) {
+         switch (mode) {
+         case MODE_TEST:
+         case MODE_GRAD:
+@@ -9483,6 +9838,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+     }
+ 
+     filter_test_cases(test_cases, params_filter);
++    if ((rocm_v2_suite || compare_backend) && test_cases.empty()) {
++        fprintf(stderr, "No cases selected\n");
++        return false;
++    }
++
++    size_t negative_run = 0, negative_ok = 0;
++    if (rocm_v2_suite && mode != MODE_SUPPORT) {
++        for (auto it = test_cases.begin(); it != test_cases.end();) {
++            auto * negative = dynamic_cast<test_rocm_v2_unsupported *>(it->get());
++            if (!negative) {
++                ++it;
++                continue;
++            }
++            const test_status_t status = negative->eval_failure(backend, v2_active, op_names_filter, output_printer);
++            if (status != test_status_t::SKIPPED) {
++                ++negative_run;
++                negative_ok += status == test_status_t::OK;
++            }
++            it = test_cases.erase(it);
++        }
++        if (test_cases.empty()) {
++            if (negative_run == 0) {
++                fprintf(stderr, "No cases selected\n");
++            }
++            return negative_run > 0 && negative_ok == negative_run;
++        }
++    }
+ 
+     if (mode == MODE_TEST) {
+         ggml_backend_t backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+@@ -9500,11 +9882,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+             set_use_ref(backend_cpu, true);
+         }
+ 
+-        size_t n_ok = 0;
+-        size_t                   tests_run = 0;
++        size_t n_ok = negative_ok;
++        size_t                   tests_run = negative_run;
+         std::vector<std::string> failed_tests;
+         for (auto & test : test_cases) {
+-            test_status_t status = test->eval(backend, backend_cpu, op_names_filter, output_printer);
++            // The CPU IM2COL kernel has no BF16 output implementation despite its support probe.
++            // Keep these manifest cases available for paired device correctness/performance.
++            auto * im2col = dynamic_cast<test_im2col *>(test.get());
++            if (rocm_v2_suite && im2col && im2col->dst_type == GGML_TYPE_BF16) {
++                test_result result(ggml_backend_name(backend), "IM2COL", test->vars(), "test", false, false,
++                                   "CPU reference does not implement BF16 IM2COL; use paired perf");
++                output_printer->print_test_result(result);
++                fprintf(stderr, "%s\n", result.error_message.c_str());
++                continue;
++            }
++            test_status_t status = test->eval(backend, backend_cpu, op_names_filter, output_printer, rocm_v2_suite);
++            if (rocm_v2_suite) {
++                fflush(stdout);
++                fflush(stderr);
++            }
+             if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
+                 continue;
+             }
+@@ -9520,6 +9916,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+ 
+         ggml_backend_free(backend_cpu);
+ 
++        if (rocm_v2_suite && tests_run == 0) {
++            fprintf(stderr, "No runnable cases selected\n");
++            return false;
++        }
+         return n_ok == tests_run;
+     }
+ 
+@@ -9536,10 +9936,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+     }
+ 
+     if (mode == MODE_PERF) {
++        size_t selected_count = negative_run;
++        bool ok = negative_ok == negative_run;
+         for (auto & test : test_cases) {
+-            test->eval_perf(backend, op_names_filter, output_printer);
+-        }
+-        return true;
++            if (compare_backend) {
++                const test_status_t status = test->eval_perf_compare(compare_backend, backend, op_names_filter, output_printer);
++                if (status != test_status_t::SKIPPED) {
++                    ++selected_count;
++                    ok = status == test_status_t::OK && ok;
++                }
++            } else {
++                bool selected = false;
++                const bool passed = test->eval_perf(backend, op_names_filter, output_printer, &selected, rocm_v2_suite);
++                selected_count += selected;
++                ok = passed && ok;
++            }
++            if (rocm_v2_suite || compare_backend) {
++                fflush(stdout);
++                fflush(stderr);
++            }
++        }
++        if ((rocm_v2_suite || compare_backend) && selected_count == 0) {
++            fprintf(stderr, "No performance cases selected\n");
++            return false;
++        }
++        return rocm_v2_suite || compare_backend ? ok : true;
+     }
+ 
+     if (mode == MODE_SUPPORT) {
+@@ -9551,8 +9972,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+             test_cases.end()
+         );
+ 
++        size_t selected_count = 0;
+         for (auto & test : test_cases) {
+-            test->eval_support(backend, op_names_filter, output_printer);
++            bool selected = false;
++            test->eval_support(backend, op_names_filter, output_printer, &selected);
++            selected_count += selected;
++            if (rocm_v2_suite) {
++                fflush(stdout);
++                fflush(stderr);
++            }
++        }
++        if (rocm_v2_suite && selected_count == 0) {
++            fprintf(stderr, "No support cases selected\n");
++            return false;
+         }
+         return true;
+     }
+@@ -9663,6 +10095,12 @@ static void show_test_coverage() {
+ static void usage(char ** argv) {
+     printf("Usage: %s [mode] [-o <op,..>] [-b <backend>] [-p <params regex>] [--output <console|sql|csv>] [--list-ops]", argv[0]);
+     printf(" [--show-coverage] [--test-file <path>]\n");
++    printf("    --backend-params <string> passes parameters to device initialization (default: NULL)\n");
++    printf("    --compare-params <string> enables paired perf; these are baseline params, --backend-params is candidate\n");
++    printf("        An empty comparison string initializes the baseline with NULL; ratio=candidate/baseline\n");
++    printf("    --suite rocm-v2 selects focused matmul, IM2COL1D and CONV1D graph cases\n");
++    printf("    --case-index N selects one original suite index (suite only)\n");
++    printf("    --list-cases lists index, op, vars separated by tabs without loading backends (suite only)\n");
+     printf("    valid modes:\n");
+     printf("      - test (default, compare with CPU backend for correctness)\n");
+     printf("      - grad (compare gradients from backpropagation with method of finite differences)\n");
+@@ -9683,6 +10121,11 @@ int main(int argc, char ** argv) {
+     const char * backend_filter = nullptr;
+     const char * params_filter = nullptr;
+     const char * test_file_path = nullptr;
++    const char * backend_params = nullptr;
++    const char * compare_params = nullptr;
++    bool rocm_v2_suite = false;
++    bool list_cases = false;
++    long case_index = -1;
+ 
+     for (int i = 1; i < argc; i++) {
+         if (strcmp(argv[i], "test") == 0) {
+@@ -9714,6 +10157,38 @@ int main(int argc, char ** argv) {
+                 usage(argv);
+                 return 1;
+             }
++        } else if (strcmp(argv[i], "--backend-params") == 0 || strcmp(argv[i], "--compare-params") == 0) {
++            const bool compare = strcmp(argv[i], "--compare-params") == 0;
++            if (i + 1 >= argc) {
++                usage(argv);
++                return 1;
++            }
++            if (compare) {
++                compare_params = argv[++i];
++            } else {
++                backend_params = argv[++i];
++            }
++        } else if (strcmp(argv[i], "--suite") == 0) {
++            if (i + 1 >= argc || strcmp(argv[++i], "rocm-v2") != 0) {
++                fprintf(stderr, "Expected --suite rocm-v2\n");
++                return 1;
++            }
++            rocm_v2_suite = true;
++        } else if (strcmp(argv[i], "--case-index") == 0) {
++            if (i + 1 >= argc) {
++                usage(argv);
++                return 1;
++            }
++            char * end = nullptr;
++            errno = 0;
++            const char * value = argv[++i];
++            case_index = strtol(value, &end, 10);
++            if (errno || end == value || *end != '\0' || case_index < 0) {
++                fprintf(stderr, "Invalid --case-index: %s\n", value);
++                return 1;
++            }
++        } else if (strcmp(argv[i], "--list-cases") == 0) {
++            list_cases = true;
+         } else if (strcmp(argv[i], "--output") == 0) {
+             if (i + 1 < argc) {
+                 if (!output_format_from_str(argv[++i], output_format)) {
+@@ -9743,6 +10218,47 @@ int main(int argc, char ** argv) {
+         }
+     }
+ 
++    if ((!rocm_v2_suite && (list_cases || case_index >= 0)) ||
++        (rocm_v2_suite && (test_file_path || mode == MODE_GRAD)) ||
++        (compare_params && mode != MODE_PERF && !list_cases)) {
++        fprintf(stderr, "Case selection requires a suite; rocm-v2 excludes grad/test-file; compare requires perf\n");
++        return 1;
++    }
++    if (rocm_v2_suite || compare_params) {
++        // Existing GGML logging defaults to stderr. Flush both streams for crash-isolated campaigns.
++        setvbuf(stdout, nullptr, _IONBF, 0);
++        setvbuf(stderr, nullptr, _IONBF, 0);
++    }
++    if (list_cases) {
++        auto cases = make_test_cases_rocm_v2();
++        if (case_index >= 0 && (size_t) case_index >= cases.size()) {
++            fprintf(stderr, "--case-index %ld is out of range (cases=%zu)\n", case_index, cases.size());
++            return 1;
++        }
++        const std::regex params_regex(params_filter ? params_filter : ".*");
++        size_t selected_count = 0;
++        for (size_t i = 0; i < cases.size(); ++i) {
++            if ((case_index >= 0 && i != (size_t) case_index) || !std::regex_search(cases[i]->vars(), params_regex)) {
++                continue;
++            }
++            ggml_init_params params = {ggml_tensor_overhead()*128 + ggml_graph_overhead(), nullptr, true};
++            ggml_context_ptr ctx(ggml_init(params));
++            GGML_ASSERT(ctx);
++            cases[i]->mode = MODE_PERF;
++            cases[i]->gf = ggml_new_graph(ctx.get());
++            ggml_tensor * out = cases[i]->build_graph(ctx.get());
++            if (cases[i]->matches_filter(out, op_names_filter)) {
++                printf("%zu\t%s\t%s\n", i, cases[i]->op_desc(out).c_str(), cases[i]->vars().c_str());
++                ++selected_count;
++            }
++        }
++        if (selected_count == 0) {
++            fprintf(stderr, "No cases selected\n");
++            return 1;
++        }
++        return 0;
++    }
++
+     // load and enumerate backends
+     ggml_backend_load_all();
+ 
+@@ -9755,6 +10271,7 @@ int main(int argc, char ** argv) {
+     output_printer->print_testing_start(testing_start_info(ggml_backend_dev_count()));
+ 
+     size_t n_ok = 0;
++    size_t selected_backends = 0;
+ 
+     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+@@ -9773,14 +10290,38 @@ int main(int argc, char ** argv) {
+             continue;
+         }
+ 
+-        ggml_backend_t backend = ggml_backend_dev_init(dev, NULL);
++        ++selected_backends;
++        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
++        const bool explicit_v2 = (backend_params && strcmp(backend_params, "rocm_v2") == 0) ||
++                                 (compare_params && strcmp(compare_params, "rocm_v2") == 0);
++        if (explicit_v2 && !ggml_backend_reg_get_proc_address(reg, "ggml_backend_rocm_v2_route_counts")) {
++            fprintf(stderr, "Backend %s does not export the HIP rocm_v2 hook; refusing explicit rocm_v2 parameters\n",
++                    ggml_backend_dev_name(dev));
++            continue;
++        }
++        ggml_backend_t backend = ggml_backend_dev_init(dev, backend_params);
++        if ((rocm_v2_suite || compare_params) && !backend) {
++            fprintf(stderr, "Failed to initialize candidate backend %s\n", ggml_backend_dev_name(dev));
++            continue;
++        }
+         GGML_ASSERT(backend != NULL);
++        ggml_backend_ptr compare_backend;
++        if (compare_params) {
++            compare_backend.reset(ggml_backend_dev_init(dev, compare_params[0] ? compare_params : nullptr));
++            if (!compare_backend) {
++                fprintf(stderr, "Failed to initialize baseline backend %s\n", ggml_backend_dev_name(dev));
++                ggml_backend_free(backend);
++                continue;
++            }
++        }
+ 
+-        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+         auto ggml_backend_set_n_threads_fn = (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
+         if (ggml_backend_set_n_threads_fn) {
+             // TODO: better value for n_threads
+             ggml_backend_set_n_threads_fn(backend, N_THREADS);
++            if (compare_backend) {
++                ggml_backend_set_n_threads_fn(compare_backend.get(), N_THREADS);
++            }
+         }
+ 
+         size_t free, total;  // NOLINT
+@@ -9789,7 +10330,9 @@ int main(int argc, char ** argv) {
+                                                              false, "", ggml_backend_dev_description(dev),
+                                                              total / 1024 / 1024, free / 1024 / 1024, true));
+ 
+-        bool ok = test_backend(backend, mode, op_names_filter, params_filter, output_printer.get(), test_file_path);
++        bool ok = test_backend(backend, mode, op_names_filter, params_filter, output_printer.get(), test_file_path,
++                               rocm_v2_suite, case_index, compare_backend.get(),
++                               backend_params && strcmp(backend_params, "rocm_v2") == 0);
+ 
+         if (ok) {
+             n_ok++;
+@@ -9807,8 +10350,13 @@ int main(int argc, char ** argv) {
+     }
+ 
+     output_printer->print_overall_summary(
+-        overall_summary_info(n_ok, ggml_backend_dev_count(), n_ok == ggml_backend_dev_count()));
++        overall_summary_info(n_ok, ggml_backend_dev_count(), n_ok == ggml_backend_dev_count() &&
++                             (!(rocm_v2_suite || compare_params) || selected_backends > 0)));
+ 
++    if ((rocm_v2_suite || compare_params) && selected_backends == 0) {
++        fprintf(stderr, "No backend selected\n");
++        return 1;
++    }
+     if (n_ok != ggml_backend_dev_count()) {
+         return 1;
+     }
+diff --git a/external/ggml/src/ggml-hip/rocm_v2/im2col.cu b/external/ggml/src/ggml-hip/rocm_v2/im2col.cu
+new file mode 100644
+index 00000000..2376e673
+--- /dev/null
++++ b/external/ggml/src/ggml-hip/rocm_v2/im2col.cu
+@@ -0,0 +1,100 @@
++#include "rocm_v2.cuh"
++
++#include <hip/hip_fp16.h>
++#include <hip/hip_bfloat16.h>
++
++#include <algorithm>
++#include <climits>
++
++namespace {
++
++// Wave32 reads adjacent time samples. A padded LDS transpose then gives each
++// wave adjacent patch-column stores, without the generic kernel's channel jumps.
++template<typename T>
++__global__ void rocm_v2_im2col_1d(
++        const float * __restrict__ input, T * __restrict__ output,
++        int64_t width, int64_t positions, int64_t kernel, int64_t columns, int64_t batches,
++        int64_t channel_stride, int64_t batch_stride, int stride, int padding, int dilation) {
++    __shared__ float tile[32][33];
++    const int64_t column_base = int64_t(blockIdx.x) * 32;
++    for (int64_t batch = blockIdx.z; batch < batches; batch += gridDim.z) {
++        for (int64_t base = int64_t(blockIdx.y) * 32; base < positions; base += int64_t(gridDim.y) * 32) {
++            const int64_t position = base + threadIdx.x;
++#pragma unroll
++            for (int j = 0; j < 32; j += 8) {
++                const int64_t column = column_base + threadIdx.y + j;
++                const int64_t channel = column / kernel;
++                const int64_t tap = column % kernel;
++                const int64_t source = position * stride + tap * dilation - padding;
++                float value = 0;
++                if (position < positions && column < columns && source >= 0 && source < width) {
++                    value = input[batch * batch_stride + channel * channel_stride + source];
++                }
++                tile[threadIdx.y + j][threadIdx.x] = value;
++            }
++            __syncthreads();
++#pragma unroll
++            for (int j = 0; j < 32; j += 8) {
++                const int64_t out_position = base + threadIdx.y + j;
++                const int64_t out_column = column_base + threadIdx.x;
++                if (out_position < positions && out_column < columns) {
++                    output[(batch * positions + out_position) * columns + out_column] =
++                        T(tile[threadIdx.x][threadIdx.y + j]);
++                }
++            }
++            __syncthreads();
++        }
++    }
++}
++
++template<typename T>
++void launch(const float * input, void * output,
++        int64_t width, int64_t positions, int64_t kernel, int64_t columns, int64_t batches,
++        int64_t channel_stride, int64_t batch_stride,
++        int stride, int padding, int dilation, hipStream_t stream) {
++    const dim3 grid(unsigned((columns + 31) / 32),
++                    unsigned(std::min<int64_t>((positions + 31) / 32, 65535)),
++                    unsigned(std::min<int64_t>(batches, 65535)));
++    rocm_v2_im2col_1d<T><<<grid, dim3(32, 8), 0, stream>>>(input, static_cast<T *>(output),
++        width, positions, kernel, columns, batches, channel_stride, batch_stride,
++        stride, padding, dilation);
++}
++
++} // namespace
++
++bool ggml_rocm_v2_im2col(const ggml_tensor * input, ggml_tensor * out, hipStream_t stream) {
++    const auto * params = reinterpret_cast<const int32_t *>(out->op_params);
++    const auto * kernel_tensor = out->src[0];
++    if (params[6] != 0 || params[7] != 0 || input->type != GGML_TYPE_F32 ||
++        input->nb[0] != sizeof(float) || !ggml_is_contiguous(out)) {
++        return false;
++    }
++    const int64_t width = input->ne[0], positions = out->ne[1], kernel = kernel_tensor->ne[0];
++    const int64_t channels = input->ne[1], batches = input->ne[2];
++    if (width <= 0 || positions < 32 || kernel <= 0 || channels <= 0 || batches <= 0 ||
++        kernel > INT_MAX || channels > INT_MAX / kernel || positions > INT_MAX ||
++        input->nb[1] % sizeof(float) || input->nb[2] % sizeof(float)) {
++        return false;
++    }
++    const auto columns = channels * kernel;
++    const auto channel_stride = input->nb[1] / sizeof(float);
++    const auto batch_stride = input->nb[2] / sizeof(float);
++    const auto * data = static_cast<const float *>(input->data);
++    switch (out->type) {
++        case GGML_TYPE_F32:
++            launch<float>(data, out->data, width, positions, kernel, columns, batches,
++                channel_stride, batch_stride, params[0], params[2], params[4], stream);
++            break;
++        case GGML_TYPE_F16:
++            launch<__half>(data, out->data, width, positions, kernel, columns, batches,
++                channel_stride, batch_stride, params[0], params[2], params[4], stream);
++            break;
++        case GGML_TYPE_BF16:
++            launch<hip_bfloat16>(data, out->data, width, positions, kernel, columns, batches,
++                channel_stride, batch_stride, params[0], params[2], params[4], stream);
++            break;
++        default:
++            return false;
++    }
++    return true;
++}
+diff --git a/external/ggml/src/ggml-hip/rocm_v2/rocm_v2.cuh b/external/ggml/src/ggml-hip/rocm_v2/rocm_v2.cuh
+new file mode 100644
+index 00000000..61250aff
+--- /dev/null
++++ b/external/ggml/src/ggml-hip/rocm_v2/rocm_v2.cuh
+@@ -0,0 +1,10 @@
++#pragma once
++
++#include "ggml.h"
++#include <hip/hip_runtime.h>
++
++// False means this signature keeps the inherited HIP implementation.
++bool ggml_rocm_v2_mul_mat(const ggml_tensor * a, const ggml_tensor * b,
++                          ggml_tensor * out, hipStream_t stream);
++bool ggml_rocm_v2_im2col(const ggml_tensor * input, ggml_tensor * out,
++                         hipStream_t stream);
+diff --git a/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
+new file mode 100644
+index 00000000..a5565c35
+--- /dev/null
++++ b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
+@@ -0,0 +1,83 @@
++#include "rocm_v2.cuh"
++#include <climits>
++
++namespace {
++
++// Reuse each 64x32 operand tile for 64 output rows/columns. Unlike reduced-
++// precision matrix instructions, this retains FP32 inputs and accumulation.
++__global__ __launch_bounds__(256) void rocm_v2_sgemm(
++    const float * __restrict__ a, const float * __restrict__ b, float * __restrict__ c,
++    int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
++    int64_t sa, int64_t sb, int64_t sc) {
++    __shared__ float aa[32][65];
++    __shared__ float bb[32][65];
++    const int tid = threadIdx.x;
++    const int row = tid % 16;
++    const int col = tid / 16;
++    const int64_t row0 = int64_t(blockIdx.x) * 64;
++    const int64_t col0 = int64_t(blockIdx.y) * 64;
++    a += int64_t(blockIdx.z) * sa;
++    b += int64_t(blockIdx.z) * sb;
++    c += int64_t(blockIdx.z) * sc;
++    float sum[4][4] = {};
++    for (int64_t base = 0; base < k; base += 32) {
++#pragma unroll
++        for (int i = 0; i < 8; ++i) {
++            const int index = tid + i * 256;
++            const int kk = index % 32;
++            const int rr = index / 32;
++            aa[kk][rr] = base + kk < k && row0 + rr < m ? a[(row0 + rr) * lda + base + kk] : 0;
++            bb[kk][rr] = base + kk < k && col0 + rr < n ? b[(col0 + rr) * ldb + base + kk] : 0;
++        }
++        __syncthreads();
++#pragma unroll
++        for (int kk = 0; kk < 32; ++kk) {
++            float av[4], bv[4];
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                av[i] = aa[kk][row + i * 16];
++                bv[i] = bb[kk][col + i * 16];
++            }
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++#pragma unroll
++                for (int j = 0; j < 4; ++j) {
++                    sum[i][j] = fmaf(av[i], bv[j], sum[i][j]);
++                }
++            }
++        }
++        __syncthreads();
++    }
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++#pragma unroll
++        for (int j = 0; j < 4; ++j) {
++            if (row0 + row + i * 16 < m && col0 + col + j * 16 < n) {
++                c[(col0 + col + j * 16) * ldc + row0 + row + i * 16] = sum[i][j];
++            }
++        }
++    }
++}
++
++} // namespace
++
++bool ggml_rocm_v2_mul_mat(const ggml_tensor * a, const ggml_tensor * b,
++                          ggml_tensor * out, hipStream_t stream) {
++    if (a->type != GGML_TYPE_F32 || b->type != GGML_TYPE_F32 || out->type != GGML_TYPE_F32 ||
++        a->ne[2] != 1 || a->ne[3] != 1 || b->ne[2] != 1 || b->ne[3] != 1 ||
++        a->nb[0] != sizeof(float) || b->nb[0] != sizeof(float) || !ggml_is_contiguous(out)) {
++        return false;
++    }
++    const int64_t m = a->ne[1], n = b->ne[1], k = a->ne[0];
++    // Small and narrow matrices retain HIP's vector/library kernels.
++    if (m < 128 || n < 768 || k < 256 || m > INT_MAX || n > 65535 * 64 || k > INT_MAX ||
++        a->nb[1] < size_t(k) * sizeof(float) || b->nb[1] < size_t(k) * sizeof(float) ||
++        a->nb[1] % sizeof(float) || b->nb[1] % sizeof(float)) {
++        return false;
++    }
++    rocm_v2_sgemm<<<dim3((m + 63) / 64, (n + 63) / 64), 256, 0, stream>>>(
++        static_cast<const float *>(a->data), static_cast<const float *>(b->data),
++        static_cast<float *>(out->data), m, n, k, a->nb[1] / sizeof(float),
++        b->nb[1] / sizeof(float), m, 0, 0, 0);
++    return true;
++}

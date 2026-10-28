@@ -176,11 +176,24 @@ int main(int argc, char ** argv) {
                     false,true,cs,bs,ggml_type(type)});
             }
         }
-        int count = 0;
+        int begin = 0, end = 2147483647;
+        if (argc == 4 && std::string(argv[1]) == "--range") {
+            begin = std::stoi(argv[2]);
+            const int length = std::stoi(argv[3]);
+            if (begin < 0 || length <= 0 || length > 2147483647 - begin)
+                throw std::runtime_error("invalid case range");
+            end = begin + length;
+        }
+        int count = 0, index = 0;
         for (const auto & shape : shapes) for (auto type : {GGML_TYPE_F32,GGML_TYPE_F16,GGML_TYPE_BF16}) {
             if (shape.only_type != GGML_TYPE_COUNT && shape.only_type != type) continue;
+            const int current = index++;
+            if (current < begin || current >= end) continue;
+            std::printf("START case=%d\n", current);
             run(shape,type,stream); ++count;
+            std::printf("DONE case=%d\n", current);
         }
+        if (!count) throw std::runtime_error("no cases selected");
         HIP_CHECK(hipStreamDestroy(stream));
         std::printf("PASS cases=%d; two input updates; original and independent scalar bit parity; guards intact\n",count);
     } catch (const std::exception & error) {

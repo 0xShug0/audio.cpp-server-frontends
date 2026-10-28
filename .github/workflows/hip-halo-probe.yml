@@ -1,18 +1,13 @@
-name: Halo isolated kernel iteration
+name: ROCm v2 isolated campaign
 
 on:
+  workflow_dispatch:
   push:
-    branches: [experiment/halo-kernels]
+    branches: [experiment/rocm-v2-probes]
     paths:
       - .github/workflows/hip-halo-probe.yml
-      - external/ggml/src/ggml-hip/halo/sgemm.*
-      - external/ggml/src/ggml-hip/halo/mmvq.*
-      - .github/tests/extract_halo_mmvq_probe.py
-      - tests/unittests/test_hip_halo_mmvq.cu
-      - tests/unittests/test_hip_halo_sgemm.cu
-      - tests/unittests/assets/hip_halo/qwen3_sgemm_shapes.txt
-      - tests/unittests/assets/hip_halo/mmvq_candidates.cuh
-  workflow_dispatch:
+      - .github/tests/rocm_v2_*
+      - .github/tests/rocm-v2-*
 
 permissions:
   contents: read
@@ -20,48 +15,125 @@ permissions:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: curl --fail --location --max-time 120 --retry 2 -o source.tar.gz "https://codeload.github.com/$GITHUB_REPOSITORY/tar.gz/$GITHUB_SHA"
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/tests
+            tests/unittests/test_hip_halo_sgemm.cu
+            tests/unittests/test_hip_halo_im2col.cu
+            tests/unittests/test_hip_halo_mmvq.cu
+            tests/unittests/assets/hip_halo
+            external/ggml/src/ggml-hip/halo
+      - name: Validate orchestration and prepare minimal pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s .github/tests -p test_rocm_v2_campaign.py -v
+          git init source
+          git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+          git -C source config core.autocrlf false
+          git -C source fetch --no-tags --depth=1 --filter=blob:none origin a53699007eee6616f4bc33c0ae2b1f069dac49c0
+          git -C source sparse-checkout set external/ggml
+          git -C source checkout --detach FETCH_HEAD
+          git -C source rev-parse HEAD > source-commit.txt
+          git -C source apply --check ../.github/tests/rocm-v2-source.patch
+          git -C source apply ../.github/tests/rocm-v2-source.patch
+          cp -a external/ggml/src/ggml-hip/halo source/external/ggml/src/ggml-hip/
+          mkdir -p source/tests/unittests/assets/hip_halo source/.github/tests
+          cp tests/unittests/test_hip_halo_*.cu source/tests/unittests/
+          cp tests/unittests/assets/hip_halo/* source/tests/unittests/assets/hip_halo/
+          cp .github/tests/extract_halo_mmvq_probe.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+          cp .github/tests/rocm_v2_*.py source/.github/tests/
+          cp .github/tests/rocm-v2-cases.tsv source/.github/tests/
+          cp source-commit.txt source/
+          sha256sum .github/tests/rocm-v2-source.patch > source/patch-sha256.txt
+          python3 source/.github/tests/rocm_v2_manifest.py --root source
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+          cmake -S source/external/ggml -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF \
+            -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
+          cmake --build source/build/debug --target test-backend-ops --parallel 4
+          source/build/debug/bin/test-backend-ops --suite rocm-v2 --list-cases > prepare-cases.tsv
+          cmp prepare-cases.tsv source/.github/tests/rocm-v2-cases.tsv
+          tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+          du -h probe-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: probe-source
-          path: source.tar.gz
-          retention-days: 1
+          name: rocm-v2-source
+          path: probe-source.tar.gz
           compression-level: 0
+          retention-days: 3
   probe:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
-    timeout-minutes: 15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      OMP_NUM_THREADS: 8
+      CCACHE_BASEDIR: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/source
+      CCACHE_NOHASHDIR: true
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: probe-source
-      - name: Compile and measure captured production shapes
+          name: rocm-v2-source
+          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Unpack and record toolchain
         shell: bash
         run: |
           set -euo pipefail
-          tar -xzf source.tar.gz --strip-components=1
-          mkdir results
-          /opt/rocm/bin/hipcc --offload-arch=gfx1151 -O3 -std=c++17 \
-            -Iexternal/ggml/src/ggml-hip/halo \
-            tests/unittests/test_hip_halo_sgemm.cu external/ggml/src/ggml-hip/halo/sgemm.cu \
-            -lhipblaslt -o halo-sgemm-test 2>&1 | tee results/build.log
-          timeout 240 ./halo-sgemm-test 2>&1 | tee results/boundaries.log
-          timeout 300 ./halo-sgemm-test tests/unittests/assets/hip_halo/qwen3_sgemm_shapes.txt \
-            2>&1 | tee results/production.log
-      - name: Measure wave-per-row Q8 candidate against exact stock kernel
+          ulimit -c 0
+          tar -xzf probe-source.tar.gz
+          mkdir -p results
+          {
+            cat source/source-commit.txt source/patch-sha256.txt
+            /opt/rocm/bin/hipcc --version
+            /opt/rocm/llvm/bin/amdgpu-arch
+            uname -a
+          } > results/environment.log 2>&1
+      - uses: ggml-org/ccache-action@v1.2.24
+        with:
+          key: rocm-v2-a5369900-gfx1151-debug-cxx17
+          max-size: 3G
+          install: binary
+      - name: Build independent targets
+        id: builds
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          python3 .github/tests/extract_halo_mmvq_probe.py
-          /opt/rocm/bin/hipcc --offload-arch=gfx1151 -O3 -std=c++17 -DGGML_USE_HIP \
-            -I. -Iexternal/ggml/include -Iexternal/ggml/src -Iexternal/ggml/src/ggml-cuda \
-            tests/unittests/test_hip_halo_mmvq.cu external/ggml/src/ggml-hip/halo/mmvq.cu \
-            -o halo-mmvq-test 2>&1 | tee results/mmvq-build.log
-          timeout 240 ./halo-mmvq-test 2>&1 | tee results/mmvq.log
+          ulimit -c 0
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --through-suite builds --log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: halo-isolated-kernels
-          path: results/
+          name: rocm-v2-builds
+          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 7
+      - name: Correctness and coverage
+        continue-on-error: true
+        shell: bash
+        run: |
+          ulimit -c 0
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --through-suite correctness --log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rocm-v2-correctness
+          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
+          retention-days: 7
+      - name: Serial paired timing and independent candidates
+        if: always()
+        shell: bash
+        run: |
+          ulimit -c 0
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rocm-v2-results
+          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
+          retention-days: 14
