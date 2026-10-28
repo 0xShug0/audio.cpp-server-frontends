@@ -1,4 +1,5 @@
-name: ROCm v2 isolated campaign
+name: Validation
+run-name: Validation
 
 on:
   workflow_dispatch:
@@ -27,7 +28,7 @@ jobs:
             tests/unittests/test_hip_halo_mmvq.cu
             tests/unittests/assets/hip_halo
             external/ggml/src/ggml-hip/halo
-      - name: Validate orchestration and prepare minimal pinned source
+      - name: Prepare validation inputs
         shell: bash
         run: |
           set -euo pipefail
@@ -92,7 +93,7 @@ jobs:
           du -h probe-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: rocm-v2-source
+          name: validation-inputs
           path: probe-source.tar.gz
           compression-level: 0
           retention-days: 3
@@ -112,9 +113,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: rocm-v2-source
+          name: validation-inputs
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Unpack and record toolchain
+      - name: Prepare check environment
         shell: bash
         run: |
           set -euo pipefail
@@ -138,7 +139,7 @@ jobs:
           key: rocm-v2-a5369900-gfx1151-debug-cxx17-${{ github.sha }}
           restore-keys: |
             rocm-v2-a5369900-gfx1151-debug-cxx17-
-      - name: Build independent targets
+      - name: Build checks
         id: builds
         continue-on-error: true
         shell: bash
@@ -148,10 +149,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rocm-v2-builds
+          name: validation-builds
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 7
-      - name: Correctness and coverage
+      - name: Run checks
         continue-on-error: true
         shell: bash
         run: |
@@ -160,10 +161,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rocm-v2-correctness
+          name: validation-progress
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 7
-      - name: Serial paired timing and independent candidates
+      - name: Run additional checks
         if: always()
         shell: bash
         run: |
@@ -172,10 +173,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rocm-v2-hip-timings
+          name: validation-additional
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
-      - name: Vulkan references and final campaign status
+      - name: Finish checks
         if: always()
         shell: bash
         run: |
@@ -184,7 +185,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: rocm-v2-results
+          name: validation-results
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - uses: actions/cache/save@v4

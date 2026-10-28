@@ -27,7 +27,7 @@ index f592d404..54ceea0b 100644
      ~ggml_backend_cuda_context();
  
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 539f5807..e4a420c4 100644
+index 539f5807..638c4ae5 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,4 +1,7 @@
@@ -38,14 +38,16 @@ index 539f5807..e4a420c4 100644
  #include "ggml-impl.h"
  #include "ggml-backend-impl.h"
  
-@@ -2755,6 +2758,16 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+@@ -2755,6 +2758,18 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
  
  static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
      const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 +#ifdef GGML_USE_HIP
 +    if (ctx.rocm_v2) {
 +        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
-+        if (src0->buffer->buft == buft && src1->buffer->buft == buft && dst->buffer->buft == buft &&
++        if (ggml_backend_buffer_get_type(src0->buffer) == buft &&
++            ggml_backend_buffer_get_type(src1->buffer) == buft &&
++            ggml_backend_buffer_get_type(dst->buffer) == buft &&
 +            ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
 +            ++ctx.rocm_v2_sgemm_launches;
 +            return;
@@ -55,7 +57,7 @@ index 539f5807..e4a420c4 100644
  
      if (dst->type == GGML_TYPE_F16) {
          GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
-@@ -5047,6 +5060,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5047,6 +5062,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
  
      ggml_cuda_set_device(cuda_ctx->device);
@@ -68,7 +70,7 @@ index 539f5807..e4a420c4 100644
  
      bool use_cuda_graph             = false;
      bool cuda_graph_update_required = false;
-@@ -5062,6 +5081,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5062,6 +5083,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
          const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
          if (graph_compatible) {
              const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
@@ -84,7 +86,7 @@ index 539f5807..e4a420c4 100644
  
              if (!graph->warmup_complete) {
                  // Warmup: need at least 2 calls with no property change on the 2nd call
-@@ -5087,6 +5115,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5087,6 +5117,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      }
  #endif // USE_CUDA_GRAPH
  
@@ -108,7 +110,7 @@ index 539f5807..e4a420c4 100644
      if (use_cuda_graph && cuda_graph_update_required) {
          // Start CUDA graph capture
          {
-@@ -5659,9 +5704,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
+@@ -5659,9 +5706,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
  }
  
  static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t dev, const char * params) {
@@ -137,7 +139,7 @@ index 539f5807..e4a420c4 100644
  }
  
  static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
-@@ -6263,8 +6326,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -6263,8 +6328,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
@@ -163,7 +165,7 @@ index 539f5807..e4a420c4 100644
          return (void *)ggml_backend_cuda_comm_init;
      }
 diff --git a/external/ggml/src/ggml-cuda/im2col.cu b/external/ggml/src/ggml-cuda/im2col.cu
-index 7226f790..3d683857 100644
+index 7226f790..6e507a7b 100644
 --- a/external/ggml/src/ggml-cuda/im2col.cu
 +++ b/external/ggml/src/ggml-cuda/im2col.cu
 @@ -1,4 +1,7 @@
@@ -174,7 +176,7 @@ index 7226f790..3d683857 100644
  
  #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
  static __global__ void im2col_f32_tiled_3x3(
-@@ -297,7 +300,17 @@ static void im2col_cuda_f32(const float * x, float * dst,
+@@ -297,7 +300,18 @@ static void im2col_cuda_f32(const float * x, float * dst,
                        s0, s1, p0, p1, d0, d1, lowering, stream);
  }
  
@@ -183,7 +185,8 @@ index 7226f790..3d683857 100644
 +#ifdef GGML_USE_HIP
 +    if (ctx.rocm_v2) {
 +        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
-+        if (dst->src[1]->buffer->buft == buft && dst->buffer->buft == buft &&
++        if (ggml_backend_buffer_get_type(dst->src[1]->buffer) == buft &&
++            ggml_backend_buffer_get_type(dst->buffer) == buft &&
 +            ggml_rocm_v2_im2col(dst->src[1], dst, ctx.stream())) {
 +            ++ctx.rocm_v2_im2col_launches;
 +            return;
