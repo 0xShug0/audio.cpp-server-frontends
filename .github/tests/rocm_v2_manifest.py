@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -49,7 +49,8 @@ builds = [
          '-o', 'build/debug/raw-im2col']]),
 ]
 builds.append(dict(id='matrix-candidate', build_type='Debug', depends_on=['ggml'], timeout_s=180,
-    commands=[hipcc + ['-DF16RAW', '-DGGML_USE_HIP', '-Rpass-analysis=kernel-resource-usage',
+    commands=[hipcc + ['-DF16RAW', '-DGGML_USE_HIP', '-DGGML_HIP_GRAPHS', '-DGGML_HIP_USE_HIPBLASLT',
+        '-Rpass-analysis=kernel-resource-usage',
         '-Iexternal/ggml/include', '-Iexternal/ggml/src', '-Iexternal/ggml/src/ggml-cuda',
         '-Iexternal/ggml/src/ggml-hip/halo', 'tests/unittests/test_hip_halo_sgemm.cu',
         'external/ggml/src/ggml-hip/halo/sgemm.cu',
@@ -295,7 +296,35 @@ elif args.focus == 'dispatch':
         dict(id='framework', build='device-health', gpu=True, timeout_s=15,
              cases=[dict(id='device-after', argv=health['argv'])]),
     ]
-if args.focus not in {'matrix','fused','dispatch'}:
+elif args.focus == 'split':
+    builds = [build for build in builds if build['id'] in {
+        'device-health','ggml','matrix-candidate'}]
+    shapes = [(m,n,k,pad) for m,n,k in (
+        (2080,768,5376),(260,1536,7168),(2048,130,1024),
+        (128,8192,1792),(128,8192,5376),(256,1024,3584),
+        (129,769,5377),(67,131,97)) for pad in (0,3)]
+    modes = [(1,'fusedwide'),(2,'split2'),(4,'split4'),(8,'split8')]
+    suites = [
+        dict(id='correctness', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-before', argv=health['argv'])]),
+        dict(id='matrix', build='matrix-candidate', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{mode}-{dtype}-'+'-'.join(map(str,shape)),
+                 argv=['build/debug/raw-matrix']+list(map(str,shape))+[mode+'-'+dtype])
+            for shape in shapes for count,mode in modes for dtype in ['bf16','f16']
+            if count == 1 or count*(shape[0]+shape[3])*shape[1]*4 <= 32*1024*1024]),
+        dict(id='counters', build='matrix-candidate', gpu=True, required=False, timeout_s=90, cases=[
+            dict(id=group+'-'+mode, argv=['/opt/rocm/bin/rocprofv3','--pmc'] + metrics +
+                 ['--kernel-include-regex','Cijk_|halo_sgemm',
+                  '--kernel-iteration-range','[5-8]',
+                  '--output-format','csv','--output-directory','../results/pmc-'+group+'-'+mode,'--',
+                  'build/debug/raw-matrix','2080','768','5376','0',mode])
+            for group,metrics in [('fetch',['FETCH_SIZE']),('lds',['LDSBankConflict']),
+                ('cache',['L2CacheHit','MemUnitBusy']),('occupancy',['MeanOccupancyPerCU','VALUInsts'])]
+            for mode in ['fusedwide-bf16','split4-bf16']]),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+    ]
+if args.focus not in {'matrix','fused','dispatch','split'}:
     builds = [build for build in builds if build['id'] != 'matrix-candidate']
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')

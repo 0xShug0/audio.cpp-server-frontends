@@ -3,6 +3,8 @@
 #include <hipblaslt/hipblaslt.h>
 #ifdef F16RAW
 #include "convert.cuh"
+#include "binbcast.cuh"
+#include "ggml-backend-impl.h"
 #endif
 #include <algorithm>
 #include <cmath>
@@ -19,6 +21,9 @@
 
 static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = false, bool blas = false, int lowp = 0, int fused_index = 0) {
     const bool fused=fused_index != 0;
+#ifdef F16RAW
+    const int split_k=fused_index >= 13 && fused_index <= 18 ? 2 << ((fused_index-13)/2) : 0;
+#endif
     const bool vector_lds=tile_index == 4;
     const bool library_candidate=plans || blas || lowp != 0;
     const bool three_modes=vector_lds || library_candidate;
@@ -68,6 +73,45 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
     to_fp16_nc_cuda_t to_f16=nullptr;
     to_bf16_nc_cuda_t to_bf16=nullptr;
     size_t scratch_bytes=0;
+    float *partial_base=nullptr;
+    size_t partial_elements=0,partial_payload_bytes=0,partial_bytes=0;
+    ggml_backend_t split_backend=nullptr;
+    ggml_backend_cuda_context *split_ctx=nullptr;
+    hipStream_t split_stream=nullptr;
+    ggml_tensor split_planes[8]={},split_output={},split_reduction={};
+    if (split_k) {
+        const size_t plane_elements=size_t(ldc)*n;
+        if (plane_elements > worksize/(size_t(split_k)*sizeof(float))) {
+            std::fprintf(stderr,"SGEMM_SPLITK_ERROR,stage=partial_cap,split_k=%d,cap_bytes=%zu\n",split_k,worksize); std::exit(1);
+        }
+        partial_elements=size_t(split_k)*plane_elements;
+        partial_payload_bytes=partial_elements*sizeof(float);
+        partial_bytes=(partial_elements+2*guard)*sizeof(float);
+        CHECK(hipMalloc(&partial_base,partial_bytes));
+        CHECK(hipMemcpy(partial_base,out.data(),guard*sizeof(float),hipMemcpyHostToDevice));
+        CHECK(hipMemcpy(partial_base+guard+partial_elements,out.data(),guard*sizeof(float),hipMemcpyHostToDevice));
+        for (int s=0;s<split_k;++s)
+            CHECK(hipMemcpy(partial_base+guard+size_t(s)*plane_elements,out.data()+guard,c_elements*sizeof(float),hipMemcpyHostToDevice));
+        split_backend=ggml_backend_cuda_init(0);
+        if (!split_backend) { std::fprintf(stderr,"SGEMM_SPLITK_ERROR,stage=backend_init\n"); std::exit(1); }
+        split_ctx=static_cast<ggml_backend_cuda_context *>(split_backend->context);
+        split_stream=static_cast<hipStream_t>(ggml_backend_cuda_get_stream(split_backend));
+        ggml_tensor plane={};
+        plane.type=GGML_TYPE_F32;
+        plane.ne[0]=m; plane.ne[1]=n; plane.ne[2]=1; plane.ne[3]=1;
+        plane.nb[0]=sizeof(float); plane.nb[1]=size_t(ldc)*sizeof(float);
+        plane.nb[2]=plane.nb[1]*n; plane.nb[3]=plane.nb[2];
+        for (int s=0;s<split_k;++s) {
+            split_planes[s]=plane;
+            split_planes[s].data=partial_base+guard+size_t(s)*plane_elements;
+        }
+        split_output=plane; split_output.data=dc;
+        // Identical source/destination strides keep padded planes out of dimension collapse.
+        split_reduction=split_output;
+        split_reduction.op=GGML_OP_ADD;
+        for (int s=0;s<split_k;++s) split_reduction.src[s]=&split_planes[s];
+        CHECK(hipDeviceSynchronize());
+    }
     if (lowp && !fused) {
         if (lowp == 1) to_f16=ggml_get_to_fp16_nc_cuda(GGML_TYPE_F32);
         else to_bf16=ggml_get_to_bf16_nc_cuda(GGML_TYPE_F32);
@@ -91,6 +135,12 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 #endif
     auto launch=[&](int mode) {
 #ifdef F16RAW
+        if (split_k && mode == 2) {
+            ggml_hip_halo_sgemm(da,db,partial_base+guard,m,n,k,lda,ldb,ldc,0,0,0,1,split_stream,fused_index);
+            if (split_k == 2) ggml_cuda_op_add(*split_ctx,&split_reduction);
+            else ggml_cuda_op_fused_add(*split_ctx,&split_reduction,split_k-1);
+            return;
+        }
         if (fused && mode == 2) {
             ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr,fused_index);
             return;
@@ -151,6 +201,16 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
                 std::exit(4);
             }
         }
+#ifdef F16RAW
+        if (split_k && base == partial_base && pad) {
+            std::vector<float> padding(size_t(split_k)*n*pad);
+            CHECK(hipMemcpy2D(padding.data(),size_t(pad)*sizeof(float),base+guard+m,size_t(ldc)*sizeof(float),
+                              size_t(pad)*sizeof(float),size_t(split_k)*n,hipMemcpyDeviceToHost));
+            for (size_t i=0;i<padding.size();++i) if (padding[i]!=sentinel) {
+                std::fprintf(stderr,"%s partial row padding failed: split_k=%d offset=%zu\n",label,split_k,i); std::exit(4);
+            }
+        }
+#endif
     };
     // Reset all C storage before each correctness launch, so a preceding
     // implementation cannot supply valid outputs or hide padding writes.
@@ -219,12 +279,19 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
         if (library_candidate) {
             std::fill(out.begin(),out.end(),sentinel);
             CHECK(hipMemcpy(dc_base,out.data(),out.size()*4,hipMemcpyHostToDevice));
+#ifdef F16RAW
+            if (split_k) CHECK(hipDeviceSynchronize());
+#endif
             launch(2);
+#ifdef F16RAW
+            if (split_k) CHECK(hipDeviceSynchronize());
+#endif
             const auto status=hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost);
             if (status != hipSuccess) { std::fprintf(stderr,"%s_ERROR,algo_index=%d,status=%d,stage=correctness_sync\n",result_tag,plan_index,int(status)); std::exit(1); }
             char label[64]; std::snprintf(label,sizeof(label),"%s algo_index=%d status=4",result_tag,plan_index);
             check_output(out,label); check_input_guards(da_base,a_elements,label); check_input_guards(db_base,b_elements,label);
 #ifdef F16RAW
+            if (split_k) check_input_guards(partial_base,partial_elements,"split partials");
             std::vector<uint16_t> low_a_host,low_b_host;
             if (lowp) {
                 low_a_host.resize(low_a_elements+2*low_guard); low_b_host.resize(low_b_elements+2*low_guard);
@@ -317,9 +384,13 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
         const int calls=library_candidate ? 4 : 8;
         for(int round=0;round<(three_modes ? 6 : 7);++round) for(int order=0;order<(three_modes ? 3 : 2);++order) {
             int mode=three_modes ? orders[round][order] : (round+order)%2;
+            hipStream_t timing_stream=nullptr;
+#ifdef F16RAW
+            if (split_k && mode == 2) timing_stream=split_stream;
+#endif
             for(int i=0;i<3;++i)launch(mode);
-            CHECK(hipEventRecord(start));for(int i=0;i<calls;++i)launch(mode);
-            CHECK(hipEventRecord(end));CHECK(hipEventSynchronize(end));
+            CHECK(hipEventRecord(start,timing_stream));for(int i=0;i<calls;++i)launch(mode);
+            CHECK(hipEventRecord(end,timing_stream));CHECK(hipEventSynchronize(end));
             float ms;CHECK(hipEventElapsedTime(&ms,start,end));times[mode].push_back(ms/calls);
         }
         float medians[3] = {};
@@ -356,17 +427,23 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
         }
 #endif
         CHECK(hipGetLastError());
+#ifdef F16RAW
+        if (split_k) CHECK(hipDeviceSynchronize());
+#endif
         CHECK(hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost));
         check_output(out,"timed output");
         check_input_guards(da_base,a_elements,"A");
         check_input_guards(db_base,b_elements,"B");
         const float library_ms=medians[0], candidate_ms=medians[candidate_mode];
 #ifdef F16RAW
+        if (split_k) check_input_guards(partial_base,partial_elements,"timed split partials");
         if (fused) {
-            const size_t explicit_device_bytes=(a.size()+b.size()+out.size())*sizeof(float)+worksize;
-            std::printf("SGEMM_FUSED,dtype=%s,tile_index=%d,m=%d,n=%d,k=%d,pad=%d,first1_ms=%.6f,reference64_ms=%.6f,candidate_ms=%.6f,speedup_vs_first1=%.4f,speedup_vs_reference64=%.4f,scratch_payload_bytes=0,scratch_bytes=0,explicit_device_bytes=%zu,nmse_limit=%.12g,nmse=%.12g,max_abs=%.12g,cosine=%.12g,double_max_abs=%.12g,quantized_double_max_abs=%.12g,global_conversion_passes=0\n",
+            const size_t explicit_device_bytes=(a.size()+b.size()+out.size())*sizeof(float)+worksize+partial_bytes;
+            std::printf("SGEMM_FUSED,dtype=%s,tile_index=%d,m=%d,n=%d,k=%d,pad=%d,first1_ms=%.6f,reference64_ms=%.6f,candidate_ms=%.6f,speedup_vs_first1=%.4f,speedup_vs_reference64=%.4f,scratch_payload_bytes=%zu,scratch_bytes=%zu,explicit_device_bytes=%zu,nmse_limit=%.12g,nmse=%.12g,max_abs=%.12g,cosine=%.12g,double_max_abs=%.12g,quantized_double_max_abs=%.12g,global_conversion_passes=0\n",
                         lowp == 1 ? "f16" : "bf16",fused_index,m,n,k,pad,library_ms,medians[1],candidate_ms,library_ms/candidate_ms,medians[1]/candidate_ms,
-                        explicit_device_bytes,lowp == 1 ? 1e-6 : 1e-4,nmse,max_abs,cosine,double_max_abs,quantized_double_max_abs);
+                        partial_payload_bytes,partial_bytes,explicit_device_bytes,lowp == 1 ? 1e-6 : 1e-4,nmse,max_abs,cosine,double_max_abs,quantized_double_max_abs);
+            if (split_k) std::printf("SGEMM_SPLITK,split_k=%d,partial_ldc=%d,partial_payload_bytes=%zu,partial_guard_bytes=%zu,partial_cap_bytes=%zu,reduction=%s,private_stream=1\n",
+                split_k,ldc,partial_payload_bytes,2*guard*sizeof(float),worksize,split_k == 2 ? "ggml_add" : "ggml_fused_add");
         } else if (lowp) {
             const size_t payload_bytes=(low_a_elements+low_b_elements)*sizeof(uint16_t);
             const size_t explicit_device_bytes=(a.size()+b.size()+out.size())*sizeof(float)+worksize+scratch_bytes;
@@ -395,6 +472,10 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
     CHECK(hipblasLtMatrixLayoutDestroy(lb));CHECK(hipblasLtMatrixLayoutDestroy(lc));
     CHECK(hipblasLtMatmulDescDestroy(desc));CHECK(hipblasLtDestroy(handle));
 #ifdef F16RAW
+    if (split_k) {
+        CHECK(hipFree(partial_base));
+        ggml_backend_free(split_backend);
+    }
     if (lowp && !fused) {
         CHECK(hipblasLtMatrixLayoutDestroy(low_la)); CHECK(hipblasLtMatrixLayoutDestroy(low_lb));
         CHECK(hipFree(low_a_base)); CHECK(hipFree(low_b_base));
@@ -407,7 +488,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc != 1 && argc != 2 && argc != 5 && argc != 6) {
-        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16|fusedn128-bf16|fusedn128-f16|fusedwide-bf16|fusedwide-f16]] (low precision requires F16RAW)\n",argv[0]);
+        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16|fusedn128-bf16|fusedn128-f16|fusedwide-bf16|fusedwide-f16|split2-bf16|split2-f16|split4-bf16|split4-f16|split8-bf16|split8-f16]] (low precision requires F16RAW)\n",argv[0]);
         return 1;
     }
     int devices=0;
@@ -425,9 +506,12 @@ int main(int argc, char **argv) {
         const int fused_index=mode == "fused-bf16" ? 5 : mode == "fused-f16" ? 6 :
                               mode == "fused128-bf16" ? 7 : mode == "fused128-f16" ? 8 :
                               mode == "fusedn128-bf16" ? 9 : mode == "fusedn128-f16" ? 10 :
-                              mode == "fusedwide-bf16" ? 11 : mode == "fusedwide-f16" ? 12 : 0;
-        const int lowp=(mode == "f16" || fused_index == 6 || fused_index == 8 || fused_index == 10 || fused_index == 12) ? 1 :
-                       (mode == "bf16" || fused_index == 5 || fused_index == 7 || fused_index == 9 || fused_index == 11) ? 2 : 0;
+                              mode == "fusedwide-bf16" ? 11 : mode == "fusedwide-f16" ? 12 :
+                              mode == "split2-bf16" ? 13 : mode == "split2-f16" ? 14 :
+                              mode == "split4-bf16" ? 15 : mode == "split4-f16" ? 16 :
+                              mode == "split8-bf16" ? 17 : mode == "split8-f16" ? 18 : 0;
+        const int lowp=(mode == "f16" || fused_index == 6 || fused_index == 8 || fused_index == 10 || fused_index == 12 || fused_index == 14 || fused_index == 16 || fused_index == 18) ? 1 :
+                       (mode == "bf16" || fused_index == 5 || fused_index == 7 || fused_index == 9 || fused_index == 11 || fused_index == 13 || fused_index == 15 || fused_index == 17) ? 2 : 0;
 #ifndef F16RAW
         if (lowp) { std::fprintf(stderr,"f16/bf16 require a -DF16RAW build\n"); return 1; }
 #endif
