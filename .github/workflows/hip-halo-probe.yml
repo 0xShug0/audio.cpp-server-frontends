@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision]
+        options: [complete, sgemm, precision, submission, matrix]
         default: complete
   push:
     branches: [experiment/rocm-v2-probes]

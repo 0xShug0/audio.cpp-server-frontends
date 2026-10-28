@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -35,8 +35,9 @@ builds = [
     dict(id='ggml', build_type='Debug', timeout_s=1200, commands=[cmake,
          ['cmake', '--build', 'build/debug', '--target', 'test-backend-ops', '--parallel', '8']]),
     dict(id='sgemm-candidate', build_type='Debug', timeout_s=180, commands=[hipcc + [
+         '-Rpass-analysis=kernel-resource-usage',
          '-Iexternal/ggml/src/ggml-hip/halo', 'tests/unittests/test_hip_halo_sgemm.cu',
-         'external/ggml/src/ggml-hip/halo/sgemm.cu', '-lhipblaslt', '-o', 'build/debug/raw-sgemm']]),
+         'external/ggml/src/ggml-hip/halo/sgemm.cu', '-lhipblaslt', '-lhipblas', '-o', 'build/debug/raw-sgemm']]),
     dict(id='mmvq-candidates', build_type='Debug', timeout_s=240, commands=[
          ['python3', '.github/tests/extract_halo_mmvq_probe.py'], hipcc + [
          '-DGGML_USE_HIP', '-I.', '-Iexternal/ggml/include', '-Iexternal/ggml/src',
@@ -47,6 +48,14 @@ builds = [
          'tests/unittests/test_hip_halo_im2col.cu', 'external/ggml/src/ggml-hip/halo/im2col.cu',
          '-o', 'build/debug/raw-im2col']]),
 ]
+builds.append(dict(id='matrix-candidate', build_type='Debug', depends_on=['ggml'], timeout_s=180,
+    commands=[hipcc + ['-DF16RAW', '-DGGML_USE_HIP',
+        '-Iexternal/ggml/include', '-Iexternal/ggml/src', '-Iexternal/ggml/src/ggml-cuda',
+        '-Iexternal/ggml/src/ggml-hip/halo', 'tests/unittests/test_hip_halo_sgemm.cu',
+        'external/ggml/src/ggml-hip/halo/sgemm.cu',
+        '-Lbuild/debug/src/ggml-hip', '-Lbuild/debug/src', '-lggml-hip', '-lggml-base',
+        '-lhipblaslt', '-lhipblas', '-Wl,-rpath,$ORIGIN/src/ggml-hip:$ORIGIN/src',
+        '-o', 'build/debug/raw-matrix']]))
 builds.append(dict(id='framework', build_type='Debug', depends_on=['ggml'], timeout_s=240,
     commands=[['cmake', '--build', 'build/debug', '--target', 'framework_backend_probe',
                'backend_config_args_test', '--parallel', '8']]))
@@ -113,11 +122,11 @@ suites = [
     dict(id='independent-sgemm', build='sgemm-candidate', gpu=True, timeout_s=45, cases=[
          dict(id='shape-' + '-'.join(map(str, shape)) + f'-{mode}',
               argv=['build/debug/raw-sgemm'] + list(map(str, shape)) + [mode])
-         for shape in sorted(sgemm_shapes) if args.focus != 'sgemm' or shape[:3] in {
+         for shape in sorted(sgemm_shapes) if args.focus not in {'sgemm','submission'} or shape[:3] in {
              (1,1,1),(67,131,97),(128,8192,1792),(128,8192,5376),
              (256,1024,3584),(256,1024,5376),(512,768,5376),(2048,768,896),
              (2080,768,768),(64,32768,896),(129,769,5376),(193,1024,4096)}
-         for mode in (['plans'] if args.focus == 'sgemm' else ['0'])]),
+         for mode in (['blas'] if args.focus in {'sgemm','submission'} else ['0'])]),
     dict(id='independent-mmvq', build='mmvq-candidates', gpu=True, timeout_s=45, cases=[
          dict(id='shape-' + '-'.join(map(str, shape)),
               argv=['build/debug/raw-mmvq'] + list(map(str, shape))) for shape in mmvq_shapes]),
@@ -172,6 +181,58 @@ elif args.focus == 'precision':
             dict(id=f'{i:03d}-vulkan-cpu', argv=['../source-vulkan/build/debug/bin/test-backend-ops','test',
                  '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i)]) for i in strict]),
     ]
+elif args.focus == 'submission':
+    builds = [build for build in builds if build['id'] in {'device-health','ggml','sgemm-candidate'}]
+    raw = next(suite for suite in suites if suite['id'] == 'independent-sgemm')
+    selected = [21,44,48,55,124,192,193,194]
+    suites = [
+        dict(id='correctness', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-before', argv=health['argv'])]),
+        raw,
+        dict(id='paired', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-{mode}', argv=probe + ['perf'] + selection +
+                 ['--case-index',str(i),'--compare-params',''] + flag)
+            for i in selected for mode,flag in [('mutable',[]),('immutable',['--immutable-graph'])]]),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+    ]
+elif args.focus == 'matrix':
+    builds = [build for build in builds if build['id'] in {
+        'device-health','ggml','sgemm-candidate','matrix-candidate','vulkan'}]
+    shapes = [(m,n,k,pad) for m,n,k in (
+        (67,131,97),(128,8192,1792),(128,8192,5376),(256,1024,3584),
+        (256,1024,5376),(512,768,5376),(2048,768,896),(2080,768,768),
+        (64,32768,896),(129,769,5376),(193,1024,4096)) for pad in (0,3)]
+    selected = [0,1,5,21,44,48,55,124,125,189,190,191] + list(range(195,len(entries)))
+    suites = [
+        dict(id='correctness', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-{label}', argv=probe + ['test'] + selection +
+                 ['--case-index',str(i)] + flag)
+            for i in range(195,len(entries)) for label,flag in [
+                ('candidate',['--backend-params','rocm_v2']),('original',[])]]),
+        dict(id='independent-sgemm', build='sgemm-candidate', gpu=True, timeout_s=45, cases=[
+            dict(id='blas-'+'-'.join(map(str,shape)), argv=['build/debug/raw-sgemm']+
+                 list(map(str,shape))+['blas']) for shape in shapes]),
+        dict(id='matrix', build='matrix-candidate', gpu=True, timeout_s=45, cases=[
+            dict(id=mode+'-'+'-'.join(map(str,shape)), argv=['build/debug/raw-matrix']+
+                 list(map(str,shape))+[mode]) for shape in shapes for mode in ['f16','bf16']]),
+        dict(id='paired', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-hip', argv=probe + ['perf'] + selection +
+                 ['--case-index',str(i),'--backend-params','rocm_v2','--compare-params','']) for i in selected]),
+        dict(id='submission', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-{mode}', argv=probe + ['perf'] + selection +
+                 ['--case-index',str(i),'--compare-params',''] + flag)
+            for i in [21,44,48,55,124,192,193,194] for mode,flag in [
+                ('mutable',[]),('immutable',['--immutable-graph'])]]),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+        dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
+                 '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
+            for i in [0,1,5,124,125,189,190,191]]),
+    ]
+if args.focus != 'matrix':
+    builds = [build for build in builds if build['id'] != 'matrix-candidate']
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')
 print(f'Campaign ({args.focus}): {len(builds)} builds, '

@@ -27,7 +27,7 @@ index f592d404..54ceea0b 100644
      ~ggml_backend_cuda_context();
  
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 539f5807..638c4ae5 100644
+index 539f5807..313053ac 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,4 +1,7 @@
@@ -38,7 +38,15 @@ index 539f5807..638c4ae5 100644
  #include "ggml-impl.h"
  #include "ggml-backend-impl.h"
  
-@@ -2755,6 +2758,18 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+@@ -74,6 +77,7 @@
+ #include <atomic>
+ #include <charconv>
+ #include <cinttypes>
++#include <climits>
+ #include <condition_variable>
+ #include <cstddef>
+ #include <cstdint>
+@@ -2755,6 +2759,46 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
  
  static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
      const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
@@ -47,17 +55,45 @@ index 539f5807..638c4ae5 100644
 +        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
 +        if (ggml_backend_buffer_get_type(src0->buffer) == buft &&
 +            ggml_backend_buffer_get_type(src1->buffer) == buft &&
-+            ggml_backend_buffer_get_type(dst->buffer) == buft &&
-+            ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
-+            ++ctx.rocm_v2_sgemm_launches;
-+            return;
++            ggml_backend_buffer_get_type(dst->buffer) == buft) {
++#if defined(GGML_HIP_USE_HIPBLASLT)
++            if (dst->op == GGML_OP_MUL_MAT &&
++                dst->op_params[0] == GGML_PREC_DEFAULT &&
++                ggml_get_op_params_i32(dst, 1) == GGML_MUL_MAT_LOWERING_DEFAULT &&
++                src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
++                src0->ne[2] == 1 && src0->ne[3] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1 &&
++                src0->nb[0] == sizeof(float) && src1->nb[0] == sizeof(float) &&
++                src0->nb[1] % sizeof(float) == 0 && src1->nb[1] % sizeof(float) == 0 &&
++                src0->nb[1] >= size_t(src0->ne[0]) * sizeof(float) &&
++                src1->nb[1] >= size_t(src1->ne[0]) * sizeof(float) && ggml_is_contiguous(dst)) {
++                const int64_t m = src0->ne[1], n = src1->ne[1], k = src0->ne[0];
++                if (m >= 64 && n >= 768 && k >= 256 && m <= INT_MAX && n <= INT_MAX && k <= INT_MAX &&
++                    m * n >= ((int64_t{512} << 20) + k - 1) / k &&
++                    ((m + 63) / 64) * ((n + 63) / 64) >= 64) {
++                    ggml_cuda_pool_alloc<nv_bfloat16> a(ctx.pool(), size_t(m) * k);
++                    ggml_cuda_pool_alloc<nv_bfloat16> b(ctx.pool(), size_t(n) * k);
++                    const auto convert = ggml_get_to_bf16_nc_cuda(GGML_TYPE_F32);
++                    convert(src0->data, a.get(), k, m, 1, 1, src0->nb[1] / sizeof(float), 0, 0, ctx.stream());
++                    convert(src1->data, b.get(), k, n, 1, 1, src1->nb[1] / sizeof(float), 0, 0, ctx.stream());
++                    ggml_hipblaslt_gemm(ctx, ctx.stream(), m, n, k,
++                            a.get(), CUDA_R_16BF, k, 0, b.get(), CUDA_R_16BF, k, 0,
++                            dst->data, CUDA_R_32F, m, 0, 1);
++                    ++ctx.rocm_v2_sgemm_launches;
++                    return;
++                }
++            }
++#endif
++            if (ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
++                ++ctx.rocm_v2_sgemm_launches;
++                return;
++            }
 +        }
 +    }
 +#endif
  
      if (dst->type == GGML_TYPE_F16) {
          GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
-@@ -5047,6 +5062,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5047,6 +5091,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
  
      ggml_cuda_set_device(cuda_ctx->device);
@@ -70,7 +106,7 @@ index 539f5807..638c4ae5 100644
  
      bool use_cuda_graph             = false;
      bool cuda_graph_update_required = false;
-@@ -5062,6 +5083,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5062,6 +5112,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
          const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
          if (graph_compatible) {
              const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
@@ -86,7 +122,7 @@ index 539f5807..638c4ae5 100644
  
              if (!graph->warmup_complete) {
                  // Warmup: need at least 2 calls with no property change on the 2nd call
-@@ -5087,6 +5117,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5087,6 +5146,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      }
  #endif // USE_CUDA_GRAPH
  
@@ -110,7 +146,7 @@ index 539f5807..638c4ae5 100644
      if (use_cuda_graph && cuda_graph_update_required) {
          // Start CUDA graph capture
          {
-@@ -5659,9 +5706,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
+@@ -5659,9 +5735,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
  }
  
  static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t dev, const char * params) {
@@ -139,7 +175,7 @@ index 539f5807..638c4ae5 100644
  }
  
  static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
-@@ -6263,8 +6328,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -6263,8 +6357,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
@@ -210,10 +246,15 @@ index deb063b7..0fdd363d 100644
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
  else()
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 725bdc79..02d144f2 100644
+index 725bdc79..0956918d 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
-@@ -23,6 +23,8 @@
+@@ -19,10 +19,13 @@
+ #include <ggml-alloc.h>
+ #include <ggml-backend.h>
+ #include <ggml-cpp.h>
++#include "../src/ggml-impl.h"
+ 
  #include <algorithm>
  #include <array>
  #include <cfloat>
@@ -222,7 +263,7 @@ index 725bdc79..02d144f2 100644
  #include <cinttypes>
  #include <cstdarg>
  #include <cstdint>
-@@ -49,6 +51,8 @@
+@@ -49,6 +52,8 @@
  #   define N_THREADS std::thread::hardware_concurrency()
  #endif
  
@@ -231,7 +272,7 @@ index 725bdc79..02d144f2 100644
  static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float max = 1.0f) {
      size_t nels = ggml_nelements(tensor);
      std::vector<float> data(nels);
-@@ -57,11 +61,14 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
+@@ -57,11 +62,14 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
          static const size_t n_threads = N_THREADS;
          // static RNG initialization (revisit if n_threads stops being constant)
          static std::vector<std::default_random_engine> generators = []() {
@@ -249,7 +290,7 @@ index 725bdc79..02d144f2 100644
              return vec;
          }();
  
-@@ -814,6 +821,11 @@ struct console_printer : public printer {
+@@ -814,6 +822,11 @@ struct console_printer : public printer {
              print_test_console(result);
          } else if (result.test_mode == "perf") {
              print_perf_console(result);
@@ -261,7 +302,7 @@ index 725bdc79..02d144f2 100644
          } else if (result.test_mode == "support") {
              print_support_console(result);
          }
-@@ -1296,7 +1308,8 @@ struct test_case {
+@@ -1296,7 +1309,8 @@ struct test_case {
      test_status_t eval(ggml_backend_t backend1,
                         ggml_backend_t backend2,
                         const char *   op_names_filter,
@@ -271,7 +312,7 @@ index 725bdc79..02d144f2 100644
          mode = MODE_TEST;
  
          ggml_init_params params = {
-@@ -1375,6 +1388,10 @@ struct test_case {
+@@ -1375,6 +1389,10 @@ struct test_case {
              test_case * tc;
              ggml_backend_t backend1;
              ggml_backend_t backend2;
@@ -282,7 +323,7 @@ index 725bdc79..02d144f2 100644
          };
  
          callback_userdata ud {
-@@ -1382,6 +1399,10 @@ struct test_case {
+@@ -1382,6 +1400,10 @@ struct test_case {
              this,
              backend1,
              backend2,
@@ -293,7 +334,7 @@ index 725bdc79..02d144f2 100644
          };
  
          auto callback = [](int index, ggml_tensor * t1, ggml_tensor * t2, void * user_data) -> bool {
-@@ -1430,6 +1451,23 @@ struct test_case {
+@@ -1430,6 +1452,23 @@ struct test_case {
              }
  
              double err = ud->tc->err(f1.data(), f2.data(), f1.size());
@@ -317,7 +358,7 @@ index 725bdc79..02d144f2 100644
              if (err > ud->tc->max_err(ud->backend1)) {
                  printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
                  //for (int i = 0; i < (int) f1.size(); i++) {
-@@ -1461,6 +1499,12 @@ struct test_case {
+@@ -1461,6 +1500,12 @@ struct test_case {
          std::string error_msg   = test_passed ? "" : (!cmp_ok ? "compare failed" : "test failed");
          test_result result(ggml_backend_name(backend1), current_op_name, vars(), "test", supported, test_passed,
                             error_msg);
@@ -330,7 +371,7 @@ index 725bdc79..02d144f2 100644
  
          if (output_printer) {
              output_printer->print_test_result(result);
-@@ -1469,7 +1513,8 @@ struct test_case {
+@@ -1469,7 +1514,8 @@ struct test_case {
          return test_passed ? test_status_t::OK : test_status_t::FAIL;
      }
  
@@ -340,7 +381,7 @@ index 725bdc79..02d144f2 100644
          mode = MODE_PERF;
  
          static const size_t graph_nodes = 8192;
-@@ -1489,6 +1534,9 @@ struct test_case {
+@@ -1489,6 +1535,9 @@ struct test_case {
              return true;
          }
  
@@ -350,7 +391,7 @@ index 725bdc79..02d144f2 100644
          if (!ggml_backend_supports_op(backend, out)) {
              // Create test result for unsupported performance test
              test_result result(ggml_backend_name(backend), current_op_name, vars(), "perf", false, false,
-@@ -1496,7 +1544,7 @@ struct test_case {
+@@ -1496,7 +1545,7 @@ struct test_case {
  
              output_printer->print_test_result(result);
  
@@ -359,13 +400,13 @@ index 725bdc79..02d144f2 100644
          }
  
          // allocate
-@@ -1599,7 +1647,265 @@ struct test_case {
+@@ -1599,7 +1648,273 @@ struct test_case {
          return true;
      }
  
 -    bool eval_support(ggml_backend_t backend, const char * op_names_filter, printer * output_printer) {
 +    test_status_t eval_perf_compare(ggml_backend_t baseline, ggml_backend_t candidate,
-+                                    const char * op_names_filter, printer * output_printer) {
++                                    const char * op_names_filter, printer * output_printer, bool immutable_graph = false) {
 +        mode = MODE_PERF;
 +        ggml_init_params params = {
 +            /* .mem_size = */ ggml_tensor_overhead()*128 + ggml_graph_overhead(),
@@ -384,7 +425,7 @@ index 725bdc79..02d144f2 100644
 +        ggml_build_forward_expand(gf, out);
 +        test_result result(ggml_backend_name(candidate), current_op_name, vars(), "perf-compare", true, false);
 +        if (deterministic_tensor_init) {
-+            result.op_params += ",input_seed=1234";
++            result.op_params += ",input_seed=1234,native_debug_logging=filtered";
 +        }
 +        ggml_backend_buffer_ptr buf;
 +        do {
@@ -484,6 +525,14 @@ index 725bdc79..02d144f2 100644
 +            }
 +            if (!compute_ok) {
 +                break;
++            }
++            if (immutable_graph) {
++                // Metadata and addresses are now fixed; lifecycle checks only update tensor contents.
++                // Use high test-only IDs rather than the nonexported normal low-ID allocator.
++                static uint64_t next_immutable_uid = UINT64_MAX;
++                GGML_ASSERT(next_immutable_uid != 0);
++                gf->uid = next_immutable_uid--;
++                result.op_params += ",immutable_graph=1";
 +            }
 +            using route_counts_t = void (*)(ggml_backend_t, uint64_t *, uint64_t *);
 +            auto reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(candidate));
@@ -626,7 +675,7 @@ index 725bdc79..02d144f2 100644
          mode = MODE_SUPPORT;
  
          static const size_t graph_nodes = 8192;
-@@ -1621,6 +1927,9 @@ struct test_case {
+@@ -1621,6 +1936,9 @@ struct test_case {
              return true;
          }
  
@@ -636,7 +685,7 @@ index 725bdc79..02d144f2 100644
          bool supported = ggml_backend_supports_op(backend, out);
  
          std::string device_desc = ggml_backend_dev_description(ggml_backend_get_device(backend));
-@@ -3978,9 +4287,11 @@ struct test_mul_mat : public test_case {
+@@ -3978,9 +4296,11 @@ struct test_mul_mat : public test_case {
      const std::array<int64_t, 4> per; // permutation of dimensions
      const int64_t k_v; // size of k in memory, resulting in a non-contiguous view for k_v > k, no view for k_v == 0
      const uint32_t o; // number of outputs
@@ -649,7 +698,7 @@ index 725bdc79..02d144f2 100644
      }
  
      double max_nmse_err() override {
-@@ -4009,8 +4320,9 @@ struct test_mul_mat : public test_case {
+@@ -4009,8 +4329,9 @@ struct test_mul_mat : public test_case {
              std::array<int64_t, 2> bs = {10, 10},
              std::array<int64_t, 2> nr = {2, 2},
              std::array<int64_t, 4> per = {0, 1, 2, 3},
@@ -661,7 +710,7 @@ index 725bdc79..02d144f2 100644
  
      ggml_tensor * build_graph(ggml_context * ctx) override {
          // C^T = A * B^T: (k, m) * (k, n) => (m, n)
-@@ -4065,9 +4377,15 @@ struct test_mul_mat : public test_case {
+@@ -4065,9 +4386,15 @@ struct test_mul_mat : public test_case {
          }
  
          ggml_tensor * out = ggml_mul_mat(ctx, a, b);
@@ -677,7 +726,74 @@ index 725bdc79..02d144f2 100644
              ggml_set_name(out2, "out2");
              out = ggml_add(ctx, out, out2);
          }
-@@ -5033,6 +5351,94 @@ struct test_pool1d : public test_case {
+@@ -4083,6 +4410,66 @@ struct test_mul_mat : public test_case {
+     }
+ };
+ 
++// Suite-local precision contracts; existing test_mul_mat defaults remain unchanged.
++struct test_rocm_v2_mul_mat_precision : public test_mul_mat {
++    const bool strict_f32;
++    const bool large_f32_range;
++
++    test_rocm_v2_mul_mat_precision(ggml_type type_a, int64_t m, int64_t n, int64_t k, bool strict_f32,
++                                   bool large_f32_range = false, int64_t k_v = 0,
++                                   std::array<int64_t, 2> bs = {1, 1})
++        : test_mul_mat(type_a, GGML_TYPE_F32, m, n, k, bs, {1, 1}, {0, 1, 2, 3}, k_v, 1, false),
++          strict_f32(strict_f32), large_f32_range(large_f32_range) {}
++
++    std::string vars() override {
++        return test_mul_mat::vars() + (strict_f32 ? ",prec=f32" : ",prec=def") +
++               (large_f32_range ? ",input_range=large_f32" : "");
++    }
++
++    double max_nmse_err() override {
++        return strict_f32 ? 1e-10 : test_mul_mat::max_nmse_err();
++    }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * out = test_mul_mat::build_graph(ctx);
++        if (strict_f32) {
++            // Exercise the precision guard independently of any backend-specific lowering.
++            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
++                if (t->op == GGML_OP_MUL_MAT) {
++                    ggml_mul_mat_set_prec(t, GGML_PREC_F32);
++                }
++            }
++        }
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        if (!large_f32_range) {
++            test_mul_mat::initialize_tensors(ctx);
++            return;
++        }
++        ggml_tensor * a = ggml_get_tensor(ctx, "a");
++        ggml_tensor * b = ggml_get_tensor(ctx, "b");
++        a = a->view_src ? a->view_src : a;
++        b = b->view_src ? b->view_src : b;
++        // F32 x F32: A~100000, B~1e-5. Mixed inputs keep the large range in F32 B,
++        // so F16 A stays representable while an unintended F16 activation cast overflows.
++        const bool large_a = type_a == GGML_TYPE_F32;
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
++            if (t->view_src) {
++                continue; // Do not overwrite a ranged leaf through its view.
++            }
++            if (t == a) {
++                init_tensor_uniform(t, large_a ? 90000.0f : 9e-6f, large_a ? 110000.0f : 11e-6f);
++            } else if (t == b) {
++                init_tensor_uniform(t, large_a ? 9e-6f : 90000.0f, large_a ? 11e-6f : 110000.0f);
++            } else {
++                init_tensor_uniform(t);
++            }
++        }
++    }
++};
++
+ // GGML_HINT_SRC0_IS_HADAMARD
+ struct test_mul_mat_hadamard : public test_mul_mat {
+     test_mul_mat_hadamard(ggml_type type_a = GGML_TYPE_F32, ggml_type type_b = GGML_TYPE_F32,
+@@ -5033,6 +5420,94 @@ struct test_pool1d : public test_case {
      }
  };
  
@@ -772,7 +888,7 @@ index 725bdc79..02d144f2 100644
  // GGML_OP_CONV_TRANSPOSE_1D
  struct test_conv_transpose_1d : public test_case {
      const std::array<int64_t, 4> ne_input;
-@@ -5146,6 +5552,25 @@ struct test_im2col : public test_case {
+@@ -5146,6 +5621,25 @@ struct test_im2col : public test_case {
          ggml_tensor * out = ggml_im2col(ctx, kernel, input, s0, s1, p0, p1, d0, d1, is_2D, dst_type);
          ggml_set_name(out, "out");
  
@@ -798,7 +914,7 @@ index 725bdc79..02d144f2 100644
          return out;
      }
  };
-@@ -9446,8 +9871,103 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+@@ -9446,8 +9940,126 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
      return test_cases;
  }
  
@@ -893,17 +1009,40 @@ index 725bdc79..02d144f2 100644
 +        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32,
 +                                           shape[0], shape[1], shape[2], one, one, identity, 0, 1, true));
 +    }
++    for (int n_tokens : {1, 4, 32}) {
++        cases.emplace_back(new test_llama(n_tokens, true));
++    }
++    for (bool strict_f32 : {false, true}) {
++        for (const auto & shape : std::vector<std::array<int64_t, 3>> {
++                {128, 8192, 1792}, {256, 1024, 3584}, {128, 8192, 5376}}) {
++            cases.emplace_back(new test_rocm_v2_mul_mat_precision(GGML_TYPE_F32,
++                shape[0], shape[1], shape[2], strict_f32));
++        }
++        for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16}) {
++            cases.emplace_back(new test_rocm_v2_mul_mat_precision(type, 128, 8192, 1792, strict_f32));
++        }
++        for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) {
++            cases.emplace_back(new test_rocm_v2_mul_mat_precision(type, 129, 8193, 1793, strict_f32, false, 1824));
++        }
++        cases.emplace_back(new test_rocm_v2_mul_mat_precision(GGML_TYPE_F32, 63, 127, 255, strict_f32));
++        cases.emplace_back(new test_rocm_v2_mul_mat_precision(GGML_TYPE_F32, 128, 768, 256, strict_f32,
++            false, 0, std::array<int64_t, 2>{2, 1}));
++        for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) {
++            cases.emplace_back(new test_rocm_v2_mul_mat_precision(type, 128, 8192, 1792, strict_f32, true));
++        }
++    }
 +    return cases;
 +}
 +
  static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op_names_filter, const char * params_filter,
 -                         printer * output_printer, const char * test_file_path) {
 +                         printer * output_printer, const char * test_file_path, bool rocm_v2_suite = false,
-+                         long case_index = -1, ggml_backend_t compare_backend = nullptr, bool v2_active = false) {
++                         long case_index = -1, ggml_backend_t compare_backend = nullptr, bool v2_active = false,
++                         bool immutable_graph = false) {
      auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
          if (params_filter == nullptr) {
              return;
-@@ -9467,7 +9987,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9467,7 +10079,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -923,7 +1062,7 @@ index 725bdc79..02d144f2 100644
          switch (mode) {
          case MODE_TEST:
          case MODE_GRAD:
-@@ -9483,6 +10014,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9483,6 +10106,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      filter_test_cases(test_cases, params_filter);
@@ -957,7 +1096,7 @@ index 725bdc79..02d144f2 100644
  
      if (mode == MODE_TEST) {
          ggml_backend_t backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-@@ -9500,11 +10058,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9500,11 +10150,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              set_use_ref(backend_cpu, true);
          }
  
@@ -986,7 +1125,7 @@ index 725bdc79..02d144f2 100644
              if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
                  continue;
              }
-@@ -9520,6 +10092,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9520,6 +10184,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
          ggml_backend_free(backend_cpu);
  
@@ -997,7 +1136,7 @@ index 725bdc79..02d144f2 100644
          return n_ok == tests_run;
      }
  
-@@ -9536,10 +10112,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9536,10 +10204,32 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      if (mode == MODE_PERF) {
@@ -1008,7 +1147,8 @@ index 725bdc79..02d144f2 100644
 -        }
 -        return true;
 +            if (compare_backend) {
-+                const test_status_t status = test->eval_perf_compare(compare_backend, backend, op_names_filter, output_printer);
++                const test_status_t status = test->eval_perf_compare(compare_backend, backend, op_names_filter,
++                                                                      output_printer, immutable_graph);
 +                if (status != test_status_t::SKIPPED) {
 +                    ++selected_count;
 +                    ok = status == test_status_t::OK && ok;
@@ -1032,7 +1172,7 @@ index 725bdc79..02d144f2 100644
      }
  
      if (mode == MODE_SUPPORT) {
-@@ -9551,8 +10148,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9551,8 +10241,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              test_cases.end()
          );
  
@@ -1053,12 +1193,13 @@ index 725bdc79..02d144f2 100644
          }
          return true;
      }
-@@ -9663,6 +10271,12 @@ static void show_test_coverage() {
+@@ -9663,6 +10364,13 @@ static void show_test_coverage() {
  static void usage(char ** argv) {
      printf("Usage: %s [mode] [-o <op,..>] [-b <backend>] [-p <params regex>] [--output <console|sql|csv>] [--list-ops]", argv[0]);
      printf(" [--show-coverage] [--test-file <path>]\n");
 +    printf("    --backend-params <string> passes parameters to device initialization (default: NULL)\n");
 +    printf("    --compare-params <string> enables paired perf; these are baseline params, --backend-params is candidate\n");
++    printf("    --immutable-graph assigns a fixed nonzero graph UID after warmup (perf with --compare-params only)\n");
 +    printf("        An empty comparison string initializes the baseline with NULL; ratio=candidate/baseline\n");
 +    printf("    --suite rocm-v2 selects focused matmul, IM2COL1D and CONV1D graph cases\n");
 +    printf("    --case-index N selects one original suite index (suite only)\n");
@@ -1066,19 +1207,20 @@ index 725bdc79..02d144f2 100644
      printf("    valid modes:\n");
      printf("      - test (default, compare with CPU backend for correctness)\n");
      printf("      - grad (compare gradients from backpropagation with method of finite differences)\n");
-@@ -9683,6 +10297,11 @@ int main(int argc, char ** argv) {
+@@ -9683,6 +10391,12 @@ int main(int argc, char ** argv) {
      const char * backend_filter = nullptr;
      const char * params_filter = nullptr;
      const char * test_file_path = nullptr;
 +    const char * backend_params = nullptr;
 +    const char * compare_params = nullptr;
++    bool immutable_graph = false;
 +    bool rocm_v2_suite = false;
 +    bool list_cases = false;
 +    long case_index = -1;
  
      for (int i = 1; i < argc; i++) {
          if (strcmp(argv[i], "test") == 0) {
-@@ -9714,6 +10333,38 @@ int main(int argc, char ** argv) {
+@@ -9714,6 +10428,40 @@ int main(int argc, char ** argv) {
                  usage(argv);
                  return 1;
              }
@@ -1093,6 +1235,8 @@ index 725bdc79..02d144f2 100644
 +            } else {
 +                backend_params = argv[++i];
 +            }
++        } else if (strcmp(argv[i], "--immutable-graph") == 0) {
++            immutable_graph = true;
 +        } else if (strcmp(argv[i], "--suite") == 0) {
 +            if (i + 1 >= argc || strcmp(argv[++i], "rocm-v2") != 0) {
 +                fprintf(stderr, "Expected --suite rocm-v2\n");
@@ -1117,12 +1261,16 @@ index 725bdc79..02d144f2 100644
          } else if (strcmp(argv[i], "--output") == 0) {
              if (i + 1 < argc) {
                  if (!output_format_from_str(argv[++i], output_format)) {
-@@ -9743,6 +10394,49 @@ int main(int argc, char ** argv) {
+@@ -9743,6 +10491,61 @@ int main(int argc, char ** argv) {
          }
      }
  
 +    deterministic_tensor_init = rocm_v2_suite;
 +
++    if (immutable_graph && (mode != MODE_PERF || compare_params == nullptr)) {
++        fprintf(stderr, "--immutable-graph requires perf with --compare-params\n");
++        return 1;
++    }
 +    if ((!rocm_v2_suite && (list_cases || case_index >= 0)) ||
 +        (rocm_v2_suite && (test_file_path || mode == MODE_GRAD)) ||
 +        (compare_params && mode != MODE_PERF && !list_cases)) {
@@ -1133,6 +1281,14 @@ index 725bdc79..02d144f2 100644
 +        // Existing GGML logging defaults to stderr. Flush both streams for crash-isolated campaigns.
 +        setvbuf(stdout, nullptr, _IONBF, 0);
 +        setvbuf(stderr, nullptr, _IONBF, 0);
++    }
++    if (rocm_v2_suite) {
++        // Keep native DEBUG logging out of both UID0 and immutable timing measurements.
++        ggml_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
++            if (level != GGML_LOG_LEVEL_DEBUG) {
++                ggml_log_callback_default(level, text, user_data);
++            }
++        }, nullptr);
 +    }
 +    if (list_cases) {
 +        auto cases = make_test_cases_rocm_v2();
@@ -1167,7 +1323,7 @@ index 725bdc79..02d144f2 100644
      // load and enumerate backends
      ggml_backend_load_all();
  
-@@ -9755,6 +10449,7 @@ int main(int argc, char ** argv) {
+@@ -9755,6 +10558,7 @@ int main(int argc, char ** argv) {
      output_printer->print_testing_start(testing_start_info(ggml_backend_dev_count()));
  
      size_t n_ok = 0;
@@ -1175,7 +1331,7 @@ index 725bdc79..02d144f2 100644
  
      for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
          ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-@@ -9773,14 +10468,38 @@ int main(int argc, char ** argv) {
+@@ -9773,14 +10577,38 @@ int main(int argc, char ** argv) {
              continue;
          }
  
@@ -1216,18 +1372,18 @@ index 725bdc79..02d144f2 100644
          }
  
          size_t free, total;  // NOLINT
-@@ -9789,7 +10508,9 @@ int main(int argc, char ** argv) {
+@@ -9789,7 +10617,9 @@ int main(int argc, char ** argv) {
                                                               false, "", ggml_backend_dev_description(dev),
                                                               total / 1024 / 1024, free / 1024 / 1024, true));
  
 -        bool ok = test_backend(backend, mode, op_names_filter, params_filter, output_printer.get(), test_file_path);
 +        bool ok = test_backend(backend, mode, op_names_filter, params_filter, output_printer.get(), test_file_path,
 +                               rocm_v2_suite, case_index, compare_backend.get(),
-+                               backend_params && strcmp(backend_params, "rocm_v2") == 0);
++                               backend_params && strcmp(backend_params, "rocm_v2") == 0, immutable_graph);
  
          if (ok) {
              n_ok++;
-@@ -9807,8 +10528,13 @@ int main(int argc, char ** argv) {
+@@ -9807,8 +10637,13 @@ int main(int argc, char ** argv) {
      }
  
      output_printer->print_overall_summary(
