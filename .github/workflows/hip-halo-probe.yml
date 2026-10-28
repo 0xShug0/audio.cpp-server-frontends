@@ -43,11 +43,32 @@ jobs:
           git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
           git -C source config core.autocrlf false
           git -C source fetch --no-tags --depth=1 --filter=blob:none origin a53699007eee6616f4bc33c0ae2b1f069dac49c0
-          git -C source sparse-checkout set external/ggml
+          git -C source sparse-checkout set external/ggml external/cJSON include src/framework/core src/framework/io app/cli tests/unittests
           git -C source checkout --detach FETCH_HEAD
           git -C source rev-parse HEAD > source-commit.txt
           git -C source apply --check ../.github/tests/rocm-v2-source.patch
           git -C source apply ../.github/tests/rocm-v2-source.patch
+          git -C source apply --check ../.github/tests/rocm-v2-framework.patch
+          git -C source apply ../.github/tests/rocm-v2-framework.patch
+          cp -a source/external/ggml source-vulkan
+          cat >> source/external/ggml/CMakeLists.txt <<'CMAKE'
+          set(PROBE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+          add_executable(framework_backend_probe
+            ${PROBE_ROOT}/tests/unittests/test_backend_device_resolution.cpp
+            ${PROBE_ROOT}/src/framework/core/backend.cpp
+            ${PROBE_ROOT}/src/framework/core/module.cpp
+            ${PROBE_ROOT}/src/framework/core/execution_context.cpp
+            ${PROBE_ROOT}/src/framework/core/host_memory.cpp
+            ${PROBE_ROOT}/src/framework/io/json.cpp
+            ${PROBE_ROOT}/src/framework/io/filesystem.cpp
+            ${PROBE_ROOT}/external/cJSON/cJSON.c)
+          target_include_directories(framework_backend_probe PRIVATE ${PROBE_ROOT}/include ${PROBE_ROOT}/external/cJSON)
+          target_link_libraries(framework_backend_probe PRIVATE ggml)
+          add_executable(backend_config_args_test
+            ${PROBE_ROOT}/tests/unittests/test_backend_config_args.cpp
+            ${PROBE_ROOT}/app/cli/args.cpp)
+          target_include_directories(backend_config_args_test PRIVATE ${PROBE_ROOT}/include ${CMAKE_CURRENT_SOURCE_DIR}/include)
+          CMAKE
           cp -a external/ggml/src/ggml-hip/halo source/external/ggml/src/ggml-hip/
           mkdir -p source/tests/unittests/assets/hip_halo source/.github/tests
           cp tests/unittests/test_hip_halo_*.cu source/tests/unittests/
@@ -62,10 +83,12 @@ jobs:
           cmake -S source/external/ggml -B source/build/debug -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF \
             -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
-          cmake --build source/build/debug --target test-backend-ops --parallel 4
+          cmake --build source/build/debug --target test-backend-ops framework_backend_probe backend_config_args_test --parallel 4
           source/build/debug/bin/test-backend-ops --suite rocm-v2 --list-cases > prepare-cases.tsv
           cmp prepare-cases.tsv source/.github/tests/rocm-v2-cases.tsv
-          tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+          source/build/debug/bin/framework_backend_probe --log
+          source/build/debug/bin/backend_config_args_test --log
+          tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source source-vulkan
           du -h probe-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
@@ -82,7 +105,7 @@ jobs:
         working-directory: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
     env:
       OMP_NUM_THREADS: 8
-      CCACHE_BASEDIR: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/source
+      CCACHE_BASEDIR: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
       CCACHE_NOHASHDIR: true
       CCACHE_DIR: ${{ github.workspace }}/.cache/rocm-v2
       CCACHE_MAXSIZE: 3G
@@ -98,6 +121,7 @@ jobs:
           ulimit -c 0
           tar -xzf probe-source.tar.gz
           mkdir -p results
+          echo "campaign_deadline=$(( $(date +%s) + 2400 ))" >> "$GITHUB_ENV"
           echo "$PWD/source/toolchain" >> "$GITHUB_PATH"
           source/toolchain/ccache --version > results/ccache.log
           {
@@ -120,7 +144,7 @@ jobs:
         shell: bash
         run: |
           ulimit -c 0
-          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --through-suite builds --log
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --through-suite builds --deadline-epoch "$campaign_deadline" --log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -132,7 +156,7 @@ jobs:
         shell: bash
         run: |
           ulimit -c 0
-          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --through-suite correctness --log
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --through-suite correctness --deadline-epoch "$campaign_deadline" --log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -144,7 +168,19 @@ jobs:
         shell: bash
         run: |
           ulimit -c 0
-          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --log
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --through-suite framework --deadline-epoch "$campaign_deadline" --log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rocm-v2-hip-timings
+          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
+          retention-days: 14
+      - name: Vulkan references and final campaign status
+        if: always()
+        shell: bash
+        run: |
+          ulimit -c 0
+          python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --deadline-epoch "$campaign_deadline" --log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

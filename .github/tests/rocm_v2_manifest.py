@@ -46,6 +46,30 @@ builds = [
          'tests/unittests/test_hip_halo_im2col.cu', 'external/ggml/src/ggml-hip/halo/im2col.cu',
          '-o', 'build/debug/raw-im2col']]),
 ]
+builds.append(dict(id='framework', build_type='Debug', depends_on=['ggml'], timeout_s=240,
+    commands=[['cmake', '--build', 'build/debug', '--target', 'framework_backend_probe',
+               'backend_config_args_test', '--parallel', '8']]))
+vulkan_setup = """set -euo pipefail
+mkdir -p toolchain/debs toolchain/vulkan
+cd toolchain/debs
+apt-get download libvulkan-dev glslc libshaderc1 spirv-headers
+for package in *.deb; do dpkg-deb -x "$package" ../vulkan; done
+"""
+vulkan_configure = """set -euo pipefail
+export LD_LIBRARY_PATH="$PWD/toolchain/vulkan/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+cmake -S . -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 \
+  -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  '-DCMAKE_CXX_FLAGS_DEBUG=-g1 -O2' '-DCMAKE_C_FLAGS_DEBUG=-g1 -O2' \
+  -DCMAKE_PREFIX_PATH="$PWD/toolchain/vulkan/usr" \
+  -DVulkan_LIBRARY=/lib/x86_64-linux-gnu/libvulkan.so.1 \
+  -DVulkan_INCLUDE_DIR="$PWD/toolchain/vulkan/usr/include" \
+  -DVulkan_GLSLC_EXECUTABLE="$PWD/toolchain/vulkan/usr/bin/glslc" \
+  -DGGML_HIP=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=ON -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
+cmake --build build/debug --target test-backend-ops --parallel 8
+"""
+builds.append(dict(id='vulkan', build_type='Debug', cwd='../source-vulkan', timeout_s=480,
+    commands=[['bash', '-c', vulkan_setup], ['bash', '-c', vulkan_configure]]))
 # Raw targets remain independently executable if the integrated backend fails to build.
 for build in builds:
     build['commands'].insert(0, ['cmake', '-E', 'make_directory', 'build/debug'])
@@ -92,6 +116,19 @@ suites = [
          dict(id=f'cases-{start}-{min(start+31,458)}',
               argv=['build/debug/raw-im2col', '--range', str(start), '32']) for start in range(0,459,32)]),
 ]
+suites.append(dict(id='framework', build='framework', gpu=True, timeout_s=45, cases=[
+    dict(id='selection', argv=['build/debug/bin/framework_backend_probe', '--require-rocm-v2', '--log']),
+    dict(id='parsing', argv=['build/debug/bin/backend_config_args_test', '--log'])]))
+# Same deterministic input producer and cases as the HIP campaign. Each worker
+# compares two instances of Vulkan to give a warmed wall-time reference.
+vulkan_indices = list(range(8)) + [21,22,24,25,35,36,41,44,46,48,50,64,66,68,70,72,74,124,125] + list(range(127,142))
+suites.append(dict(id='vulkan', build='vulkan', gpu=True, timeout_s=30, cases=[
+    dict(id=f'{index:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops', 'perf',
+         '--suite','rocm-v2','-b','Vulkan0','--case-index',str(index),'--compare-params',''])
+    for index in vulkan_indices]))
+suites.append(dict(id='vulkan-correctness', build='vulkan', gpu=True, timeout_s=60, cases=[
+    dict(id=f'{index:03d}-cpu-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops', 'test',
+         '--suite','rocm-v2','-b','Vulkan0','--case-index',str(index)]) for index in (0,1,125)]))
 # This independently compiled health worker does not depend on the integrated backend.
 health = dict(argv=['build/debug/device-health', 'health'], timeout_s=15)
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)

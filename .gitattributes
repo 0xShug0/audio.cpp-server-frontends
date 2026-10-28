@@ -23,3 +23,6 @@
 *.wav binary
 *.webp binary
 *.zip binary
+
+# Patch fixtures preserve original line endings and diff context whitespace.
+.github/tests/rocm-v2-*.patch -whitespace

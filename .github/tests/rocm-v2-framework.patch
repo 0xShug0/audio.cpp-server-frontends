@@ -1,0 +1,265 @@
+diff --git a/app/cli/args.cpp b/app/cli/args.cpp
+index c157d7ff..225c8ec0 100644
+--- a/app/cli/args.cpp
++++ b/app/cli/args.cpp
+@@ -184,7 +184,7 @@ engine::core::BackendType parse_backend(const std::string & value) {
+     if (value == "cuda") {
+         return engine::core::BackendType::Cuda;
+     }
+-    if (value == "hip" || value == "rocm") {
++    if (value == "hip" || value == "rocm" || value == "rocm_v2") {
+         return engine::core::BackendType::Hip;
+     }
+     if (value == "vulkan") {
+@@ -199,6 +199,15 @@ engine::core::BackendType parse_backend(const std::string & value) {
+     throw std::runtime_error("unsupported backend: " + value);
+ }
+ 
++engine::core::BackendConfig parse_backend_config(const std::string & value) {
++    engine::core::BackendConfig config;
++    config.type = parse_backend(value);
++    if (value == "rocm_v2") {
++        config.implementation = value;
++    }
++    return config;
++}
++
+ engine::audio::WavSampleFormat parse_wav_sample_format(const std::string & value) {
+     if (value == "pcm16") {
+         return engine::audio::WavSampleFormat::Pcm16;
+diff --git a/app/cli/args.h b/app/cli/args.h
+index 9f1a6ef7..a98b49d1 100644
+--- a/app/cli/args.h
++++ b/app/cli/args.h
+@@ -42,6 +42,7 @@ int parse_int_arg(int argc, char ** argv, const std::string & name, int fallback
+ std::optional<float> parse_optional_float_arg(int argc, char ** argv, const std::string & name);
+ std::optional<std::filesystem::path> optional_path_arg(int argc, char ** argv, const std::string & name);
+ engine::core::BackendType parse_backend(const std::string & value);
++engine::core::BackendConfig parse_backend_config(const std::string & value);
+ engine::audio::WavSampleFormat parse_wav_sample_format(const std::string & value);
+ // WAV writer settings for --out and --out-dir audio. With no --out-format this is the default
+ // 16-bit hard-clipped output every route has always written.
+diff --git a/include/engine/framework/core/backend.h b/include/engine/framework/core/backend.h
+index b02db0fd..351e66f4 100644
+--- a/include/engine/framework/core/backend.h
++++ b/include/engine/framework/core/backend.h
+@@ -20,6 +20,9 @@ struct BackendConfig {
+     BackendType type = BackendType::Cpu;
+     int device = 0;
+     int threads = 1;
++    // Per-instance HIP execution tuning. Empty keeps the default HIP path;
++    // ignored by other backend types, including intentional CPU config copies.
++    std::string implementation = {};
+ };
+ 
+ struct BackendMemorySnapshot {
+diff --git a/src/framework/core/backend.cpp b/src/framework/core/backend.cpp
+index d7e8f79f..63a2b768 100644
+--- a/src/framework/core/backend.cpp
++++ b/src/framework/core/backend.cpp
+@@ -208,6 +208,10 @@ std::string describe_missing_device(BackendType type, const char * label, int de
+ }
+ 
+ ggml_backend_t init_device_backend(BackendType type, const char * label, const BackendConfig & config) {
++    const bool hip_implementation = type == BackendType::Hip && !config.implementation.empty();
++    if (hip_implementation && config.implementation != "rocm_v2") {
++        throw std::runtime_error("Unsupported HIP implementation: " + config.implementation);
++    }
+     if (config.device < 0) {
+         throw std::runtime_error(
+             std::string(label) + " backend requested with negative device index");
+@@ -216,7 +220,12 @@ ggml_backend_t init_device_backend(BackendType type, const char * label, const B
+     if (device == nullptr) {
+         throw std::runtime_error(describe_missing_device(type, label, config.device));
+     }
+-    ggml_backend_t backend = ggml_backend_dev_init(device, nullptr);
++    if (hip_implementation && ggml_backend_reg_get_proc_address(
++            ggml_backend_dev_backend_reg(device), "ggml_backend_rocm_v2_init") == nullptr) {
++        throw std::runtime_error("HIP implementation rocm_v2 is not supported by this backend build");
++    }
++    ggml_backend_t backend = ggml_backend_dev_init(
++        device, hip_implementation ? config.implementation.c_str() : nullptr);
+     if (backend == nullptr) {
+         throw std::runtime_error(
+             "Failed to initialize " + std::string(label) + " backend on device " +
+diff --git a/src/framework/core/execution_context.cpp b/src/framework/core/execution_context.cpp
+index 30c20261..7f98e7e2 100644
+--- a/src/framework/core/execution_context.cpp
++++ b/src/framework/core/execution_context.cpp
+@@ -20,7 +20,7 @@ ExecutionContext::~ExecutionContext() {
+ }
+ 
+ ExecutionContext::ExecutionContext(ExecutionContext && other) noexcept
+-    : config_(other.config_),
++    : config_(std::move(other.config_)),
+       backend_(other.backend_) {
+     other.backend_ = nullptr;
+ }
+@@ -32,7 +32,7 @@ ExecutionContext & ExecutionContext::operator=(ExecutionContext && other) noexce
+     if (backend_ != nullptr) {
+         ggml_backend_free(backend_);
+     }
+-    config_ = other.config_;
++    config_ = std::move(other.config_);
+     backend_ = other.backend_;
+     other.backend_ = nullptr;
+     return *this;
+diff --git a/tests/unittests/test_backend_device_resolution.cpp b/tests/unittests/test_backend_device_resolution.cpp
+index 44af8797..2a04e1ae 100644
+--- a/tests/unittests/test_backend_device_resolution.cpp
++++ b/tests/unittests/test_backend_device_resolution.cpp
+@@ -4,6 +4,7 @@
+ #include "test_assert.h"
+ 
+ #include <cstdint>
++#include <chrono>
+ #include <cstring>
+ #include <iostream>
+ #include <memory>
+@@ -381,13 +382,67 @@ void test_host_and_best_backends_still_resolve() {
+     require(best_backend.handle != nullptr, "best backend is null");
+ }
+ 
++void test_hip_implementation_selection(bool require_rocm_v2) {
++    BackendConfig config;
++    config.type = BackendType::Hip;
++    config.implementation = "unknown";
++    require(
++        init_backend_error(config).find("Unsupported HIP implementation: unknown") != std::string::npos,
++        "unknown HIP implementation must be rejected explicitly");
++
++    config.implementation = "rocm_v2";
++    BackendConfig cpu_copy = config;
++    cpu_copy.type = BackendType::Cpu;
++    BackendHandle cpu(engine::core::init_backend(cpu_copy));
++    require(engine::core::is_host_backend(cpu.handle), "HIP tuning must not affect an intentional CPU copy");
++
++    ensure_backends_loaded();
++    for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {
++        ggml_backend_reg_t reg = ggml_backend_reg_get(i);
++        if (std::strcmp(ggml_backend_reg_name(reg), "ROCm") != 0) {
++            continue;
++        }
++        if (ggml_backend_reg_dev_count(reg) == 0) {
++            continue;
++        }
++        if (ggml_backend_reg_get_proc_address(reg, "ggml_backend_rocm_v2_init") == nullptr) {
++            require(!require_rocm_v2, "this run requires rocm_v2 initialization support");
++            require(
++                init_backend_error(config).find("not supported by this backend build") != std::string::npos,
++                "older HIP builds must reject rocm_v2 before device initialization");
++            return;
++        }
++
++        if (require_rocm_v2) {
++            BackendHandle variant(engine::core::init_backend(config));
++            require(engine::core::backend_type(variant.handle) == BackendType::Hip,
++                    "rocm_v2 must retain logical HIP identity");
++            require(!engine::core::uses_host_graph_plan(variant.handle), "rocm_v2 must remain a GPU backend");
++        }
++        config.implementation.clear();
++        BackendHandle standard(engine::core::init_backend(config));
++        require(engine::core::backend_type(standard.handle) == BackendType::Hip,
++                "default HIP must remain available when rocm_v2 is supported");
++        return;
++    }
++    require(!require_rocm_v2, "this run requires a HIP device with rocm_v2 support");
++    require(!init_backend_error(config).empty(), "rocm_v2 must fail when no HIP device is available");
++}
++
+ }  // namespace
+ 
+-int main() {
++int main(int argc, char ** argv) {
++    const auto start = std::chrono::steady_clock::now();
++    bool require_rocm_v2 = false;
+     try {
++        for (int i = 1; i < argc; ++i) {
++            if (std::strcmp(argv[i], "--require-rocm-v2") == 0) require_rocm_v2 = true;
++            else if (std::strcmp(argv[i], "--log") != 0) throw std::runtime_error("unknown test argument");
++        }
+         test_every_enumerated_device_resolves();
+         test_unregistered_backends_are_rejected();
+         test_host_and_best_backends_still_resolve();
++        test_hip_implementation_selection(require_rocm_v2);
+         test_text_listing_format_is_stable();
+         test_json_listing_matches_selection();
+         test_json_writer_exact_integers_and_nulls();
+@@ -395,6 +450,9 @@ int main() {
+         std::cerr << "backend_device_resolution_test failed: " << error.what() << '\n';
+         return 1;
+     }
++    std::cout << "session.wall_ms="
++              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
++              << '\n';
+     std::cout << "backend_device_resolution_test passed\n";
+     return 0;
+ }
+diff --git a/tests/unittests/test_backend_config_args.cpp b/tests/unittests/test_backend_config_args.cpp
+new file mode 100644
+index 00000000..eb29ac95
+--- /dev/null
++++ b/tests/unittests/test_backend_config_args.cpp
+@@ -0,0 +1,62 @@
++#include "../../app/cli/args.h"
++#include "test_assert.h"
++
++#include <chrono>
++#include <iostream>
++#include <string>
++#include <utility>
++
++int main(int argc, char ** argv) {
++    const auto start = std::chrono::steady_clock::now();
++    try {
++        using engine::core::BackendType;
++        using engine::test::require;
++        using engine::test::require_eq;
++
++        for (const auto & [spelling, type] : {
++                 std::pair{"cpu", BackendType::Cpu},
++                 std::pair{"cuda", BackendType::Cuda},
++                 std::pair{"hip", BackendType::Hip},
++                 std::pair{"rocm", BackendType::Hip},
++                 std::pair{"rocm_v2", BackendType::Hip},
++                 std::pair{"vulkan", BackendType::Vulkan},
++                 std::pair{"metal", BackendType::Metal},
++                 std::pair{"best", BackendType::BestAvailable},
++             }) {
++            const auto config = minitts::cli::parse_backend_config(spelling);
++            require(config.type == type, std::string(spelling) + " logical backend");
++            require(minitts::cli::parse_backend(spelling) == type, std::string(spelling) + " enum compatibility");
++            require_eq(config.implementation, std::string(spelling == std::string("rocm_v2") ? "rocm_v2" : ""),
++                       std::string(spelling) + " implementation");
++            require_eq(config.device, 0, "default device");
++            require_eq(config.threads, 1, "default threads");
++        }
++
++        for (const char * spelling : {"", "rocm_v3", "cuda:rocm_v2", "HIP", "rocm_v2 "}) {
++            bool rejected = false;
++            try {
++                (void)minitts::cli::parse_backend_config(spelling);
++            } catch (const std::runtime_error & error) {
++                require_eq(std::string(error.what()), "unsupported backend: " + std::string(spelling),
++                           "invalid backend error");
++                rejected = true;
++            }
++            require(rejected, std::string("invalid backend accepted: ") + spelling);
++        }
++
++        const auto variant = minitts::cli::parse_backend_config("rocm_v2");
++        const auto standard = minitts::cli::parse_backend_config("hip");
++        require_eq(variant.implementation, std::string("rocm_v2"), "variant remains selected independently");
++        require(standard.implementation.empty(), "explicit hip selects the default implementation");
++    } catch (const std::exception & error) {
++        std::cerr << "backend_config_args_test failed: " << error.what() << '\n';
++        return 1;
++    }
++    if (minitts::cli::has_arg(argc, argv, "--log")) {
++        std::cout << "session.wall_ms="
++                  << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
++                  << '\n';
++    }
++    std::cout << "backend_config_args_test passed\n";
++    return 0;
++}

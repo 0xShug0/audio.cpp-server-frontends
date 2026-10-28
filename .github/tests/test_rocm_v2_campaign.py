@@ -45,7 +45,7 @@ class CampaignTests(unittest.TestCase):
     def manifest_data(builds=None, suites=None, **options):
         return dict(version=1, builds=builds or [], suites=suites or [], **options)
 
-    def run_campaign(self, data=None, resume=False, through_suite=None, validate_only=False):
+    def run_campaign(self, data=None, resume=False, through_suite=None, validate_only=False, deadline_epoch=None):
         if data is not None:
             self.manifest.write_text(json.dumps(data), encoding="utf-8")
         argv = [sys.executable, str(CONTROLLER), "--manifest", str(self.manifest),
@@ -56,6 +56,8 @@ class CampaignTests(unittest.TestCase):
             argv.extend(["--through-suite", through_suite])
         if validate_only:
             argv.append("--validate-only")
+        if deadline_epoch is not None:
+            argv.append(f"--deadline-epoch={deadline_epoch}")
         result = subprocess.run(argv, cwd=self.root, capture_output=True, text=True, timeout=15)
         with (self.root / "invocations.log").open("a", encoding="utf-8") as log:
             log.write(result.stdout + result.stderr)
@@ -98,6 +100,43 @@ class CampaignTests(unittest.TestCase):
             "hang": "BUILD_FAILED", "broken": "BUILD_FAILED", "good": "PASS"})
         self.assertEqual(self.statuses(), {"cpu/works": "PASS"})
         self.assertFalse((self.root / "should-not-run").exists())
+
+    def test_failed_ggml_blocks_framework_but_independent_vulkan_runs(self):
+        data = self.manifest_data(builds=[
+            self.build("ggml", "raise SystemExit(1)"),
+            self.build("framework", "from pathlib import Path; Path('framework-built').touch()",
+                       depends_on=["ggml"]),
+            self.build("vulkan", "from pathlib import Path; Path('vulkan-built').touch()")],
+            suites=[dict(id="ggml-suite", build="ggml", cases=[self.case("blocked")]),
+                    dict(id="framework-suite", build="framework", cases=[self.case("blocked")]),
+                    dict(id="vulkan-suite", build="vulkan", cases=[self.case(
+                        "works", "from pathlib import Path; assert Path('vulkan-built').exists()")])])
+        result = self.run_campaign(data)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.statuses("build"), {"ggml": "BUILD_FAILED",
+            "framework": "BLOCKED_BY_DEPENDENCY", "vulkan": "PASS"})
+        self.assertEqual(self.statuses(), {"ggml-suite/blocked": "BLOCKED_BY_DEPENDENCY",
+            "framework-suite/blocked": "BLOCKED_BY_DEPENDENCY", "vulkan-suite/works": "PASS"})
+        self.assertFalse((self.root / "framework-built").exists())
+        self.assertTrue((self.root / "vulkan-built").exists())
+        events = self.events()[1:]
+        framework = [row for row in events if row["kind"] == "build" and row["id"] == "framework"]
+        self.assertEqual([row["event"] for row in framework], ["START", "DONE"])
+        self.assertEqual(framework[-1]["dependencies"], ["ggml"])
+        self.assertLess(max(i for i, row in enumerate(events) if row["kind"] == "build"),
+                        min(i for i, row in enumerate(events) if row["kind"] == "case"))
+        before = (self.output / "events.jsonl").read_bytes()
+        self.assertEqual(self.run_campaign(resume=True).returncode, 1)
+        self.assertEqual((self.output / "events.jsonl").read_bytes(), before)
+
+    def test_passing_build_dependency_allows_dependent_commands(self):
+        data = self.manifest_data(builds=[self.build("ggml"), self.build("framework",
+            "from pathlib import Path; Path('framework-built').touch()", depends_on=["ggml"])],
+            suites=[dict(id="framework-suite", build="framework", cases=[self.case("works")])])
+        result = self.run_campaign(data)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.statuses("build"), {"ggml": "PASS", "framework": "PASS"})
+        self.assertTrue((self.root / "framework-built").exists())
 
     def test_crash_incorrect_launch_error_and_independent_success(self):
         data = self.manifest_data(suites=[dict(id="cpu", cases=[
@@ -147,6 +186,53 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result["status"], "TIMEOUT")
         self.assertIn("SIGKILL", result["termination_error"])
         self.assertTrue(all("timeout" in call.kwargs for call in process.wait.call_args_list))
+
+    def test_expired_deadline_blocks_builds_and_cases_without_children(self):
+        command = "from pathlib import Path; Path('executed').touch()"
+        data = self.manifest_data(builds=[self.build("compile", command)], suites=[
+            dict(id="built", build="compile", cases=[self.case("blocked", command)]),
+            dict(id="independent", cases=[self.case("blocked", command)])])
+        result = self.run_campaign(data, deadline_epoch=1)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.statuses("build"), {"compile": "BLOCKED_BY_DEPENDENCY"})
+        self.assertEqual(self.statuses(), {"built/blocked": "BLOCKED_BY_DEPENDENCY",
+                                          "independent/blocked": "BLOCKED_BY_DEPENDENCY"})
+        self.assertFalse((self.root / "executed").exists())
+        direct = [row for row in self.events() if row["event"] == "DONE"
+                  and row["id"] in {"compile", "independent/blocked"}]
+        self.assertTrue(all(row["reason"] == "campaign deadline" for row in direct))
+        controller = campaign.Campaign(self.manifest, self.root / "no-children", deadline_epoch=1)
+        with mock.patch.object(campaign.subprocess, "Popen") as spawn, \
+                mock.patch.object(campaign.sys, "stdout", io.StringIO()):
+            self.assertEqual(controller.run(), 1)
+            spawn.assert_not_called()
+
+    def test_deadline_caps_wait_and_is_checked_before_every_command(self):
+        data = self.manifest_data(suites=[dict(id="cpu", cases=[self.case("first")])])
+        self.manifest.write_text(json.dumps(data))
+        controller = campaign.Campaign(self.manifest, self.output, deadline_epoch=110)
+        process = mock.Mock(pid=12345, returncode=0)
+        process.wait.return_value = 0
+        with mock.patch.object(campaign.subprocess, "Popen", return_value=process) as spawn, \
+                mock.patch.object(campaign.os, "killpg"), \
+                mock.patch.object(campaign.time, "time", side_effect=[100, 100, 111]):
+            settings = controller.settings({"timeout_s": 300})
+            self.assertEqual(controller.execute(["synthetic", "--log"], settings, io.BytesIO())["status"], "PASS")
+            blocked = controller.execute(["synthetic", "--log"], settings, io.BytesIO())
+        self.assertEqual(process.wait.call_args_list[0].kwargs["timeout"], 10)
+        self.assertEqual(blocked["status"], "BLOCKED_BY_DEPENDENCY")
+        self.assertEqual(blocked["reason"], "campaign deadline")
+        self.assertEqual(spawn.call_count, 1)
+
+    def test_deadline_must_be_finite_and_positive(self):
+        data = self.manifest_data(suites=[dict(id="cpu", cases=[self.case("first")])])
+        for value in [0, -1, float("nan"), float("inf"), -float("inf")]:
+            with self.subTest(deadline=value):
+                result = self.run_campaign(data, deadline_epoch=value, validate_only=True)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("--deadline-epoch must be finite and positive", result.stderr)
+        self.assertEqual(self.run_campaign(data, deadline_epoch=1, validate_only=True).returncode, 0)
+        self.assertFalse((self.output / "events.jsonl").exists())
 
     def test_gpu_fault_without_health_check_blocks_gpu_only(self):
         data = self.manifest_data(suites=[
@@ -304,6 +390,10 @@ class CampaignTests(unittest.TestCase):
             lambda d: d.update(version=2),
             lambda d: d.update(unknown=True),
             lambda d: d["builds"][0].update(build_type="Release"),
+            lambda d: d["builds"][0].update(depends_on="compile"),
+            lambda d: d["builds"][0].update(depends_on=["compile"]),
+            lambda d: d["builds"][0].update(depends_on=["missing"]),
+            lambda d: d["builds"].insert(0, self.build("forward", depends_on=["compile"])),
             lambda d: d["suites"][0].update(build="missing"),
             lambda d: d["suites"][0]["cases"][0].update(argv="echo unsafe"),
             lambda d: d["suites"][0]["cases"][0].update(timeout_s=0),

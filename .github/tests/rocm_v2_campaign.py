@@ -8,6 +8,8 @@ START becomes a failure on resume; retrying requires a new output directory.
 that suite (in manifest order), including on resume when it is already complete.
 Omit --through-suite to finish the campaign. Partial runs still exit nonzero if
 any required result recorded so far failed, so CI can upload between phases.
+--deadline-epoch UNIX_SECONDS bounds command execution across phases; pass the
+same finite positive deadline on every invocation. Expired commands are blocked.
 
 Manifest v1 (paths are relative to the manifest directory):
   {"version": 1,
@@ -21,7 +23,8 @@ Manifest v1 (paths are relative to the manifest directory):
 
 Builds, cases and health_check accept cwd, env and timeout_s. Suite defaults for
 cwd/env/timeout_s/required are inherited by cases. Required defaults to true;
-gpu defaults to false. Case depends_on lists earlier "suite/case" IDs. Exit 0
+gpu defaults to false. Build depends_on lists earlier build IDs; case depends_on
+lists earlier "suite/case" IDs. Failed dependencies block their dependents. Exit 0
 means PASS, positive exits mean INCORRECT, signals/launch errors mean CRASH.
 All build commands finish before any case starts. No shell is used. GPU crashes
 and timeouts trigger the optional health check; without one, GPU work is blocked.
@@ -90,10 +93,13 @@ def validate_manifest(data):
         raise ValueError("manifest requires builds and suites arrays")
     builds, suites, cases = set(), set(), set()
     for build in data["builds"]:
-        fields(build, COMMON | {"id", "build_type", "commands"}, "build")
+        fields(build, COMMON | {"id", "build_type", "commands", "depends_on"}, "build")
         name = identifier(build)
         if name in builds:
             raise ValueError(f"duplicate build: {name}")
+        deps = build.get("depends_on", [])
+        if not isinstance(deps, list) or any(not isinstance(dep, str) or dep not in builds for dep in deps):
+            raise ValueError(f"build {name}: depends_on must reference earlier builds")
         builds.add(name)
         if build.get("build_type") != "Debug":
             raise ValueError(f"build {name}: build_type must be Debug")
@@ -132,7 +138,13 @@ def validate_manifest(data):
 
 
 class Campaign:
-    def __init__(self, manifest, output, resume=False):
+    def __init__(self, manifest, output, resume=False, deadline_epoch=None):
+        if deadline_epoch is not None and (
+            type(deadline_epoch) not in (int, float)
+            or not math.isfinite(deadline_epoch) or deadline_epoch <= 0
+        ):
+            raise ValueError("--deadline-epoch must be finite and positive")
+        self.deadline_epoch = deadline_epoch
         self.path = Path(manifest).resolve()
         self.data = validate_manifest(json.loads(self.path.read_text(encoding="utf-8")))
         self.output = Path(output)
@@ -173,6 +185,12 @@ class Campaign:
         log.flush()
         started = time.monotonic()
         termination_error = None
+        if self.deadline_epoch is not None and time.time() >= self.deadline_epoch:
+            result = {"status": "BLOCKED_BY_DEPENDENCY", "reason": "campaign deadline",
+                      "session.wall_ms": (time.monotonic() - started) * 1000}
+            log.write((json.dumps(result) + "\n").encode())
+            log.flush()
+            return result
         try:
             proc = subprocess.Popen(argv, cwd=settings["cwd"], env=settings["env"],
                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -183,7 +201,10 @@ class Campaign:
                     "session.wall_ms": (time.monotonic() - started) * 1000}
         try:
             try:
-                code = proc.wait(timeout=settings["timeout_s"])
+                timeout = settings["timeout_s"]
+                if self.deadline_epoch is not None:
+                    timeout = min(timeout, max(0, self.deadline_epoch - time.time()))
+                code = proc.wait(timeout=timeout)
                 status = "PASS" if code == 0 else "CRASH" if code < 0 else "INCORRECT"
             except subprocess.TimeoutExpired:
                 status = "TIMEOUT"
@@ -224,7 +245,7 @@ class Campaign:
                 result = self.execute(command, settings, log)
                 if result["status"] != "PASS":
                     break
-        if kind == "build" and result["status"] != "PASS":
+        if kind == "build" and result["status"] not in {"PASS", "BLOCKED_BY_DEPENDENCY"}:
             result["reason"] = result["status"]
             result["status"] = "BUILD_FAILED"
         result["session.wall_ms"] = (time.monotonic() - started) * 1000
@@ -288,6 +309,18 @@ class Campaign:
                                 reason="controller interrupted after START; no implicit retry",
                                 **{"session.wall_ms": 0})
                 for build in self.data["builds"]:
+                    key = build["id"]
+                    if ("build", key) in self.results:
+                        continue
+                    failed = [dep for dep in build.get("depends_on", [])
+                              if self.results["build", dep]["status"] != "PASS"]
+                    if failed:
+                        required = build.get("required", True)
+                        self.record("START", "build", key, required=required, gpu=False)
+                        self.record("DONE", "build", key, status="BLOCKED_BY_DEPENDENCY",
+                                    required=required, gpu=False, dependencies=failed,
+                                    **{"session.wall_ms": 0})
+                        continue
                     self.run_item("build", build["id"], build["commands"], self.settings(build),
                                   required=build.get("required", True))
                 for suite in suites:
@@ -337,10 +370,11 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--through-suite", help="run through builds or a suite ID, then persist an interim summary")
+    parser.add_argument("--deadline-epoch", type=float, help="absolute UNIX seconds deadline shared by all phases")
     parser.add_argument("--log", action="store_true", required=True, help="enable persisted controller and child logs")
     args = parser.parse_args()
     try:
-        controller = Campaign(args.manifest, args.output_dir, args.resume)
+        controller = Campaign(args.manifest, args.output_dir, args.resume, args.deadline_epoch)
         if args.validate_only:
             line = json.dumps({"event": "VALIDATED", "manifest": str(controller.path),
                                "session.wall_ms": 0}) + "\n"

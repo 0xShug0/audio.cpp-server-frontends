@@ -1,8 +1,18 @@
 diff --git a/external/ggml/src/ggml-cuda/common.cuh b/external/ggml/src/ggml-cuda/common.cuh
-index f592d404..27eb76aa 100644
+index f592d404..54ceea0b 100644
 --- a/external/ggml/src/ggml-cuda/common.cuh
 +++ b/external/ggml/src/ggml-cuda/common.cuh
-@@ -1456,7 +1456,12 @@ struct ggml_backend_cuda_context {
+@@ -1210,6 +1210,9 @@ struct ggml_cuda_graph {
+     std::vector<cudaGraphNode_t> nodes;
+     bool disable_due_to_gpu_arch = false;
+     bool warmup_complete = false;
++#ifdef GGML_USE_HIP
++    bool rocm_v2_validated = false;
++#endif
+     uint64_t uid = 0;
+     int64_t last_used_time = 0;
+     struct node_properties {
+@@ -1456,7 +1459,12 @@ struct ggml_backend_cuda_context {
      // Fold a ROUND_BF16 that directly follows RMS_NORM*MUL, ADD or SwiGLU into
      // the producing kernel. Off by default; set through
      // ggml_backend_cuda_set_round_bf16_fusion(), scoped to this backend instance.
@@ -17,7 +27,7 @@ index f592d404..27eb76aa 100644
      ~ggml_backend_cuda_context();
  
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 539f5807..ea3c6a57 100644
+index 539f5807..e4a420c4 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,4 +1,7 @@
@@ -28,25 +38,58 @@ index 539f5807..ea3c6a57 100644
  #include "ggml-impl.h"
  #include "ggml-backend-impl.h"
  
-@@ -2755,6 +2758,12 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+@@ -2755,6 +2758,16 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
  
  static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
      const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 +#ifdef GGML_USE_HIP
-+    if (ctx.rocm_v2 && !split && ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
-+        ++ctx.rocm_v2_sgemm_launches;
-+        return;
++    if (ctx.rocm_v2) {
++        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
++        if (src0->buffer->buft == buft && src1->buffer->buft == buft && dst->buffer->buft == buft &&
++            ggml_rocm_v2_mul_mat(src0, src1, dst, ctx.stream())) {
++            ++ctx.rocm_v2_sgemm_launches;
++            return;
++        }
 +    }
 +#endif
  
      if (dst->type == GGML_TYPE_F16) {
          GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
-@@ -5047,6 +5056,17 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+@@ -5047,6 +5060,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
      ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
  
      ggml_cuda_set_device(cuda_ctx->device);
 +#ifdef GGML_USE_HIP
-+    if (cuda_ctx->rocm_v2) {
++    bool validate_rocm_v2 = cuda_ctx->rocm_v2;
++#ifdef USE_CUDA_GRAPH
++    ggml_cuda_graph * rocm_v2_validation_graph = nullptr;
++#endif
++#endif
+ 
+     bool use_cuda_graph             = false;
+     bool cuda_graph_update_required = false;
+@@ -5062,6 +5081,15 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+         const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
+         if (graph_compatible) {
+             const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
++#ifdef GGML_USE_HIP
++            if (cuda_ctx->rocm_v2) {
++                rocm_v2_validation_graph = graph;
++                if (properties_changed) {
++                    graph->rocm_v2_validated = false;
++                }
++                validate_rocm_v2 = !graph->rocm_v2_validated;
++            }
++#endif
+ 
+             if (!graph->warmup_complete) {
+                 // Warmup: need at least 2 calls with no property change on the 2nd call
+@@ -5087,6 +5115,23 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+     }
+ #endif // USE_CUDA_GRAPH
+ 
++#ifdef GGML_USE_HIP
++    if (validate_rocm_v2) {
 +        for (int i = 0; i < ggml_graph_n_nodes(cgraph); ++i) {
 +            const ggml_tensor * node = ggml_graph_node(cgraph, i);
 +            if (!ggml_backend_supports_op(backend, node)) {
@@ -54,12 +97,18 @@ index 539f5807..ea3c6a57 100644
 +                return GGML_STATUS_FAILED;
 +            }
 +        }
++#ifdef USE_CUDA_GRAPH
++        if (rocm_v2_validation_graph != nullptr) {
++            rocm_v2_validation_graph->rocm_v2_validated = true;
++        }
++#endif
 +    }
 +#endif
- 
-     bool use_cuda_graph             = false;
-     bool cuda_graph_update_required = false;
-@@ -5659,9 +5679,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
++
+     if (use_cuda_graph && cuda_graph_update_required) {
+         // Start CUDA graph capture
+         {
+@@ -5659,9 +5704,27 @@ static void ggml_backend_cuda_device_get_props(ggml_backend_dev_t dev, ggml_back
  }
  
  static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t dev, const char * params) {
@@ -88,7 +137,7 @@ index 539f5807..ea3c6a57 100644
  }
  
  static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
-@@ -6263,8 +6301,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -6263,8 +6326,24 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
      GGML_UNUSED(reg);
  }
  
@@ -114,7 +163,7 @@ index 539f5807..ea3c6a57 100644
          return (void *)ggml_backend_cuda_comm_init;
      }
 diff --git a/external/ggml/src/ggml-cuda/im2col.cu b/external/ggml/src/ggml-cuda/im2col.cu
-index 7226f790..6e4acec1 100644
+index 7226f790..3d683857 100644
 --- a/external/ggml/src/ggml-cuda/im2col.cu
 +++ b/external/ggml/src/ggml-cuda/im2col.cu
 @@ -1,4 +1,7 @@
@@ -125,16 +174,20 @@ index 7226f790..6e4acec1 100644
  
  #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
  static __global__ void im2col_f32_tiled_3x3(
-@@ -297,7 +300,13 @@ static void im2col_cuda_f32(const float * x, float * dst,
+@@ -297,7 +300,17 @@ static void im2col_cuda_f32(const float * x, float * dst,
                        s0, s1, p0, p1, d0, d1, lowering, stream);
  }
  
 -void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 +void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 +#ifdef GGML_USE_HIP
-+    if (ctx.rocm_v2 && ggml_rocm_v2_im2col(dst->src[1], dst, ctx.stream())) {
-+        ++ctx.rocm_v2_im2col_launches;
-+        return;
++    if (ctx.rocm_v2) {
++        const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
++        if (dst->src[1]->buffer->buft == buft && dst->buffer->buft == buft &&
++            ggml_rocm_v2_im2col(dst->src[1], dst, ctx.stream())) {
++            ++ctx.rocm_v2_im2col_launches;
++            return;
++        }
 +    }
 +#endif
      const ggml_tensor * src0 = dst->src[0];
@@ -154,7 +207,7 @@ index deb063b7..0fdd363d 100644
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
  else()
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 725bdc79..e3c143dc 100644
+index 725bdc79..1b2af082 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
 @@ -23,6 +23,8 @@
@@ -166,7 +219,36 @@ index 725bdc79..e3c143dc 100644
  #include <cinttypes>
  #include <cstdarg>
  #include <cstdint>
-@@ -814,6 +816,11 @@ struct console_printer : public printer {
+@@ -49,6 +51,8 @@
+ #   define N_THREADS std::thread::hardware_concurrency()
+ #endif
+ 
++static bool deterministic_tensor_init = false;
++
+ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float max = 1.0f) {
+     size_t nels = ggml_nelements(tensor);
+     std::vector<float> data(nels);
+@@ -57,11 +61,14 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
+         static const size_t n_threads = N_THREADS;
+         // static RNG initialization (revisit if n_threads stops being constant)
+         static std::vector<std::default_random_engine> generators = []() {
+-            std::random_device rd;
+-            std::vector<std::default_random_engine> vec;
+-            vec.reserve(n_threads);
+-            //for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(1234 + i); } // fixed seed
+-            for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(rd()); }
++            std::vector<std::default_random_engine> vec;
++            vec.reserve(n_threads);
++            if (deterministic_tensor_init) {
++                for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(1234 + i); }
++            } else {
++                std::random_device rd;
++                for (size_t i = 0; i < n_threads; i++) { vec.emplace_back(rd()); }
++            }
+             return vec;
+         }();
+ 
+@@ -814,6 +821,11 @@ struct console_printer : public printer {
              print_test_console(result);
          } else if (result.test_mode == "perf") {
              print_perf_console(result);
@@ -178,7 +260,7 @@ index 725bdc79..e3c143dc 100644
          } else if (result.test_mode == "support") {
              print_support_console(result);
          }
-@@ -1296,7 +1303,8 @@ struct test_case {
+@@ -1296,7 +1308,8 @@ struct test_case {
      test_status_t eval(ggml_backend_t backend1,
                         ggml_backend_t backend2,
                         const char *   op_names_filter,
@@ -188,7 +270,7 @@ index 725bdc79..e3c143dc 100644
          mode = MODE_TEST;
  
          ggml_init_params params = {
-@@ -1375,6 +1383,10 @@ struct test_case {
+@@ -1375,6 +1388,10 @@ struct test_case {
              test_case * tc;
              ggml_backend_t backend1;
              ggml_backend_t backend2;
@@ -199,7 +281,7 @@ index 725bdc79..e3c143dc 100644
          };
  
          callback_userdata ud {
-@@ -1382,6 +1394,10 @@ struct test_case {
+@@ -1382,6 +1399,10 @@ struct test_case {
              this,
              backend1,
              backend2,
@@ -210,7 +292,7 @@ index 725bdc79..e3c143dc 100644
          };
  
          auto callback = [](int index, ggml_tensor * t1, ggml_tensor * t2, void * user_data) -> bool {
-@@ -1430,6 +1446,23 @@ struct test_case {
+@@ -1430,6 +1451,23 @@ struct test_case {
              }
  
              double err = ud->tc->err(f1.data(), f2.data(), f1.size());
@@ -234,7 +316,7 @@ index 725bdc79..e3c143dc 100644
              if (err > ud->tc->max_err(ud->backend1)) {
                  printf("[%s] ERR = %.9f > %.9f ", ggml_op_desc(t1), err, ud->tc->max_err(ud->backend1));
                  //for (int i = 0; i < (int) f1.size(); i++) {
-@@ -1461,6 +1494,12 @@ struct test_case {
+@@ -1461,6 +1499,12 @@ struct test_case {
          std::string error_msg   = test_passed ? "" : (!cmp_ok ? "compare failed" : "test failed");
          test_result result(ggml_backend_name(backend1), current_op_name, vars(), "test", supported, test_passed,
                             error_msg);
@@ -247,7 +329,7 @@ index 725bdc79..e3c143dc 100644
  
          if (output_printer) {
              output_printer->print_test_result(result);
-@@ -1469,7 +1508,8 @@ struct test_case {
+@@ -1469,7 +1513,8 @@ struct test_case {
          return test_passed ? test_status_t::OK : test_status_t::FAIL;
      }
  
@@ -257,7 +339,7 @@ index 725bdc79..e3c143dc 100644
          mode = MODE_PERF;
  
          static const size_t graph_nodes = 8192;
-@@ -1489,6 +1529,9 @@ struct test_case {
+@@ -1489,6 +1534,9 @@ struct test_case {
              return true;
          }
  
@@ -267,7 +349,7 @@ index 725bdc79..e3c143dc 100644
          if (!ggml_backend_supports_op(backend, out)) {
              // Create test result for unsupported performance test
              test_result result(ggml_backend_name(backend), current_op_name, vars(), "perf", false, false,
-@@ -1496,7 +1539,7 @@ struct test_case {
+@@ -1496,7 +1544,7 @@ struct test_case {
  
              output_printer->print_test_result(result);
  
@@ -276,7 +358,7 @@ index 725bdc79..e3c143dc 100644
          }
  
          // allocate
-@@ -1599,7 +1642,171 @@ struct test_case {
+@@ -1599,7 +1647,257 @@ struct test_case {
          return true;
      }
  
@@ -300,6 +382,9 @@ index 725bdc79..e3c143dc 100644
 +        check_for_f16_tensor(ctx.get());
 +        ggml_build_forward_expand(gf, out);
 +        test_result result(ggml_backend_name(candidate), current_op_name, vars(), "perf-compare", true, false);
++        if (deterministic_tensor_init) {
++            result.op_params += ",input_seed=1234";
++        }
 +        ggml_backend_buffer_ptr buf;
 +        do {
 +            // Check every node: the final output of CONV1D is only a reshape.
@@ -329,8 +414,20 @@ index 725bdc79..e3c143dc 100644
 +                result.error_message = "candidate cannot use baseline device buffer";
 +                break;
 +            }
-+            // Initialize exactly once. Both instances use these same tensors, addresses and graph.
++            // Both instances use these same tensors, addresses and graph throughout A/B/A updates.
 +            initialize_tensors(ctx.get());
++            struct leaf_snapshot {
++                ggml_tensor * tensor;
++                std::vector<uint8_t> data;
++            };
++            std::vector<leaf_snapshot> original_leaves;
++            for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t; t = ggml_get_next_tensor(ctx.get(), t)) {
++                if (t->op == GGML_OP_NONE && t->view_src == nullptr) {
++                    original_leaves.push_back({t, std::vector<uint8_t>(ggml_nbytes(t))});
++                    auto & leaf = original_leaves.back();
++                    ggml_backend_tensor_get(t, leaf.data.data(), 0, leaf.data.size());
++                }
++            }
 +            std::vector<float> reference;
 +            bool compute_ok = true;
 +            for (ggml_backend_t backend : {baseline, candidate}) {
@@ -436,6 +533,77 @@ index 725bdc79..e3c143dc 100644
 +            }
 +            result.time_us = medians[1] * 1000;
 +            result.n_runs = (int) samples[1].size();
++
++            // Untimed lifecycle checks: replay A, update to B, then restore A byte-for-byte.
++            // Keep both backend instances, every device address and the graph unchanged.
++            const std::array<const char *, 3> phases = {"replay_a", "update_b", "restore_a"};
++            const double tolerance = std::min(max_nmse_err(baseline), max_nmse_err(candidate));
++            double lifecycle_nmse_max = 0, lifecycle_max_abs = 0, lifecycle_cosine_min = 1;
++            std::vector<float> reference_b;
++            for (size_t phase = 0; phase < phases.size() && compute_ok; ++phase) {
++                if (phase == 1) {
++                    initialize_tensors(ctx.get());
++                } else if (phase == 2) {
++                    for (const auto & leaf : original_leaves) {
++                        ggml_backend_tensor_set(leaf.tensor, leaf.data.data(), 0, leaf.data.size());
++                    }
++                }
++                for (size_t i = 0; i < backends.size(); ++i) {
++                    const std::string label = std::string(phases[phase]) + (i == 0 ? ".baseline" : ".candidate");
++                    const ggml_status status = ggml_backend_graph_compute(backends[i], gf); // synchronizes
++                    if (status != GGML_STATUS_SUCCESS) {
++                        result.error_message = label + ": " + ggml_status_to_string(status);
++                        compute_ok = false;
++                        break;
++                    }
++                    std::vector<float> values = tensor_to_float(out); // read back after every replay
++                    if (!std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); })) {
++                        result.error_message = label + ": nonfinite output";
++                        compute_ok = false;
++                        break;
++                    }
++                    if (phase == 1 && i == 0) {
++                        reference_b = values;
++                        if (reference_b == reference) {
++                            result.error_message = label + ": updated B output is identical to original A";
++                            compute_ok = false;
++                            break;
++                        }
++                    }
++                    const auto & expected = phase == 1 ? reference_b : reference;
++                    const double error = nmse(expected.data(), values.data(), values.size());
++                    double max_abs = 0, dot = 0, norm_a = 0, norm_b = 0;
++                    for (size_t j = 0; j < values.size(); ++j) {
++                        const double a = expected[j], b = values[j];
++                        max_abs = std::max(max_abs, std::abs(a - b));
++                        dot += a * b;
++                        norm_a += a * a;
++                        norm_b += b * b;
++                    }
++                    const double cosine = dot / std::sqrt(norm_a * norm_b);
++                    char quality[256];
++                    snprintf(quality, sizeof(quality), ",%s.nmse=%.12g,%s.max_abs=%.12g,%s.cosine=%.12g",
++                             label.c_str(), error, label.c_str(), max_abs, label.c_str(), cosine);
++                    result.op_params += quality;
++                    if (!std::isfinite(error) || !std::isfinite(max_abs) || !std::isfinite(cosine) || error > tolerance) {
++                        result.error_message = label + ": NMSE exceeds existing test tolerance or quality is nonfinite";
++                        compute_ok = false;
++                        break;
++                    }
++                    lifecycle_nmse_max = std::max(lifecycle_nmse_max, error);
++                    lifecycle_max_abs = std::max(lifecycle_max_abs, max_abs);
++                    lifecycle_cosine_min = std::min(lifecycle_cosine_min, cosine);
++                }
++            }
++            if (!compute_ok) {
++                result.op_params += ",lifecycle=fail";
++                break;
++            }
++            char lifecycle_quality[256];
++            snprintf(lifecycle_quality, sizeof(lifecycle_quality),
++                     ",lifecycle.nmse_max=%.12g,lifecycle.max_abs=%.12g,lifecycle.cosine_min=%.12g,lifecycle=pass",
++                     lifecycle_nmse_max, lifecycle_max_abs, lifecycle_cosine_min);
++            result.op_params += lifecycle_quality;
 +            result.passed = true;
 +        } while (false);
 +        output_printer->print_test_result(result);
@@ -449,7 +617,7 @@ index 725bdc79..e3c143dc 100644
          mode = MODE_SUPPORT;
  
          static const size_t graph_nodes = 8192;
-@@ -1621,6 +1828,9 @@ struct test_case {
+@@ -1621,6 +1919,9 @@ struct test_case {
              return true;
          }
  
@@ -459,7 +627,7 @@ index 725bdc79..e3c143dc 100644
          bool supported = ggml_backend_supports_op(backend, out);
  
          std::string device_desc = ggml_backend_dev_description(ggml_backend_get_device(backend));
-@@ -5033,6 +5243,55 @@ struct test_pool1d : public test_case {
+@@ -5033,6 +5334,94 @@ struct test_pool1d : public test_case {
      }
  };
  
@@ -469,10 +637,20 @@ index 725bdc79..e3c143dc 100644
 +        return test_pool1d::vars() + ",expected_status=GGML_STATUS_FAILED";
 +    }
 +
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * input = ggml_new_tensor(ctx, type_input, 4, ne_input.data());
++        ggml_set_name(input, "input");
++        ggml_tensor * shared = ggml_scale(ctx, input, 0.5f);
++        ggml_set_name(shared, "shared_scale");
++        ggml_tensor * out = ggml_pool_1d(ctx, shared, pool_type, k0, s0, p0);
++        ggml_set_name(out, "out");
++        return out;
++    }
++
 +    test_status_t eval_failure(ggml_backend_t backend, bool v2_active, const char * op_names_filter,
 +                               printer * output_printer) {
 +        mode = MODE_PERF;
-+        ggml_init_params params = {ggml_tensor_overhead()*128 + ggml_graph_overhead(), nullptr, true};
++        ggml_init_params params = {ggml_tensor_overhead()*128 + 2*ggml_graph_overhead(), nullptr, true};
 +        ggml_context_ptr ctx(ggml_init(params));
 +        GGML_ASSERT(ctx);
 +        gf = ggml_new_graph(ctx.get());
@@ -482,23 +660,52 @@ index 725bdc79..e3c143dc 100644
 +            return test_status_t::SKIPPED;
 +        }
 +        test_result result(ggml_backend_name(backend), current_op_name, vars(), "test", true, false);
++        // B is supported but capture-incompatible (F32 MUL_MAT_ID). Its first node is A's SCALE,
++        // so both graphs exercise the same native graph cache key without rebuilding either graph.
++        ggml_tensor * shared = out->src[0];
++        ggml_tensor * experts = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, 10, 4, 2);
++        ggml_tensor * ids = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 1, 1);
++        ggml_set_name(experts, "experts");
++        ggml_set_name(ids, "ids");
++        ggml_tensor * valid_out = ggml_mul_mat_id(ctx.get(), experts, ggml_reshape_3d(ctx.get(), shared, 10, 1, 1), ids);
++        ggml_set_name(valid_out, "valid_out");
++        ggml_cgraph * valid_graph = ggml_new_graph(ctx.get());
++        ggml_build_forward_expand(gf, out);
++        ggml_build_forward_expand(valid_graph, valid_out);
++        GGML_ASSERT(ggml_graph_node(gf, 0) == shared);
++        GGML_ASSERT(ggml_graph_node(valid_graph, 0) == shared);
 +        ggml_backend_buffer_ptr buf;
 +        if (!v2_active) {
 +            result.error_message = "expected-failure graph requires --backend-params rocm_v2";
 +        } else if (ggml_backend_supports_op(backend, out)) {
 +            result.error_message = "POOL_1D is supported; cannot assert unsupported-graph rejection";
 +        } else {
-+            ggml_build_forward_expand(gf, out);
 +            buf.reset(ggml_backend_alloc_ctx_tensors(ctx.get(), backend));
 +            if (!buf) {
 +                result.error_message = "failed to allocate expected-failure graph";
 +            } else {
 +                initialize_tensors(ctx.get());
-+                const ggml_status status = ggml_backend_graph_compute(backend, gf);
-+                result.passed = status == GGML_STATUS_FAILED;
-+                result.op_params += std::string(",actual_status=") + ggml_status_to_string(status);
++                const int32_t expert_id = 0;
++                ggml_backend_tensor_set(ids, &expert_id, 0, sizeof(expert_id));
++                result.passed = true;
++                const std::array<ggml_cgraph *, 4> graphs = {gf, gf, valid_graph, gf};
++                const std::array<const char *, 4> status_keys = {
++                    ",actual_status=", ",replay_status=", ",incompatible_status=", ",reject_after_incompatible_status="
++                };
++                for (size_t call = 0; call < graphs.size(); ++call) {
++                    const ggml_status status = ggml_backend_graph_compute(backend, graphs[call]);
++                    const ggml_status expected = call == 2 ? GGML_STATUS_SUCCESS : GGML_STATUS_FAILED;
++                    result.passed = (status == expected) && result.passed;
++                    result.op_params += std::string(status_keys[call]) + ggml_status_to_string(status);
++                    if (call == 2 && status == GGML_STATUS_SUCCESS) {
++                        const std::vector<float> values = tensor_to_float(valid_out);
++                        const bool finite = std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); });
++                        result.passed = finite && result.passed;
++                        result.op_params += finite ? ",valid_output_finite=1" : ",valid_output_finite=0";
++                    }
++                }
 +                if (!result.passed) {
-+                    result.error_message = "expected GGML_STATUS_FAILED";
++                    result.error_message = "expected A=FAILED twice, B=SUCCESS with finite output, then A=FAILED again";
 +                }
 +            }
 +        }
@@ -515,7 +722,7 @@ index 725bdc79..e3c143dc 100644
  // GGML_OP_CONV_TRANSPOSE_1D
  struct test_conv_transpose_1d : public test_case {
      const std::array<int64_t, 4> ne_input;
-@@ -5146,6 +5405,25 @@ struct test_im2col : public test_case {
+@@ -5146,6 +5535,25 @@ struct test_im2col : public test_case {
          ggml_tensor * out = ggml_im2col(ctx, kernel, input, s0, s1, p0, p1, d0, d1, is_2D, dst_type);
          ggml_set_name(out, "out");
  
@@ -541,7 +748,7 @@ index 725bdc79..e3c143dc 100644
          return out;
      }
  };
-@@ -9446,8 +9724,68 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+@@ -9446,8 +9854,77 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
      return test_cases;
  }
  
@@ -601,6 +808,15 @@ index 725bdc79..e3c143dc 100644
 +            1, 0, 3, 0, 1, 0, false));
 +    }
 +    cases.emplace_back(new test_rocm_v2_unsupported());
++    // Append work-floor and 64-row tile boundaries without changing indices 0..126.
++    for (int64_t m : {128, 129}) {
++        for (int64_t k : {320, 341, 342, 384, 512, 768}) {
++            cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 768, k, one, one));
++        }
++    }
++    for (int64_t m : {63, 64, 65}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 32768, 896, one, one));
++    }
 +    return cases;
 +}
 +
@@ -611,7 +827,7 @@ index 725bdc79..e3c143dc 100644
      auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
          if (params_filter == nullptr) {
              return;
-@@ -9467,7 +9805,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9467,7 +9944,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -631,7 +847,7 @@ index 725bdc79..e3c143dc 100644
          switch (mode) {
          case MODE_TEST:
          case MODE_GRAD:
-@@ -9483,6 +9832,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9483,6 +9971,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      filter_test_cases(test_cases, params_filter);
@@ -665,7 +881,7 @@ index 725bdc79..e3c143dc 100644
  
      if (mode == MODE_TEST) {
          ggml_backend_t backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-@@ -9500,11 +9876,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9500,11 +10015,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              set_use_ref(backend_cpu, true);
          }
  
@@ -694,7 +910,7 @@ index 725bdc79..e3c143dc 100644
              if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
                  continue;
              }
-@@ -9520,6 +9910,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9520,6 +10049,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
          ggml_backend_free(backend_cpu);
  
@@ -705,7 +921,7 @@ index 725bdc79..e3c143dc 100644
          return n_ok == tests_run;
      }
  
-@@ -9536,10 +9930,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9536,10 +10069,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      if (mode == MODE_PERF) {
@@ -740,7 +956,7 @@ index 725bdc79..e3c143dc 100644
      }
  
      if (mode == MODE_SUPPORT) {
-@@ -9551,8 +9966,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9551,8 +10105,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              test_cases.end()
          );
  
@@ -761,7 +977,7 @@ index 725bdc79..e3c143dc 100644
          }
          return true;
      }
-@@ -9663,6 +10089,12 @@ static void show_test_coverage() {
+@@ -9663,6 +10228,12 @@ static void show_test_coverage() {
  static void usage(char ** argv) {
      printf("Usage: %s [mode] [-o <op,..>] [-b <backend>] [-p <params regex>] [--output <console|sql|csv>] [--list-ops]", argv[0]);
      printf(" [--show-coverage] [--test-file <path>]\n");
@@ -774,7 +990,7 @@ index 725bdc79..e3c143dc 100644
      printf("    valid modes:\n");
      printf("      - test (default, compare with CPU backend for correctness)\n");
      printf("      - grad (compare gradients from backpropagation with method of finite differences)\n");
-@@ -9683,6 +10115,11 @@ int main(int argc, char ** argv) {
+@@ -9683,6 +10254,11 @@ int main(int argc, char ** argv) {
      const char * backend_filter = nullptr;
      const char * params_filter = nullptr;
      const char * test_file_path = nullptr;
@@ -786,7 +1002,7 @@ index 725bdc79..e3c143dc 100644
  
      for (int i = 1; i < argc; i++) {
          if (strcmp(argv[i], "test") == 0) {
-@@ -9714,6 +10151,38 @@ int main(int argc, char ** argv) {
+@@ -9714,6 +10290,38 @@ int main(int argc, char ** argv) {
                  usage(argv);
                  return 1;
              }
@@ -825,10 +1041,12 @@ index 725bdc79..e3c143dc 100644
          } else if (strcmp(argv[i], "--output") == 0) {
              if (i + 1 < argc) {
                  if (!output_format_from_str(argv[++i], output_format)) {
-@@ -9743,6 +10212,47 @@ int main(int argc, char ** argv) {
+@@ -9743,6 +10351,49 @@ int main(int argc, char ** argv) {
          }
      }
  
++    deterministic_tensor_init = rocm_v2_suite;
++
 +    if ((!rocm_v2_suite && (list_cases || case_index >= 0)) ||
 +        (rocm_v2_suite && (test_file_path || mode == MODE_GRAD)) ||
 +        (compare_params && mode != MODE_PERF && !list_cases)) {
@@ -873,7 +1091,7 @@ index 725bdc79..e3c143dc 100644
      // load and enumerate backends
      ggml_backend_load_all();
  
-@@ -9755,6 +10265,7 @@ int main(int argc, char ** argv) {
+@@ -9755,6 +10406,7 @@ int main(int argc, char ** argv) {
      output_printer->print_testing_start(testing_start_info(ggml_backend_dev_count()));
  
      size_t n_ok = 0;
@@ -881,7 +1099,7 @@ index 725bdc79..e3c143dc 100644
  
      for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
          ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-@@ -9773,14 +10284,38 @@ int main(int argc, char ** argv) {
+@@ -9773,14 +10425,38 @@ int main(int argc, char ** argv) {
              continue;
          }
  
@@ -922,7 +1140,7 @@ index 725bdc79..e3c143dc 100644
          }
  
          size_t free, total;  // NOLINT
-@@ -9789,7 +10324,9 @@ int main(int argc, char ** argv) {
+@@ -9789,7 +10465,9 @@ int main(int argc, char ** argv) {
                                                               false, "", ggml_backend_dev_description(dev),
                                                               total / 1024 / 1024, free / 1024 / 1024, true));
  
@@ -933,7 +1151,7 @@ index 725bdc79..e3c143dc 100644
  
          if (ok) {
              n_ok++;
-@@ -9807,8 +10344,13 @@ int main(int argc, char ** argv) {
+@@ -9807,8 +10485,13 @@ int main(int argc, char ** argv) {
      }
  
      output_printer->print_overall_summary(
@@ -950,10 +1168,10 @@ index 725bdc79..e3c143dc 100644
      }
 diff --git a/external/ggml/src/ggml-hip/rocm_v2/im2col.cu b/external/ggml/src/ggml-hip/rocm_v2/im2col.cu
 new file mode 100644
-index 00000000..2376e673
+index 00000000..842f7eb1
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/rocm_v2/im2col.cu
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,103 @@
 +#include "rocm_v2.cuh"
 +
 +#include <hip/hip_fp16.h>
@@ -1033,6 +1251,9 @@ index 00000000..2376e673
 +        return false;
 +    }
 +    const auto columns = channels * kernel;
++    if (columns < 32) {
++        return false;
++    }
 +    const auto channel_stride = input->nb[1] / sizeof(float);
 +    const auto batch_stride = input->nb[2] / sizeof(float);
 +    const auto * data = static_cast<const float *>(input->data);
@@ -1072,10 +1293,10 @@ index 00000000..61250aff
 +                         hipStream_t stream);
 diff --git a/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
 new file mode 100644
-index 00000000..a5565c35
+index 00000000..485a75b4
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,87 @@
 +#include "rocm_v2.cuh"
 +#include <climits>
 +
@@ -1148,9 +1369,13 @@ index 00000000..a5565c35
 +    }
 +    const int64_t m = a->ne[1], n = b->ne[1], k = a->ne[0];
 +    // Small and narrow matrices retain HIP's vector/library kernels.
-+    if (m < 128 || n < 768 || k < 256 || m > INT_MAX || n > 65535 * 64 || k > INT_MAX ||
++    if (m < 64 || n < 768 || k < 256 || m > INT_MAX || n > 65535 * 64 || k > INT_MAX ||
 +        a->nb[1] < size_t(k) * sizeof(float) || b->nb[1] < size_t(k) * sizeof(float) ||
 +        a->nb[1] % sizeof(float) || b->nb[1] % sizeof(float)) {
++        return false;
++    }
++    // Below this work size the inherited HIP kernel avoids the LDS setup cost.
++    if (m * n < ((int64_t{32} << 20) + k - 1) / k) {
 +        return false;
 +    }
 +    rocm_v2_sgemm<<<dim3((m + 63) / 64, (n + 63) / 64), 256, 0, stream>>>(
