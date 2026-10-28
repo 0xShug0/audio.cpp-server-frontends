@@ -407,7 +407,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc != 1 && argc != 2 && argc != 5 && argc != 6) {
-        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16]] (low precision requires F16RAW)\n",argv[0]);
+        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16|fusedn128-bf16|fusedn128-f16]] (low precision requires F16RAW)\n",argv[0]);
         return 1;
     }
     int devices=0;
@@ -423,9 +423,10 @@ int main(int argc, char **argv) {
         const bool blas=argc == 6 && std::string(argv[5]) == "blas";
         const std::string mode=argc == 6 ? argv[5] : "";
         const int fused_index=mode == "fused-bf16" ? 5 : mode == "fused-f16" ? 6 :
-                              mode == "fused128-bf16" ? 7 : mode == "fused128-f16" ? 8 : 0;
-        const int lowp=(mode == "f16" || fused_index == 6 || fused_index == 8) ? 1 :
-                       (mode == "bf16" || fused_index == 5 || fused_index == 7) ? 2 : 0;
+                              mode == "fused128-bf16" ? 7 : mode == "fused128-f16" ? 8 :
+                              mode == "fusedn128-bf16" ? 9 : mode == "fusedn128-f16" ? 10 : 0;
+        const int lowp=(mode == "f16" || fused_index == 6 || fused_index == 8 || fused_index == 10) ? 1 :
+                       (mode == "bf16" || fused_index == 5 || fused_index == 7 || fused_index == 9) ? 2 : 0;
 #ifndef F16RAW
         if (lowp) { std::fprintf(stderr,"f16/bf16 require a -DF16RAW build\n"); return 1; }
 #endif

@@ -103,11 +103,13 @@ for index, op, params in entries:
 sgemm_shapes = {(m, n, k, pad) for pad in (0, 3) for m, n, k in (
     (1,1,1), (31,33,65), (64,64,64), (67,131,97), (512,128,1536),
     (256,1024,3584), (128,8192,1792), (64,32768,896), (1024,128,1024), (128,550,3200))}
+captured_shapes = set()
 for line in (root / 'tests/unittests/assets/hip_halo/qwen3_sgemm_shapes.txt').read_text().splitlines():
     if line.startswith('[GEMM_SHAPE] '):
         m,n,k,ta,tb,tc,lda,ldb,ldc,batches = map(int, line.split()[1:])
         if ta == tb == tc == 0 and batches == 1:
             sgemm_shapes.add((m,n,k,0))
+            captured_shapes.add((m,n,k))
 sgemm_shapes.update((m,n,k,pad) for pad in (0,3) for m,n,k in (
     (128,8192,5376),(256,1024,5376),(512,768,5376),(2080,768,768),
     (2048,768,896),(193,1024,4096),(256,1024,2048),(129,769,5376)))
@@ -233,17 +235,27 @@ elif args.focus == 'matrix':
     ]
 elif args.focus == 'fused':
     builds = [build for build in builds if build['id'] in {'device-health','ggml','matrix-candidate'}]
-    shapes = [(m,n,k,pad) for m,n,k in (
-        (67,131,97),(128,8192,1792),(128,8192,5376),(256,1024,3584),
-        (256,1024,5376),(512,768,5376),(2048,768,896),(2080,768,768),
-        (64,32768,896),(129,769,5376),(193,1024,4096)) for pad in (0,3)]
+    # Every F32 shape from the real decoder trace, plus independent tail/precision controls.
+    shapes = [(m,n,k,pad) for m,n,k in sorted(captured_shapes | {
+        (67,131,97),(129,769,5377),(128,8192,1792),
+        (128,8192,5376),(256,1024,3584)}) for pad in (0,3)]
     suites = [
         dict(id='correctness', build='device-health', gpu=True, timeout_s=15,
              cases=[dict(id='device-before', argv=health['argv'])]),
         dict(id='matrix', build='matrix-candidate', gpu=True, timeout_s=60, cases=[
             dict(id=mode+'-'+'-'.join(map(str,shape)), argv=['build/debug/raw-matrix']+
                  list(map(str,shape))+[mode]) for shape in shapes for mode in [
-                     'fused-bf16','fused-f16','fused128-bf16','fused128-f16']]),
+                     'fused-bf16','fused-f16','fused128-bf16','fused128-f16',
+                     'fusedn128-bf16','fusedn128-f16']]),
+        dict(id='inventory', build='device-health', gpu=False, required=False, timeout_s=30, cases=[
+            dict(id='capabilities', argv=['/opt/rocm/bin/rocprofv3','--list-avail']),
+            dict(id='memory-pools', argv=['/opt/rocm/bin/rocminfo']),
+        ]),
+        dict(id='profiler', build='matrix-candidate', gpu=True, required=False, timeout_s=30, cases=[
+            dict(id='kernel-trace', argv=['/opt/rocm/bin/rocprofv3','--kernel-trace',
+                 '--output-format','csv','--output-directory','../results/profile','--',
+                 'build/debug/raw-matrix','2080','768','5376','0','fused-f16']),
+        ]),
         dict(id='framework', build='device-health', gpu=True, timeout_s=15,
              cases=[dict(id='device-after', argv=health['argv'])]),
     ]
