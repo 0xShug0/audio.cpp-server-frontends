@@ -210,7 +210,7 @@ index deb063b7..0fdd363d 100644
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
  else()
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 725bdc79..1b2af082 100644
+index 725bdc79..1348c6f4 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
 @@ -23,6 +23,8 @@
@@ -751,7 +751,7 @@ index 725bdc79..1b2af082 100644
          return out;
      }
  };
-@@ -9446,8 +9854,77 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+@@ -9446,8 +9854,98 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
      return test_cases;
  }
  
@@ -820,6 +820,27 @@ index 725bdc79..1b2af082 100644
 +    for (int64_t m : {63, 64, 65}) {
 +        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 32768, 896, one, one));
 +    }
++    // Append product-floor and IM2COL output-size boundaries; indices 0..141 remain fixed.
++    for (int64_t m : {128, 129}) {
++        for (int64_t n : {768, 769}) {
++            for (int64_t k : {1024, 2048, 2730, 2731, 3072, 4096, 5461, 5462}) {
++                cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, n, k, one, one));
++            }
++        }
++    }
++    for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) {
++        for (int64_t width : {1365, 1366, 1367}) {
++            cases.emplace_back(new test_im2col(GGML_TYPE_F32, type, type,
++                std::array<int64_t, 4>{width, 64, 1, 1}, std::array<int64_t, 4>{3, 64, 1, 1},
++                1, 0, 1, 0, 1, 0, false));
++        }
++    }
++    for (int64_t k : {2047, 2048, 2049}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 256, 1024, k, one, one));
++    }
++    for (int64_t m : {192, 193, 194}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 1024, 4096, one, one));
++    }
 +    return cases;
 +}
 +
@@ -830,7 +851,7 @@ index 725bdc79..1b2af082 100644
      auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
          if (params_filter == nullptr) {
              return;
-@@ -9467,7 +9944,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9467,7 +9965,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -850,7 +871,7 @@ index 725bdc79..1b2af082 100644
          switch (mode) {
          case MODE_TEST:
          case MODE_GRAD:
-@@ -9483,6 +9971,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9483,6 +9992,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      filter_test_cases(test_cases, params_filter);
@@ -884,7 +905,7 @@ index 725bdc79..1b2af082 100644
  
      if (mode == MODE_TEST) {
          ggml_backend_t backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-@@ -9500,11 +10015,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9500,11 +10036,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              set_use_ref(backend_cpu, true);
          }
  
@@ -913,7 +934,7 @@ index 725bdc79..1b2af082 100644
              if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
                  continue;
              }
-@@ -9520,6 +10049,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9520,6 +10070,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
          ggml_backend_free(backend_cpu);
  
@@ -924,7 +945,7 @@ index 725bdc79..1b2af082 100644
          return n_ok == tests_run;
      }
  
-@@ -9536,10 +10069,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9536,10 +10090,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      if (mode == MODE_PERF) {
@@ -959,7 +980,7 @@ index 725bdc79..1b2af082 100644
      }
  
      if (mode == MODE_SUPPORT) {
-@@ -9551,8 +10105,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9551,8 +10126,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              test_cases.end()
          );
  
@@ -980,7 +1001,7 @@ index 725bdc79..1b2af082 100644
          }
          return true;
      }
-@@ -9663,6 +10228,12 @@ static void show_test_coverage() {
+@@ -9663,6 +10249,12 @@ static void show_test_coverage() {
  static void usage(char ** argv) {
      printf("Usage: %s [mode] [-o <op,..>] [-b <backend>] [-p <params regex>] [--output <console|sql|csv>] [--list-ops]", argv[0]);
      printf(" [--show-coverage] [--test-file <path>]\n");
@@ -993,7 +1014,7 @@ index 725bdc79..1b2af082 100644
      printf("    valid modes:\n");
      printf("      - test (default, compare with CPU backend for correctness)\n");
      printf("      - grad (compare gradients from backpropagation with method of finite differences)\n");
-@@ -9683,6 +10254,11 @@ int main(int argc, char ** argv) {
+@@ -9683,6 +10275,11 @@ int main(int argc, char ** argv) {
      const char * backend_filter = nullptr;
      const char * params_filter = nullptr;
      const char * test_file_path = nullptr;
@@ -1005,7 +1026,7 @@ index 725bdc79..1b2af082 100644
  
      for (int i = 1; i < argc; i++) {
          if (strcmp(argv[i], "test") == 0) {
-@@ -9714,6 +10290,38 @@ int main(int argc, char ** argv) {
+@@ -9714,6 +10311,38 @@ int main(int argc, char ** argv) {
                  usage(argv);
                  return 1;
              }
@@ -1044,7 +1065,7 @@ index 725bdc79..1b2af082 100644
          } else if (strcmp(argv[i], "--output") == 0) {
              if (i + 1 < argc) {
                  if (!output_format_from_str(argv[++i], output_format)) {
-@@ -9743,6 +10351,49 @@ int main(int argc, char ** argv) {
+@@ -9743,6 +10372,49 @@ int main(int argc, char ** argv) {
          }
      }
  
@@ -1094,7 +1115,7 @@ index 725bdc79..1b2af082 100644
      // load and enumerate backends
      ggml_backend_load_all();
  
-@@ -9755,6 +10406,7 @@ int main(int argc, char ** argv) {
+@@ -9755,6 +10427,7 @@ int main(int argc, char ** argv) {
      output_printer->print_testing_start(testing_start_info(ggml_backend_dev_count()));
  
      size_t n_ok = 0;
@@ -1102,7 +1123,7 @@ index 725bdc79..1b2af082 100644
  
      for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
          ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-@@ -9773,14 +10425,38 @@ int main(int argc, char ** argv) {
+@@ -9773,14 +10446,38 @@ int main(int argc, char ** argv) {
              continue;
          }
  
@@ -1143,7 +1164,7 @@ index 725bdc79..1b2af082 100644
          }
  
          size_t free, total;  // NOLINT
-@@ -9789,7 +10465,9 @@ int main(int argc, char ** argv) {
+@@ -9789,7 +10486,9 @@ int main(int argc, char ** argv) {
                                                               false, "", ggml_backend_dev_description(dev),
                                                               total / 1024 / 1024, free / 1024 / 1024, true));
  
@@ -1154,7 +1175,7 @@ index 725bdc79..1b2af082 100644
  
          if (ok) {
              n_ok++;
-@@ -9807,8 +10485,13 @@ int main(int argc, char ** argv) {
+@@ -9807,8 +10506,13 @@ int main(int argc, char ** argv) {
      }
  
      output_printer->print_overall_summary(
@@ -1171,7 +1192,7 @@ index 725bdc79..1b2af082 100644
      }
 diff --git a/external/ggml/src/ggml-hip/rocm_v2/im2col.cu b/external/ggml/src/ggml-hip/rocm_v2/im2col.cu
 new file mode 100644
-index 00000000..842f7eb1
+index 00000000..bb367ce5
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/rocm_v2/im2col.cu
 @@ -0,0 +1,103 @@
@@ -1254,7 +1275,7 @@ index 00000000..842f7eb1
 +        return false;
 +    }
 +    const auto columns = channels * kernel;
-+    if (columns < 32) {
++    if (columns < 32 || positions < ((int64_t{1} << 18) + columns - 1) / columns) {
 +        return false;
 +    }
 +    const auto channel_stride = input->nb[1] / sizeof(float);
@@ -1296,10 +1317,10 @@ index 00000000..61250aff
 +                         hipStream_t stream);
 diff --git a/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
 new file mode 100644
-index 00000000..485a75b4
+index 00000000..d94f0be4
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,88 @@
 +#include "rocm_v2.cuh"
 +#include <climits>
 +
@@ -1377,8 +1398,9 @@ index 00000000..485a75b4
 +        a->nb[1] % sizeof(float) || b->nb[1] % sizeof(float)) {
 +        return false;
 +    }
-+    // Below this work size the inherited HIP kernel avoids the LDS setup cost.
-+    if (m * n < ((int64_t{32} << 20) + k - 1) / k) {
++    // Require enough work and independent tiles to amortize LDS setup on gfx1151.
++    if (m * n < ((int64_t{512} << 20) + k - 1) / k ||
++        ((m + 63) / 64) * ((n + 63) / 64) < 64) {
 +        return false;
 +    }
 +    rocm_v2_sgemm<<<dim3((m + 63) / 64, (n + 63) / 64), 256, 0, stream>>>(
