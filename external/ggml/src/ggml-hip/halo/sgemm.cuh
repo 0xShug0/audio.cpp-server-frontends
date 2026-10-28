@@ -14,6 +14,8 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
 // Index 4 uses 64x64 with aligned float4 LDS reads and contiguous 4x4 thread outputs.
 // F16RAW only: 5=BF16 64x64, 6=F16 64x64, 7=BF16 128x64, 8=F16 128x64.
 // Indices 9=BF16 64x128 and 10=F16 64x128 reuse A across twice as many columns.
+// Indices 11=BF16 128x128 and 12=F16 128x128 use eight wave32 groups (256 threads),
+// four wave rows by two wave columns: 32x64 per wave, eight accumulator fragments.
 // These explicit default-precision probes convert F32 inputs in LDS and use
 // GGML's AMD WMMA helpers with F32 accumulation/output and no global scratch.
 // Keep explicit-F32 requests on the original overload or indices 0..4.

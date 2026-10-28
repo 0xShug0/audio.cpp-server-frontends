@@ -210,7 +210,7 @@ index deb063b7..0fdd363d 100644
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
  else()
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 725bdc79..0956918d 100644
+index 725bdc79..08e7eb38 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
 @@ -19,10 +19,13 @@
@@ -878,7 +878,7 @@ index 725bdc79..0956918d 100644
          return out;
      }
  };
-@@ -9446,8 +9940,126 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+@@ -9446,8 +9940,158 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
      return test_cases;
  }
  
@@ -995,6 +995,38 @@ index 725bdc79..0956918d 100644
 +            cases.emplace_back(new test_rocm_v2_mul_mat_precision(type, 128, 8192, 1792, strict_f32, true));
 +        }
 +    }
++    // Captured F32 GEMMs from frontend tests/unittests/assets/hip_halo/qwen3_sgemm_shapes.txt.
++    for (const auto & shape : std::vector<std::array<int64_t, 3>> {
++            {512, 65, 256},
++            {65, 1024, 1536},
++            {2048, 65, 1024},
++            {2048, 130, 1024},
++            {260, 1536, 7168},
++            {12288, 260, 1536},
++            {2080, 768, 5376},
++            {2080, 768, 768},
++            {3840, 2080, 768},
++            {10400, 384, 2688},
++            {10400, 384, 384},
++            {1536, 10400, 384},
++            {41600, 192, 1344},
++            {41600, 192, 192},
++            {576, 41600, 192},
++            {124800, 96, 672},
++            {124800, 96, 96},
++        }) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32,
++            shape[0], shape[1], shape[2], one, one));
++    }
++    for (int64_t n : {63, 64, 65, 95, 96, 97}) {
++        cases.emplace_back(new test_rocm_v2_mul_mat_precision(GGML_TYPE_F32, 131072, n, 96, true));
++    }
++    for (int64_t k : {95, 96, 97}) {
++        cases.emplace_back(new test_rocm_v2_mul_mat_precision(GGML_TYPE_F32, 65536, 96, k, true));
++    }
++    for (int64_t k : {127, 128, 129}) {
++        cases.emplace_back(new test_rocm_v2_mul_mat_precision(GGML_TYPE_F32, 32768, 128, k, true));
++    }
 +    return cases;
 +}
 +
@@ -1006,7 +1038,7 @@ index 725bdc79..0956918d 100644
      auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
          if (params_filter == nullptr) {
              return;
-@@ -9467,7 +10079,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9467,7 +10111,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -1026,7 +1058,7 @@ index 725bdc79..0956918d 100644
          switch (mode) {
          case MODE_TEST:
          case MODE_GRAD:
-@@ -9483,6 +10106,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9483,6 +10138,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      filter_test_cases(test_cases, params_filter);
@@ -1060,7 +1092,7 @@ index 725bdc79..0956918d 100644
  
      if (mode == MODE_TEST) {
          ggml_backend_t backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-@@ -9500,11 +10150,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9500,11 +10182,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              set_use_ref(backend_cpu, true);
          }
  
@@ -1089,7 +1121,7 @@ index 725bdc79..0956918d 100644
              if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
                  continue;
              }
-@@ -9520,6 +10184,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9520,6 +10216,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
          ggml_backend_free(backend_cpu);
  
@@ -1100,7 +1132,7 @@ index 725bdc79..0956918d 100644
          return n_ok == tests_run;
      }
  
-@@ -9536,10 +10204,32 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9536,10 +10236,32 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      if (mode == MODE_PERF) {
@@ -1136,7 +1168,7 @@ index 725bdc79..0956918d 100644
      }
  
      if (mode == MODE_SUPPORT) {
-@@ -9551,8 +10241,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9551,8 +10273,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              test_cases.end()
          );
  
@@ -1157,7 +1189,7 @@ index 725bdc79..0956918d 100644
          }
          return true;
      }
-@@ -9663,6 +10364,13 @@ static void show_test_coverage() {
+@@ -9663,6 +10396,13 @@ static void show_test_coverage() {
  static void usage(char ** argv) {
      printf("Usage: %s [mode] [-o <op,..>] [-b <backend>] [-p <params regex>] [--output <console|sql|csv>] [--list-ops]", argv[0]);
      printf(" [--show-coverage] [--test-file <path>]\n");
@@ -1171,7 +1203,7 @@ index 725bdc79..0956918d 100644
      printf("    valid modes:\n");
      printf("      - test (default, compare with CPU backend for correctness)\n");
      printf("      - grad (compare gradients from backpropagation with method of finite differences)\n");
-@@ -9683,6 +10391,12 @@ int main(int argc, char ** argv) {
+@@ -9683,6 +10423,12 @@ int main(int argc, char ** argv) {
      const char * backend_filter = nullptr;
      const char * params_filter = nullptr;
      const char * test_file_path = nullptr;
@@ -1184,7 +1216,7 @@ index 725bdc79..0956918d 100644
  
      for (int i = 1; i < argc; i++) {
          if (strcmp(argv[i], "test") == 0) {
-@@ -9714,6 +10428,40 @@ int main(int argc, char ** argv) {
+@@ -9714,6 +10460,40 @@ int main(int argc, char ** argv) {
                  usage(argv);
                  return 1;
              }
@@ -1225,7 +1257,7 @@ index 725bdc79..0956918d 100644
          } else if (strcmp(argv[i], "--output") == 0) {
              if (i + 1 < argc) {
                  if (!output_format_from_str(argv[++i], output_format)) {
-@@ -9743,6 +10491,61 @@ int main(int argc, char ** argv) {
+@@ -9743,6 +10523,61 @@ int main(int argc, char ** argv) {
          }
      }
  
@@ -1287,7 +1319,7 @@ index 725bdc79..0956918d 100644
      // load and enumerate backends
      ggml_backend_load_all();
  
-@@ -9755,6 +10558,7 @@ int main(int argc, char ** argv) {
+@@ -9755,6 +10590,7 @@ int main(int argc, char ** argv) {
      output_printer->print_testing_start(testing_start_info(ggml_backend_dev_count()));
  
      size_t n_ok = 0;
@@ -1295,7 +1327,7 @@ index 725bdc79..0956918d 100644
  
      for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
          ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-@@ -9773,14 +10577,38 @@ int main(int argc, char ** argv) {
+@@ -9773,14 +10609,38 @@ int main(int argc, char ** argv) {
              continue;
          }
  
@@ -1336,7 +1368,7 @@ index 725bdc79..0956918d 100644
          }
  
          size_t free, total;  // NOLINT
-@@ -9789,7 +10617,9 @@ int main(int argc, char ** argv) {
+@@ -9789,7 +10649,9 @@ int main(int argc, char ** argv) {
                                                               false, "", ggml_backend_dev_description(dev),
                                                               total / 1024 / 1024, free / 1024 / 1024, true));
  
@@ -1347,7 +1379,7 @@ index 725bdc79..0956918d 100644
  
          if (ok) {
              n_ok++;
-@@ -9807,8 +10637,13 @@ int main(int argc, char ** argv) {
+@@ -9807,8 +10669,13 @@ int main(int argc, char ** argv) {
      }
  
      output_printer->print_overall_summary(
@@ -1489,7 +1521,7 @@ index 00000000..61250aff
 +                         hipStream_t stream);
 diff --git a/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
 new file mode 100644
-index 00000000..d94f0be4
+index 00000000..e35fea6a
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/rocm_v2/sgemm.cu
 @@ -0,0 +1,88 @@
@@ -1565,7 +1597,7 @@ index 00000000..d94f0be4
 +    }
 +    const int64_t m = a->ne[1], n = b->ne[1], k = a->ne[0];
 +    // Small and narrow matrices retain HIP's vector/library kernels.
-+    if (m < 64 || n < 768 || k < 256 || m > INT_MAX || n > 65535 * 64 || k > INT_MAX ||
++    if (m < 64 || n < 64 || k < 96 || m > INT_MAX || n > 65535 * 64 || k > INT_MAX ||
 +        a->nb[1] < size_t(k) * sizeof(float) || b->nb[1] < size_t(k) * sizeof(float) ||
 +        a->nb[1] % sizeof(float) || b->nb[1] % sizeof(float)) {
 +        return false;
