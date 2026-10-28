@@ -32,6 +32,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p test_rocm_v2_campaign.py -v
+          mkdir -p source/toolchain
+          curl --fail --location --max-time 120 --retry 2 \
+            -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+          tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain \
+            ccache-4.13.6-linux-x86_64-musl-static/ccache
+          source/toolchain/ccache --version
+          sha256sum source/toolchain/ccache > source/ccache-sha256.txt
           git init source
           git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
           git -C source config core.autocrlf false
@@ -77,6 +84,8 @@ jobs:
       OMP_NUM_THREADS: 8
       CCACHE_BASEDIR: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/source
       CCACHE_NOHASHDIR: true
+      CCACHE_DIR: ${{ github.workspace }}/.cache/rocm-v2
+      CCACHE_MAXSIZE: 3G
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -89,17 +98,22 @@ jobs:
           ulimit -c 0
           tar -xzf probe-source.tar.gz
           mkdir -p results
+          echo "$PWD/source/toolchain" >> "$GITHUB_PATH"
+          source/toolchain/ccache --version > results/ccache.log
           {
             cat source/source-commit.txt source/patch-sha256.txt
             /opt/rocm/bin/hipcc --version
             /opt/rocm/llvm/bin/amdgpu-arch
             uname -a
           } > results/environment.log 2>&1
-      - uses: ggml-org/ccache-action@v1.2.24
+      - uses: actions/cache/restore@v4
+        id: cache
+        continue-on-error: true
         with:
-          key: rocm-v2-a5369900-gfx1151-debug-cxx17
-          max-size: 3G
-          install: binary
+          path: ${{ env.CCACHE_DIR }}
+          key: rocm-v2-a5369900-gfx1151-debug-cxx17-${{ github.sha }}
+          restore-keys: |
+            rocm-v2-a5369900-gfx1151-debug-cxx17-
       - name: Build independent targets
         id: builds
         continue-on-error: true
@@ -137,3 +151,9 @@ jobs:
           name: rocm-v2-results
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
+      - uses: actions/cache/save@v4
+        if: always()
+        continue-on-error: true
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: rocm-v2-a5369900-gfx1151-debug-cxx17-${{ github.sha }}
