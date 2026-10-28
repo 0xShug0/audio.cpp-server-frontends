@@ -5,16 +5,17 @@ namespace {
 
 // Reuse each operand tile across output rows/columns. Unlike reduced-
 // precision matrix instructions, this retains FP32 inputs and accumulation.
-template<int TileM, int TileN>
+template<int TileM, int TileN, bool VectorLds = false>
 __global__ __launch_bounds__(256) void halo_sgemm(
     const float * __restrict__ a, const float * __restrict__ b, float * __restrict__ c,
     int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
     int64_t sa, int64_t sb, int64_t sc) {
-    __shared__ float aa[32][TileM + 1];
-    __shared__ float bb[32][TileN + 1];
+    static_assert(!VectorLds || (TileM == 64 && TileN == 64), "vector LDS requires a 64x64 tile");
+    __shared__ __align__(VectorLds ? 16 : alignof(float)) float aa[32][VectorLds ? 68 : TileM + 1];
+    __shared__ __align__(VectorLds ? 16 : alignof(float)) float bb[32][VectorLds ? 68 : TileN + 1];
     const int tid = threadIdx.x;
-    const int row = tid % 16;
-    const int col = tid / 16;
+    const int row = (tid % 16) * (VectorLds ? 4 : 1);
+    const int col = (tid / 16) * (VectorLds ? 4 : 1);
     const int64_t row0 = int64_t(blockIdx.x) * TileM;
     const int64_t col0 = int64_t(blockIdx.y) * TileN;
     a += int64_t(blockIdx.z) * sa;
@@ -38,10 +39,17 @@ __global__ __launch_bounds__(256) void halo_sgemm(
 #pragma unroll
         for (int kk = 0; kk < 32; ++kk) {
             float av[TileM / 16], bv[TileN / 16];
+            if constexpr (VectorLds) {
+                const float4 av4 = *reinterpret_cast<const float4 *>(&aa[kk][row]);
+                const float4 bv4 = *reinterpret_cast<const float4 *>(&bb[kk][col]);
+                av[0] = av4.x; av[1] = av4.y; av[2] = av4.z; av[3] = av4.w;
+                bv[0] = bv4.x; bv[1] = bv4.y; bv[2] = bv4.z; bv[3] = bv4.w;
+            } else {
 #pragma unroll
-            for (int i = 0; i < (TileM > TileN ? TileM : TileN) / 16; ++i) {
-                if (i < TileM / 16) av[i] = aa[kk][row + i * 16];
-                if (i < TileN / 16) bv[i] = bb[kk][col + i * 16];
+                for (int i = 0; i < (TileM > TileN ? TileM : TileN) / 16; ++i) {
+                    if (i < TileM / 16) av[i] = aa[kk][row + i * 16];
+                    if (i < TileN / 16) bv[i] = bb[kk][col + i * 16];
+                }
             }
 #pragma unroll
             for (int i = 0; i < TileM / 16; ++i) {
@@ -57,8 +65,10 @@ __global__ __launch_bounds__(256) void halo_sgemm(
     for (int i = 0; i < TileM / 16; ++i) {
 #pragma unroll
         for (int j = 0; j < TileN / 16; ++j) {
-            if (row0 + row + i * 16 < m && col0 + col + j * 16 < n) {
-                c[(col0 + col + j * 16) * ldc + row0 + row + i * 16] = sum[i][j];
+            if (row0 + row + i * (VectorLds ? 1 : 16) < m &&
+                col0 + col + j * (VectorLds ? 1 : 16) < n) {
+                c[(col0 + col + j * (VectorLds ? 1 : 16)) * ldc +
+                    row0 + row + i * (VectorLds ? 1 : 16)] = sum[i][j];
             }
         }
     }
@@ -93,7 +103,11 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
             halo_sgemm<128, 128><<<dim3((m + 127) / 128, (n + 127) / 128, batches), 256, 0, stream>>>(
                 a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
             break;
+        case 4:
+            halo_sgemm<64, 64, true><<<dim3((m + 63) / 64, (n + 63) / 64, batches), 256, 0, stream>>>(
+                a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+            break;
         default:
-            throw std::invalid_argument("SGEMM tile index must be 0..3");
+            throw std::invalid_argument("SGEMM tile index must be 0..4");
     }
 }

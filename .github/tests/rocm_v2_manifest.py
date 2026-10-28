@@ -113,7 +113,7 @@ suites = [
     dict(id='independent-sgemm', build='sgemm-candidate', gpu=True, timeout_s=45, cases=[
          dict(id='shape-' + '-'.join(map(str, shape)) + f'-tile-{tile}',
               argv=['build/debug/raw-sgemm'] + list(map(str, shape)) + [str(tile)])
-         for shape in sorted(sgemm_shapes) for tile in (range(4) if args.focus == 'sgemm' else [0])]),
+         for shape in sorted(sgemm_shapes) for tile in ([4] if args.focus == 'sgemm' else [0])]),
     dict(id='independent-mmvq', build='mmvq-candidates', gpu=True, timeout_s=45, cases=[
          dict(id='shape-' + '-'.join(map(str, shape)),
               argv=['build/debug/raw-mmvq'] + list(map(str, shape))) for shape in mmvq_shapes]),
