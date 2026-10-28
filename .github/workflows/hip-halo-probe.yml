@@ -165,7 +165,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 7
       - name: Run additional checks
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           ulimit -c 0
@@ -177,7 +177,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - name: Finish checks
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           ulimit -c 0

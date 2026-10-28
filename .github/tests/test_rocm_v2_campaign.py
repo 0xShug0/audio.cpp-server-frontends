@@ -9,10 +9,13 @@ import copy
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -186,6 +189,49 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(result["status"], "TIMEOUT")
         self.assertIn("SIGKILL", result["termination_error"])
         self.assertTrue(all("timeout" in call.kwargs for call in process.wait.call_args_list))
+
+    def test_sigterm_controller_kills_and_reaps_detached_worker(self):
+        worker = ("import os, signal, time; from pathlib import Path; "
+                  "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                  "Path('worker.tmp').write_text(str(os.getpid())); "
+                  "Path('worker.tmp').rename('worker.pid'); time.sleep(30)")
+        data = self.manifest_data(suites=[dict(id="cpu", cases=[self.case("worker", worker)])])
+        self.manifest.write_text(json.dumps(data))
+        argv = [sys.executable, str(CONTROLLER), "--manifest", str(self.manifest),
+                "--output-dir", str(self.output), "--log"]
+        pid_path = self.root / "worker.pid"
+        worker_pid = None
+        with (self.root / "termination.log").open("w") as log:
+            controller = subprocess.Popen(argv, cwd=self.root, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                deadline = time.monotonic() + 5
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    self.assertIsNone(controller.poll(), "controller exited before worker startup")
+                    time.sleep(0.01)
+                self.assertTrue(pid_path.exists(), "worker did not start within 5 seconds")
+                worker_pid = int(pid_path.read_text())
+                self.assertEqual(os.getpgid(worker_pid), worker_pid)
+                self.assertNotEqual(os.getpgid(worker_pid), os.getpgid(controller.pid))
+                controller.terminate()
+                self.assertEqual(controller.wait(timeout=5), 128 + signal.SIGTERM)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(worker_pid, 0)
+                case_events = [row for row in self.events() if row.get("kind") == "case"]
+                self.assertEqual([row["event"] for row in case_events], ["START"])
+                self.assertFalse((self.output / "summary.json").exists())
+            finally:
+                if controller.poll() is None:
+                    controller.kill()
+                    controller.wait(timeout=5)
+                if worker_pid is None and pid_path.exists():
+                    worker_pid = int(pid_path.read_text())
+                if worker_pid is not None:
+                    try:
+                        os.killpg(worker_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # The controller already killed and reaped the worker.
+        self.assertEqual(self.run_campaign(resume=True).returncode, 1)
+        self.assertEqual(self.statuses(), {"cpu/worker": "CRASH"})
 
     def test_expired_deadline_blocks_builds_and_cases_without_children(self):
         command = "from pathlib import Path; Path('executed').touch()"

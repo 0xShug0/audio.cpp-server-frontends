@@ -373,6 +373,11 @@ def main():
     parser.add_argument("--deadline-epoch", type=float, help="absolute UNIX seconds deadline shared by all phases")
     parser.add_argument("--log", action="store_true", required=True, help="enable persisted controller and child logs")
     args = parser.parse_args()
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)  # Unwind execute() and kill its worker group.
+
+    previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     try:
         controller = Campaign(args.manifest, args.output_dir, args.resume, args.deadline_epoch)
         if args.validate_only:
@@ -391,6 +396,8 @@ def main():
         with (output / "controller.log").open("a", encoding="utf-8") as log:
             log.write(message)
         return 2
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
