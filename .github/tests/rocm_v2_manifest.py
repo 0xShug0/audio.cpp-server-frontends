@@ -5,6 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
+parser.add_argument('--focus', choices=['complete','sgemm'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -98,6 +99,9 @@ for line in (root / 'tests/unittests/assets/hip_halo/qwen3_sgemm_shapes.txt').re
         m,n,k,ta,tb,tc,lda,ldb,ldc,batches = map(int, line.split()[1:])
         if ta == tb == tc == 0 and batches == 1:
             sgemm_shapes.add((m,n,k,0))
+sgemm_shapes.update((m,n,k,pad) for pad in (0,3) for m,n,k in (
+    (128,8192,5376),(256,1024,5376),(512,768,5376),(2080,768,768),
+    (2048,768,896),(193,1024,4096),(256,1024,2048),(129,769,5376)))
 mmvq_shapes = [(k,m,gate,0) for gate in (0,1) for k,m in (
     (32,1), (96,3), (512,67), (512,512), (512,1024), (512,2048),
     (1024,512), (1024,1024), (1024,2048), (1024,3072), (1024,4096),
@@ -107,8 +111,9 @@ suites = [
     dict(id='correctness', build='ggml', gpu=True, timeout_s=90, cases=correctness),
     dict(id='paired', build='ggml', gpu=True, timeout_s=90, cases=paired),
     dict(id='independent-sgemm', build='sgemm-candidate', gpu=True, timeout_s=45, cases=[
-         dict(id='shape-' + '-'.join(map(str, shape)),
-              argv=['build/debug/raw-sgemm'] + list(map(str, shape))) for shape in sorted(sgemm_shapes)]),
+         dict(id='shape-' + '-'.join(map(str, shape)) + f'-tile-{tile}',
+              argv=['build/debug/raw-sgemm'] + list(map(str, shape)) + [str(tile)])
+         for shape in sorted(sgemm_shapes) for tile in (range(4) if args.focus == 'sgemm' else [0])]),
     dict(id='independent-mmvq', build='mmvq-candidates', gpu=True, timeout_s=45, cases=[
          dict(id='shape-' + '-'.join(map(str, shape)),
               argv=['build/debug/raw-mmvq'] + list(map(str, shape))) for shape in mmvq_shapes]),
@@ -137,7 +142,15 @@ suites.append(dict(id='vulkan-correctness', build='vulkan', gpu=True, timeout_s=
          '--suite','rocm-v2','-b','Vulkan0','--case-index',str(index)]) for index in (0,1,125)]))
 # This independently compiled health worker does not depend on the integrated backend.
 health = dict(argv=['build/debug/device-health', 'health'], timeout_s=15)
+if args.focus == 'sgemm':
+    builds = [build for build in builds if build['id'] in {'device-health','sgemm-candidate'}]
+    candidate = next(suite for suite in suites if suite['id'] == 'independent-sgemm')
+    suites = [dict(id='correctness', build='device-health', gpu=True, timeout_s=15,
+                   cases=[dict(id='device-before', argv=health['argv'])]),
+              candidate,
+              dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+                   cases=[dict(id='device-after', argv=health['argv'])])]
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')
-print(f'Campaign: {len(builds)} independent builds, {len(correctness)} correctness cases, '
-      f'{len(paired)} paired graphs, {sum(len(s["cases"]) for s in suites[2:])} independent candidate workers')
+print(f'Campaign ({args.focus}): {len(builds)} builds, '
+      f'{sum(len(suite["cases"]) for suite in suites)} cases')

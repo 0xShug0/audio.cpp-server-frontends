@@ -3,6 +3,12 @@ run-name: Validation
 
 on:
   workflow_dispatch:
+    inputs:
+      focus:
+        description: Validation group
+        type: choice
+        options: [complete, sgemm]
+        default: complete
   push:
     branches: [experiment/rocm-v2-probes]
     paths:
@@ -29,6 +35,8 @@ jobs:
             tests/unittests/assets/hip_halo
             external/ggml/src/ggml-hip/halo
       - name: Prepare validation inputs
+        env:
+          VALIDATION_GROUP: ${{ inputs.focus || 'complete' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -79,16 +87,18 @@ jobs:
           cp .github/tests/rocm-v2-cases.tsv source/.github/tests/
           cp source-commit.txt source/
           sha256sum .github/tests/rocm-v2-source.patch > source/patch-sha256.txt
-          python3 source/.github/tests/rocm_v2_manifest.py --root source
+          python3 source/.github/tests/rocm_v2_manifest.py --root source --focus "$VALIDATION_GROUP"
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
-          cmake -S source/external/ggml -B source/build/debug -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF \
-            -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
-          cmake --build source/build/debug --target test-backend-ops framework_backend_probe backend_config_args_test --parallel 4
-          source/build/debug/bin/test-backend-ops --suite rocm-v2 --list-cases > prepare-cases.tsv
-          cmp prepare-cases.tsv source/.github/tests/rocm-v2-cases.tsv
-          source/build/debug/bin/framework_backend_probe --log
-          source/build/debug/bin/backend_config_args_test --log
+          if [[ "$VALIDATION_GROUP" == complete ]]; then
+            cmake -S source/external/ggml -B source/build/debug -G Ninja \
+              -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF \
+              -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
+            cmake --build source/build/debug --target test-backend-ops framework_backend_probe backend_config_args_test --parallel 4
+            source/build/debug/bin/test-backend-ops --suite rocm-v2 --list-cases > prepare-cases.tsv
+            cmp prepare-cases.tsv source/.github/tests/rocm-v2-cases.tsv
+            source/build/debug/bin/framework_backend_probe --log
+            source/build/debug/bin/backend_config_args_test --log
+          fi
           tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source source-vulkan
           du -h probe-source.tar.gz
       - uses: actions/upload-artifact@v4

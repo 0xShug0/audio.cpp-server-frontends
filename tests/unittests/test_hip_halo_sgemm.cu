@@ -12,15 +12,20 @@
 
 #define CHECK(x) do { if ((x) != 0) { std::fprintf(stderr, "API failure %s:%d: %s\n", __FILE__, __LINE__, #x); std::exit(1); } } while (0)
 
-static void run(int m, int n, int k, int pad) {
-    const int lda=k+pad, ldb=k+pad+1, ldc=m+pad;
-    std::vector<float> a(size_t(lda)*m), b(size_t(ldb)*n), out(size_t(ldc)*n), ref(out.size());
-    for (size_t i=0;i<a.size();++i) a[i]=float(int((i*17+13)%251)-125)/127.13f;
-    for (size_t i=0;i<b.size();++i) b[i]=float(int((i*31+7)%257)-128)/131.73f;
-    float *da,*db,*dc;
-    CHECK(hipMalloc(&da,a.size()*4)); CHECK(hipMalloc(&db,b.size()*4)); CHECK(hipMalloc(&dc,out.size()*4));
-    CHECK(hipMemcpy(da,a.data(),a.size()*4,hipMemcpyHostToDevice));
-    CHECK(hipMemcpy(db,b.data(),b.size()*4,hipMemcpyHostToDevice));
+static void run(int m, int n, int k, int pad, int tile_index = -1) {
+    const int lda=k+pad, ldb=(pad == 0 ? k : k+pad+1), ldc=m+pad;
+    constexpr size_t guard = 64;  // 256-byte alignment for both implementations.
+    constexpr float sentinel = -1234567.0f;
+    const size_t a_elements=size_t(lda)*m, b_elements=size_t(ldb)*n, c_elements=size_t(ldc)*n;
+    std::vector<float> a(a_elements+2*guard,sentinel), b(b_elements+2*guard,sentinel);
+    std::vector<float> out(c_elements+2*guard,sentinel), ref(out.size(),sentinel);
+    for (size_t i=0;i<a_elements;++i) a[guard+i]=float(int((i*17+13)%251)-125)/127.13f;
+    for (size_t i=0;i<b_elements;++i) b[guard+i]=float(int((i*31+7)%257)-128)/131.73f;
+    float *da_base,*db_base,*dc_base;
+    CHECK(hipMalloc(&da_base,a.size()*4)); CHECK(hipMalloc(&db_base,b.size()*4)); CHECK(hipMalloc(&dc_base,out.size()*4));
+    float *da=da_base+guard,*db=db_base+guard,*dc=dc_base+guard;
+    CHECK(hipMemcpy(da_base,a.data(),a.size()*4,hipMemcpyHostToDevice));
+    CHECK(hipMemcpy(db_base,b.data(),b.size()*4,hipMemcpyHostToDevice));
     hipblasLtHandle_t handle; hipblasLtMatmulDesc_t desc;
     hipblasLtMatrixLayout_t la,lb,lc; hipblasLtMatmulPreference_t pref;
     CHECK(hipblasLtCreate(&handle)); CHECK(hipblasLtMatmulDescCreate(&desc,HIPBLAS_COMPUTE_32F,HIP_R_32F));
@@ -38,20 +43,65 @@ static void run(int m, int n, int k, int pad) {
     if (!count) std::exit(1);
     float alpha=1,beta=0;
     auto launch=[&](bool halo) {
-        if (halo) ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr);
+        if (halo) {
+            if (tile_index < 0) ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr);
+            else ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr,tile_index);
+        }
         else CHECK(hipblasLtMatmul(handle,desc,&alpha,da,la,db,lb,&beta,dc,lc,dc,lc,&algo.algo,work,worksize,nullptr));
     };
-    launch(false);CHECK(hipMemcpy(ref.data(),dc,out.size()*4,hipMemcpyDeviceToHost));
-    launch(true);CHECK(hipMemcpy(out.data(),dc,out.size()*4,hipMemcpyDeviceToHost));
+    auto check_output=[&](const std::vector<float> & values, const char * label) {
+        for (size_t i=0;i<guard;++i) {
+            if (values[i]!=sentinel || values[guard+c_elements+i]!=sentinel) {
+                std::fprintf(stderr,"%s output boundary guard failed: tile=%d offset=%zu\n",label,tile_index,i);
+                std::exit(4);
+            }
+        }
+        for (int j=0;j<n;++j) for (int i=m;i<ldc;++i) {
+            if (values[guard+size_t(j)*ldc+i]!=sentinel) {
+                std::fprintf(stderr,"%s output row padding failed: tile=%d row=%d col=%d\n",label,tile_index,i,j);
+                std::exit(4);
+            }
+        }
+    };
+    auto check_input_guards=[&](const float * base, size_t elements, const char * label) {
+        float edges[2*guard];
+        CHECK(hipMemcpy(edges,base,guard*4,hipMemcpyDeviceToHost));
+        CHECK(hipMemcpy(edges+guard,base+guard+elements,guard*4,hipMemcpyDeviceToHost));
+        for (size_t i=0;i<2*guard;++i) {
+            if (edges[i]!=sentinel) {
+                std::fprintf(stderr,"%s input boundary guard failed: tile=%d offset=%zu\n",label,tile_index,i);
+                std::exit(4);
+            }
+        }
+    };
+    // Reset all C storage before each correctness launch, so a preceding
+    // implementation cannot supply valid outputs or hide padding writes.
+    CHECK(hipMemcpy(dc_base,ref.data(),ref.size()*4,hipMemcpyHostToDevice));
+    launch(false);CHECK(hipGetLastError());
+    CHECK(hipMemcpy(ref.data(),dc_base,ref.size()*4,hipMemcpyDeviceToHost));
+    check_output(ref,"hipBLASLt");
+    CHECK(hipMemcpy(dc_base,out.data(),out.size()*4,hipMemcpyHostToDevice));
+    launch(true);CHECK(hipGetLastError());
+    CHECK(hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost));
+    check_output(out,"halo");
+    check_input_guards(da_base,a_elements,"A");
+    check_input_guards(db_base,b_elements,"B");
     // Independent double accumulation at distributed output positions, plus
     // exhaustive comparison with the existing FP32 library implementation.
     for (int j=0;j<n;++j) for(int i=0;i<m;++i) {
-        float value=out[size_t(j)*ldc+i], expected=ref[size_t(j)*ldc+i];
-        if (!std::isfinite(value) || std::abs(value-expected)>2e-4f+2e-5f*std::abs(expected)) std::exit(2);
+        float value=out[guard+size_t(j)*ldc+i], expected=ref[guard+size_t(j)*ldc+i];
+        if (!std::isfinite(value) || !std::isfinite(expected) || std::abs(value-expected)>2e-4f+2e-5f*std::abs(expected)) std::exit(2);
         if ((size_t(j)*m+i)%std::max<size_t>(1,size_t(m)*n/257)==0) {
-            double exact=0;for(int q=0;q<k;++q) exact+=double(a[size_t(i)*lda+q])*b[size_t(j)*ldb+q];
-            if (std::abs(value-exact)>2e-4+2e-5*std::abs(exact)) std::exit(3);
+            double exact=0;for(int q=0;q<k;++q) exact+=double(a[guard+size_t(i)*lda+q])*b[guard+size_t(j)*ldb+q];
+            if (std::abs(value-exact)>2e-4+2e-5*std::abs(exact) ||
+                std::abs(expected-exact)>2e-4+2e-5*std::abs(exact)) std::exit(3);
         }
+    }
+    if (tile_index >= 0) {
+        const int tile_m=(tile_index & 2) ? 128 : 64, tile_n=(tile_index & 1) ? 128 : 64;
+        const size_t shared_bytes=32*size_t(tile_m+tile_n+2)*sizeof(float);
+        std::printf("SGEMM_TILE,index=%d,m=%d,n=%d,threads=256,static_shared_bytes=%zu\n",
+                    tile_index,tile_m,tile_n,shared_bytes);
     }
     hipEvent_t start,end;CHECK(hipEventCreate(&start));CHECK(hipEventCreate(&end));
     std::vector<float> times[2];
@@ -63,26 +113,38 @@ static void run(int m, int n, int k, int pad) {
         float ms;CHECK(hipEventElapsedTime(&ms,start,end));times[mode].push_back(ms/8);
     }
     for(auto & t:times)std::sort(t.begin(),t.end());
+    CHECK(hipGetLastError());
+    CHECK(hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost));
+    check_output(out,"timed output");
+    check_input_guards(da_base,a_elements,"A");
+    check_input_guards(db_base,b_elements,"B");
     std::printf("SGEMM,%d,%d,%d,%d,%.6f,%.6f,%.4f\n",m,n,k,pad,times[0][3],times[1][3],times[0][3]/times[1][3]);
     CHECK(hipEventDestroy(start));CHECK(hipEventDestroy(end));
     CHECK(hipblasLtMatmulPreferenceDestroy(pref));CHECK(hipblasLtMatrixLayoutDestroy(la));
     CHECK(hipblasLtMatrixLayoutDestroy(lb));CHECK(hipblasLtMatrixLayoutDestroy(lc));
     CHECK(hipblasLtMatmulDescDestroy(desc));CHECK(hipblasLtDestroy(handle));
-    CHECK(hipFree(work));CHECK(hipFree(da));CHECK(hipFree(db));CHECK(hipFree(dc));
+    CHECK(hipFree(work));CHECK(hipFree(da_base));CHECK(hipFree(db_base));CHECK(hipFree(dc_base));
 }
 
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc != 1 && argc != 2 && argc != 5 && argc != 6) {
+        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..3]]\n",argv[0]);
+        return 1;
+    }
     int devices=0;
     if (hipGetDeviceCount(&devices)!=hipSuccess || devices==0)return 77;
     hipDeviceProp_t props;
     CHECK(hipGetDeviceProperties(&props,0));
     if (std::string(props.gcnArchName).find("gfx1151")!=0)return 77;
-    if (argc == 5) {
+    if (argc == 5 || argc == 6) {
         const int m = std::stoi(argv[1]), n = std::stoi(argv[2]);
         const int k = std::stoi(argv[3]), pad = std::stoi(argv[4]);
+        size_t parsed=0;
+        const int tile_index=argc == 6 ? std::stoi(argv[5],&parsed) : -1;
         if (m <= 0 || n <= 0 || k <= 0 || pad < 0) return 1;
-        run(m, n, k, pad);
+        if (argc == 6 && (tile_index < 0 || tile_index > 3 || parsed != std::string(argv[5]).size())) return 1;
+        run(m, n, k, pad, tile_index);
         std::puts("PASS selected SGEMM shape");
         return 0;
     }
