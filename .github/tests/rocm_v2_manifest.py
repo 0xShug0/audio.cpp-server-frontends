@@ -116,6 +116,12 @@ suites = [
          dict(id=f'cases-{start}-{min(start+31,458)}',
               argv=['build/debug/raw-im2col', '--range', str(start), '32']) for start in range(0,459,32)]),
 ]
+# Check tiny-case timing against two unchanged HIP instances and reversed order.
+control_indices = [14,17,22,25,51,55,61,65,84,90,95,105,111,112]
+suites.append(dict(id='controls', build='ggml', gpu=True, timeout_s=90, cases=[
+    dict(id=f'{index:03d}-{label}', argv=probe + ['perf'] + selection +
+         ['--case-index',str(index),'--backend-params','', '--compare-params',comparison])
+    for index in control_indices for label,comparison in [('same-hip',''),('reversed','rocm_v2')]]))
 suites.append(dict(id='framework', build='framework', gpu=True, timeout_s=45, cases=[
     dict(id='selection', argv=['build/debug/bin/framework_backend_probe', '--require-rocm-v2', '--log']),
     dict(id='parsing', argv=['build/debug/bin/backend_config_args_test', '--log'])]))
