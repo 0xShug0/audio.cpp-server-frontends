@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -154,6 +154,24 @@ if args.focus == 'sgemm':
               candidate,
               dict(id='framework', build='device-health', gpu=True, timeout_s=15,
                    cases=[dict(id='device-after', argv=health['argv'])])]
+elif args.focus == 'precision':
+    builds = [build for build in builds if build['id'] in {'device-health','ggml','vulkan'}]
+    strict = range(189,192)
+    selected = [0,1,5,189,190,191]
+    suites = [
+        dict(id='correctness', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-hip-cpu', argv=probe + ['test'] + selection +
+                 ['--case-index',str(i),'--backend-params','rocm_v2']) for i in strict]),
+        dict(id='paired', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-hip', argv=probe + ['perf'] + selection +
+                 ['--case-index',str(i),'--backend-params','rocm_v2','--compare-params','']) for i in selected]),
+        dict(id='framework', build='vulkan', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-vulkan', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
+                 '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params','']) for i in selected]),
+        dict(id='vulkan-correctness', build='vulkan', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-vulkan-cpu', argv=['../source-vulkan/build/debug/bin/test-backend-ops','test',
+                 '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i)]) for i in strict]),
+    ]
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')
 print(f'Campaign ({args.focus}): {len(builds)} builds, '

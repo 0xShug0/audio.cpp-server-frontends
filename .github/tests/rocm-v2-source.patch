@@ -210,7 +210,7 @@ index deb063b7..0fdd363d 100644
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
  else()
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 725bdc79..5284e14a 100644
+index 725bdc79..02d144f2 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
 @@ -23,6 +23,8 @@
@@ -636,7 +636,48 @@ index 725bdc79..5284e14a 100644
          bool supported = ggml_backend_supports_op(backend, out);
  
          std::string device_desc = ggml_backend_dev_description(ggml_backend_get_device(backend));
-@@ -5033,6 +5342,94 @@ struct test_pool1d : public test_case {
+@@ -3978,9 +4287,11 @@ struct test_mul_mat : public test_case {
+     const std::array<int64_t, 4> per; // permutation of dimensions
+     const int64_t k_v; // size of k in memory, resulting in a non-contiguous view for k_v > k, no view for k_v == 0
+     const uint32_t o; // number of outputs
++    const bool vulkan_f32_inputs;
+ 
+     std::string vars() override {
+-        return VARS_TO_STR10(type_a, type_b, m, n, k, bs, nr, per, k_v, o);
++        return VARS_TO_STR10(type_a, type_b, m, n, k, bs, nr, per, k_v, o) +
++               (vulkan_f32_inputs ? ",vulkan_f32_inputs=1" : "");
+     }
+ 
+     double max_nmse_err() override {
+@@ -4009,8 +4320,9 @@ struct test_mul_mat : public test_case {
+             std::array<int64_t, 2> bs = {10, 10},
+             std::array<int64_t, 2> nr = {2, 2},
+             std::array<int64_t, 4> per = {0, 1, 2, 3},
+-            int64_t k_v = 0, uint32_t o = 1)
+-        : type_a(type_a), type_b(type_b), m(m), n(n), k(k), bs(bs), nr(nr), per(per), k_v(k_v), o(o) {}
++            int64_t k_v = 0, uint32_t o = 1, bool vulkan_f32_inputs = false)
++        : type_a(type_a), type_b(type_b), m(m), n(n), k(k), bs(bs), nr(nr), per(per), k_v(k_v), o(o),
++          vulkan_f32_inputs(vulkan_f32_inputs) {}
+ 
+     ggml_tensor * build_graph(ggml_context * ctx) override {
+         // C^T = A * B^T: (k, m) * (k, n) => (m, n)
+@@ -4065,9 +4377,15 @@ struct test_mul_mat : public test_case {
+         }
+ 
+         ggml_tensor * out = ggml_mul_mat(ctx, a, b);
++        if (vulkan_f32_inputs) {
++            ggml_mul_mat_set_lowering(out, GGML_MUL_MAT_LOWERING_VULKAN_F32_INPUTS);
++        }
+         ggml_set_name(out, "out");
+         for (uint32_t i = 1; i < o; ++i) {
+             ggml_tensor * out2 = ggml_mul_mat(ctx, a, b);
++            if (vulkan_f32_inputs) {
++                ggml_mul_mat_set_lowering(out2, GGML_MUL_MAT_LOWERING_VULKAN_F32_INPUTS);
++            }
+             ggml_set_name(out2, "out2");
+             out = ggml_add(ctx, out, out2);
+         }
+@@ -5033,6 +5351,94 @@ struct test_pool1d : public test_case {
      }
  };
  
@@ -731,7 +772,7 @@ index 725bdc79..5284e14a 100644
  // GGML_OP_CONV_TRANSPOSE_1D
  struct test_conv_transpose_1d : public test_case {
      const std::array<int64_t, 4> ne_input;
-@@ -5146,6 +5543,25 @@ struct test_im2col : public test_case {
+@@ -5146,6 +5552,25 @@ struct test_im2col : public test_case {
          ggml_tensor * out = ggml_im2col(ctx, kernel, input, s0, s1, p0, p1, d0, d1, is_2D, dst_type);
          ggml_set_name(out, "out");
  
@@ -757,7 +798,7 @@ index 725bdc79..5284e14a 100644
          return out;
      }
  };
-@@ -9446,8 +9862,98 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+@@ -9446,8 +9871,103 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
      return test_cases;
  }
  
@@ -847,6 +888,11 @@ index 725bdc79..5284e14a 100644
 +    for (int64_t m : {192, 193, 194}) {
 +        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, m, 1024, 4096, one, one));
 +    }
++    for (const auto & shape : std::vector<std::array<int64_t, 3>> {
++            {128, 8192, 1792}, {256, 1024, 3584}, {128, 8192, 5376}}) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32,
++                                           shape[0], shape[1], shape[2], one, one, identity, 0, 1, true));
++    }
 +    return cases;
 +}
 +
@@ -857,7 +903,7 @@ index 725bdc79..5284e14a 100644
      auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
          if (params_filter == nullptr) {
              return;
-@@ -9467,7 +9973,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9467,7 +9987,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -877,7 +923,7 @@ index 725bdc79..5284e14a 100644
          switch (mode) {
          case MODE_TEST:
          case MODE_GRAD:
-@@ -9483,6 +10000,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9483,6 +10014,33 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      filter_test_cases(test_cases, params_filter);
@@ -911,7 +957,7 @@ index 725bdc79..5284e14a 100644
  
      if (mode == MODE_TEST) {
          ggml_backend_t backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-@@ -9500,11 +10044,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9500,11 +10058,25 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              set_use_ref(backend_cpu, true);
          }
  
@@ -940,7 +986,7 @@ index 725bdc79..5284e14a 100644
              if (status == test_status_t::SKIPPED || status == test_status_t::NOT_SUPPORTED) {
                  continue;
              }
-@@ -9520,6 +10078,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9520,6 +10092,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
          ggml_backend_free(backend_cpu);
  
@@ -951,7 +997,7 @@ index 725bdc79..5284e14a 100644
          return n_ok == tests_run;
      }
  
-@@ -9536,10 +10098,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9536,10 +10112,31 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
      }
  
      if (mode == MODE_PERF) {
@@ -986,7 +1032,7 @@ index 725bdc79..5284e14a 100644
      }
  
      if (mode == MODE_SUPPORT) {
-@@ -9551,8 +10134,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9551,8 +10148,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
              test_cases.end()
          );
  
@@ -1007,7 +1053,7 @@ index 725bdc79..5284e14a 100644
          }
          return true;
      }
-@@ -9663,6 +10257,12 @@ static void show_test_coverage() {
+@@ -9663,6 +10271,12 @@ static void show_test_coverage() {
  static void usage(char ** argv) {
      printf("Usage: %s [mode] [-o <op,..>] [-b <backend>] [-p <params regex>] [--output <console|sql|csv>] [--list-ops]", argv[0]);
      printf(" [--show-coverage] [--test-file <path>]\n");
@@ -1020,7 +1066,7 @@ index 725bdc79..5284e14a 100644
      printf("    valid modes:\n");
      printf("      - test (default, compare with CPU backend for correctness)\n");
      printf("      - grad (compare gradients from backpropagation with method of finite differences)\n");
-@@ -9683,6 +10283,11 @@ int main(int argc, char ** argv) {
+@@ -9683,6 +10297,11 @@ int main(int argc, char ** argv) {
      const char * backend_filter = nullptr;
      const char * params_filter = nullptr;
      const char * test_file_path = nullptr;
@@ -1032,7 +1078,7 @@ index 725bdc79..5284e14a 100644
  
      for (int i = 1; i < argc; i++) {
          if (strcmp(argv[i], "test") == 0) {
-@@ -9714,6 +10319,38 @@ int main(int argc, char ** argv) {
+@@ -9714,6 +10333,38 @@ int main(int argc, char ** argv) {
                  usage(argv);
                  return 1;
              }
@@ -1071,7 +1117,7 @@ index 725bdc79..5284e14a 100644
          } else if (strcmp(argv[i], "--output") == 0) {
              if (i + 1 < argc) {
                  if (!output_format_from_str(argv[++i], output_format)) {
-@@ -9743,6 +10380,49 @@ int main(int argc, char ** argv) {
+@@ -9743,6 +10394,49 @@ int main(int argc, char ** argv) {
          }
      }
  
@@ -1121,7 +1167,7 @@ index 725bdc79..5284e14a 100644
      // load and enumerate backends
      ggml_backend_load_all();
  
-@@ -9755,6 +10435,7 @@ int main(int argc, char ** argv) {
+@@ -9755,6 +10449,7 @@ int main(int argc, char ** argv) {
      output_printer->print_testing_start(testing_start_info(ggml_backend_dev_count()));
  
      size_t n_ok = 0;
@@ -1129,7 +1175,7 @@ index 725bdc79..5284e14a 100644
  
      for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
          ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-@@ -9773,14 +10454,38 @@ int main(int argc, char ** argv) {
+@@ -9773,14 +10468,38 @@ int main(int argc, char ** argv) {
              continue;
          }
  
@@ -1170,7 +1216,7 @@ index 725bdc79..5284e14a 100644
          }
  
          size_t free, total;  // NOLINT
-@@ -9789,7 +10494,9 @@ int main(int argc, char ** argv) {
+@@ -9789,7 +10508,9 @@ int main(int argc, char ** argv) {
                                                               false, "", ggml_backend_dev_description(dev),
                                                               total / 1024 / 1024, free / 1024 / 1024, true));
  
@@ -1181,7 +1227,7 @@ index 725bdc79..5284e14a 100644
  
          if (ok) {
              n_ok++;
-@@ -9807,8 +10514,13 @@ int main(int argc, char ** argv) {
+@@ -9807,8 +10528,13 @@ int main(int argc, char ** argv) {
      }
  
      output_printer->print_overall_summary(
