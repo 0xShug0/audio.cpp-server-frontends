@@ -111,9 +111,13 @@ suites = [
     dict(id='correctness', build='ggml', gpu=True, timeout_s=90, cases=correctness),
     dict(id='paired', build='ggml', gpu=True, timeout_s=90, cases=paired),
     dict(id='independent-sgemm', build='sgemm-candidate', gpu=True, timeout_s=45, cases=[
-         dict(id='shape-' + '-'.join(map(str, shape)) + f'-tile-{tile}',
-              argv=['build/debug/raw-sgemm'] + list(map(str, shape)) + [str(tile)])
-         for shape in sorted(sgemm_shapes) for tile in ([4] if args.focus == 'sgemm' else [0])]),
+         dict(id='shape-' + '-'.join(map(str, shape)) + f'-{mode}',
+              argv=['build/debug/raw-sgemm'] + list(map(str, shape)) + [mode])
+         for shape in sorted(sgemm_shapes) if args.focus != 'sgemm' or shape[:3] in {
+             (1,1,1),(67,131,97),(128,8192,1792),(128,8192,5376),
+             (256,1024,3584),(256,1024,5376),(512,768,5376),(2048,768,896),
+             (2080,768,768),(64,32768,896),(129,769,5376),(193,1024,4096)}
+         for mode in (['plans'] if args.focus == 'sgemm' else ['0'])]),
     dict(id='independent-mmvq', build='mmvq-candidates', gpu=True, timeout_s=45, cases=[
          dict(id='shape-' + '-'.join(map(str, shape)),
               argv=['build/debug/raw-mmvq'] + list(map(str, shape))) for shape in mmvq_shapes]),

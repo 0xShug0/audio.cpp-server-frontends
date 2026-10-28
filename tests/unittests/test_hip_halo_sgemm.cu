@@ -11,11 +11,12 @@
 #include <tuple>
 #include <vector>
 
-#define CHECK(x) do { if ((x) != 0) { std::fprintf(stderr, "API failure %s:%d: %s\n", __FILE__, __LINE__, #x); std::exit(1); } } while (0)
+#define CHECK(x) do { const auto status=(x); if (status != 0) { std::fprintf(stderr, "API failure %s:%d: %s status=%d\n", __FILE__, __LINE__, #x, int(status)); std::exit(1); } } while (0)
 
-static void run(int m, int n, int k, int pad, int tile_index = -1) {
+static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = false) {
     const bool vector_lds=tile_index == 4;
-    const int candidate_mode=vector_lds ? 2 : 1;
+    const bool three_modes=vector_lds || plans;
+    const int candidate_mode=three_modes ? 2 : 1;
     const int lda=k+pad, ldb=(pad == 0 ? k : k+pad+1), ldc=m+pad;
     constexpr size_t guard = 64;  // 256-byte alignment for both implementations.
     constexpr float sentinel = -1234567.0f;
@@ -43,10 +44,16 @@ static void run(int m, int n, int k, int pad, int tile_index = -1) {
     CHECK(hipblasLtMatmulPreferenceSetAttribute(pref,HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,&worksize,sizeof(worksize)));
     hipblasLtMatmulHeuristicResult_t algo;int count=0;
     CHECK(hipblasLtMatmulAlgoGetHeuristic(handle,desc,la,lb,lc,lc,pref,1,&algo,&count));
-    if (!count) std::exit(1);
+    if (!count) { std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=-1,status=1,stage=first1_count,count=0\n"); std::exit(1); }
+    hipblasLtMatmulHeuristicResult_t alternatives[8]; int plan_count=1, plan_index=0;
     float alpha=1,beta=0;
     auto launch=[&](int mode) {
-        if (mode != 0) {
+        if (plans && mode == 2) {
+            const auto status=hipblasLtMatmul(handle,desc,&alpha,da,la,db,lb,&beta,dc,lc,dc,lc,&alternatives[plan_index].algo,work,worksize,nullptr);
+            if (status != HIPBLAS_STATUS_SUCCESS) {
+                std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=%d,status=%d,stage=matmul\n",plan_index,int(status)); std::exit(1);
+            }
+        } else if (mode != 0) {
             if (tile_index < 0 || (vector_lds && mode == 1)) ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr);
             else ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr,tile_index);
         }
@@ -92,7 +99,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1) {
         check_output(reference64,"baseline64");
     }
     CHECK(hipMemcpy(dc_base,out.data(),out.size()*4,hipMemcpyHostToDevice));
-    launch(candidate_mode);CHECK(hipGetLastError());
+    launch(plans ? 1 : candidate_mode);CHECK(hipGetLastError());
     CHECK(hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost));
     check_output(out,"halo");
     check_input_guards(da_base,a_elements,"A");
@@ -117,45 +124,94 @@ static void run(int m, int n, int k, int pad, int tile_index = -1) {
                 std::abs(expected-exact)>2e-4+2e-5*std::abs(exact)) std::exit(3);
         }
     }
-    if (tile_index >= 0) {
-        const int tile_m=(tile_index & 2) ? 128 : 64, tile_n=(tile_index & 1) ? 128 : 64;
-        const int pitch_a=vector_lds ? 68 : tile_m+1, pitch_b=vector_lds ? 68 : tile_n+1;
-        const size_t shared_bytes=32*size_t(pitch_a+pitch_b)*sizeof(float);
-        std::printf("SGEMM_TILE,index=%d,m=%d,n=%d,threads=256,static_shared_bytes=%zu\n",
-                    tile_index,tile_m,tile_n,shared_bytes);
+    if (plans) {
+        reference64=out;
+        const auto status=hipblasLtMatmulAlgoGetHeuristic(handle,desc,la,lb,lc,lc,pref,8,alternatives,&plan_count);
+        if (status != HIPBLAS_STATUS_SUCCESS) { std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=-1,status=%d,stage=plans_query\n",int(status)); std::exit(1); }
+        std::printf("SGEMM_PLANS,m=%d,n=%d,k=%d,pad=%d,count=%d,workspace_cap_bytes=%zu,compute=32F,storage=R32F\n",m,n,k,pad,plan_count,worksize);
+        if (!plan_count) { std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=-1,status=1,stage=plans_count,count=0\n"); std::exit(1); }
     }
-    hipEvent_t start,end;CHECK(hipEventCreate(&start));CHECK(hipEventCreate(&end));
-    std::vector<float> times[3];
-    // For index 4, cover all six permutations of library/baseline64/vector LDS:
-    // every mode occupies every position twice, with balanced pairwise order.
-    constexpr int orders[6][3]={{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}};
-    for(int round=0;round<(vector_lds ? 6 : 7);++round) for(int order=0;order<(vector_lds ? 3 : 2);++order) {
-        int mode=vector_lds ? orders[round][order] : (round+order)%2;
-        for(int i=0;i<3;++i)launch(mode);
-        CHECK(hipEventRecord(start));for(int i=0;i<8;++i)launch(mode);
-        CHECK(hipEventRecord(end));CHECK(hipEventSynchronize(end));
-        float ms;CHECK(hipEventElapsedTime(&ms,start,end));times[mode].push_back(ms/8);
+    for (plan_index=0;plan_index<plan_count;++plan_index) {
+        double nmse=0,max_abs=0,cosine=0;
+        if (plans) {
+            std::printf("SGEMM_PLAN_BEGIN,algo_index=%d,status=%d\n",plan_index,int(alternatives[plan_index].state));
+            if (alternatives[plan_index].state != HIPBLAS_STATUS_SUCCESS) {
+                std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=%d,status=%d,stage=heuristic_state\n",plan_index,int(alternatives[plan_index].state)); std::exit(1);
+            }
+            if (alternatives[plan_index].workspaceSize > worksize) {
+                std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=%d,status=1,stage=workspace_cap\n",plan_index); std::exit(1);
+            }
+            std::fill(out.begin(),out.end(),sentinel);
+            CHECK(hipMemcpy(dc_base,out.data(),out.size()*4,hipMemcpyHostToDevice));
+            launch(2);
+            const auto status=hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost);
+            if (status != hipSuccess) { std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=%d,status=%d,stage=correctness_sync\n",plan_index,int(status)); std::exit(1); }
+            char label[64]; std::snprintf(label,sizeof(label),"algo_index=%d status=4",plan_index);
+            check_output(out,label); check_input_guards(da_base,a_elements,label); check_input_guards(db_base,b_elements,label);
+            double error2=0,reference2=0,output2=0,dot=0; bool valid=true;
+            for (int j=0;j<n;++j) for (int i=0;i<m;++i) {
+                const size_t offset=guard+size_t(j)*ldc+i;
+                const double value=out[offset], baseline=reference64[offset], delta=value-baseline;
+                valid &= std::isfinite(value) && std::abs(value-ref[offset])<=2e-4+2e-5*std::abs(double(ref[offset]));
+                error2+=delta*delta; reference2+=baseline*baseline; output2+=value*value; dot+=value*baseline;
+                max_abs=std::max(max_abs,std::abs(delta));
+                if ((size_t(j)*m+i)%std::max<size_t>(1,size_t(m)*n/257)==0) {
+                    double exact=0; for (int q=0;q<k;++q) exact+=double(a[guard+size_t(i)*lda+q])*b[guard+size_t(j)*ldb+q];
+                    valid &= std::abs(value-exact)<=2e-4+2e-5*std::abs(exact);
+                }
+            }
+            nmse=error2/reference2; cosine=dot/std::sqrt(reference2*output2);
+            valid &= std::isfinite(nmse) && std::isfinite(cosine);
+            if (!valid) {
+                std::fprintf(stderr,"SGEMM_PLAN_ERROR,algo_index=%d,status=2,stage=numerics,nmse=%.12g,max_abs=%.12g,cosine=%.12g\n",plan_index,nmse,max_abs,cosine); std::exit(2);
+            }
+        }
+        if (tile_index >= 0) {
+            const int tile_m=(tile_index & 2) ? 128 : 64, tile_n=(tile_index & 1) ? 128 : 64;
+            const int pitch_a=vector_lds ? 68 : tile_m+1, pitch_b=vector_lds ? 68 : tile_n+1;
+            const size_t shared_bytes=32*size_t(pitch_a+pitch_b)*sizeof(float);
+            std::printf("SGEMM_TILE,index=%d,m=%d,n=%d,threads=256,static_shared_bytes=%zu\n",
+                        tile_index,tile_m,tile_n,shared_bytes);
+        }
+        hipEvent_t start,end;CHECK(hipEventCreate(&start));CHECK(hipEventCreate(&end));
+        std::vector<float> times[3];
+        // For index 4 or plans, cover all six permutations of the three modes:
+        // every mode occupies every position twice, with balanced pairwise order.
+        constexpr int orders[6][3]={{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}};
+        const int calls=plans ? 4 : 8;
+        for(int round=0;round<(three_modes ? 6 : 7);++round) for(int order=0;order<(three_modes ? 3 : 2);++order) {
+            int mode=three_modes ? orders[round][order] : (round+order)%2;
+            for(int i=0;i<3;++i)launch(mode);
+            CHECK(hipEventRecord(start));for(int i=0;i<calls;++i)launch(mode);
+            CHECK(hipEventRecord(end));CHECK(hipEventSynchronize(end));
+            float ms;CHECK(hipEventElapsedTime(&ms,start,end));times[mode].push_back(ms/calls);
+        }
+        float medians[3] = {};
+        for (int mode=0;mode<=candidate_mode;++mode) {
+            auto & t=times[mode];
+            std::sort(t.begin(),t.end());
+            const size_t mid=t.size()/2;
+            medians[mode]=t.size()%2 ? t[mid] : (t[mid-1]+t[mid])*0.5f;
+        }
+        CHECK(hipGetLastError());
+        CHECK(hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost));
+        check_output(out,"timed output");
+        check_input_guards(da_base,a_elements,"A");
+        check_input_guards(db_base,b_elements,"B");
+        const float library_ms=medians[0], candidate_ms=medians[candidate_mode];
+        if (plans) {
+            std::printf("SGEMM_PLAN,algo_index=%d,workspace_bytes=%zu,first1_ms=%.6f,reference64_ms=%.6f,candidate_ms=%.6f,speedup_vs_first1=%.4f,speedup_vs_reference64=%.4f,nmse=%.12g,max_abs=%.12g,cosine=%.12g\n",
+                        plan_index,alternatives[plan_index].workspaceSize,library_ms,medians[1],candidate_ms,library_ms/candidate_ms,medians[1]/candidate_ms,nmse,max_abs,cosine);
+        } else {
+        std::printf("SGEMM,%d,%d,%d,%d,%.6f,%.6f,%.4f\n",m,n,k,pad,library_ms,candidate_ms,library_ms/candidate_ms);
+        if (vector_lds) {
+            const float reference64_ms=medians[1];
+            std::printf("SGEMM_LDSVEC,m=%d,n=%d,k=%d,pad=%d,reference64_ms=%.6f,candidate_ms=%.6f,speedup_vs_reference64=%.4f,bitwise=pass\n",
+                        m,n,k,pad,reference64_ms,candidate_ms,reference64_ms/candidate_ms);
+        }
+        }
+        CHECK(hipEventDestroy(start));CHECK(hipEventDestroy(end));
     }
-    float medians[3] = {};
-    for (int mode=0;mode<=candidate_mode;++mode) {
-        auto & t=times[mode];
-        std::sort(t.begin(),t.end());
-        const size_t mid=t.size()/2;
-        medians[mode]=t.size()%2 ? t[mid] : (t[mid-1]+t[mid])*0.5f;
-    }
-    CHECK(hipGetLastError());
-    CHECK(hipMemcpy(out.data(),dc_base,out.size()*4,hipMemcpyDeviceToHost));
-    check_output(out,"timed output");
-    check_input_guards(da_base,a_elements,"A");
-    check_input_guards(db_base,b_elements,"B");
-    const float library_ms=medians[0], candidate_ms=medians[candidate_mode];
-    std::printf("SGEMM,%d,%d,%d,%d,%.6f,%.6f,%.4f\n",m,n,k,pad,library_ms,candidate_ms,library_ms/candidate_ms);
-    if (vector_lds) {
-        const float reference64_ms=medians[1];
-        std::printf("SGEMM_LDSVEC,m=%d,n=%d,k=%d,pad=%d,reference64_ms=%.6f,candidate_ms=%.6f,speedup_vs_reference64=%.4f,bitwise=pass\n",
-                    m,n,k,pad,reference64_ms,candidate_ms,reference64_ms/candidate_ms);
-    }
-    CHECK(hipEventDestroy(start));CHECK(hipEventDestroy(end));
     CHECK(hipblasLtMatmulPreferenceDestroy(pref));CHECK(hipblasLtMatrixLayoutDestroy(la));
     CHECK(hipblasLtMatrixLayoutDestroy(lb));CHECK(hipblasLtMatrixLayoutDestroy(lc));
     CHECK(hipblasLtMatmulDescDestroy(desc));CHECK(hipblasLtDestroy(handle));
@@ -165,7 +221,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1) {
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc != 1 && argc != 2 && argc != 5 && argc != 6) {
-        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4]]\n",argv[0]);
+        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans]]\n",argv[0]);
         return 1;
     }
     int devices=0;
@@ -177,10 +233,11 @@ int main(int argc, char **argv) {
         const int m = std::stoi(argv[1]), n = std::stoi(argv[2]);
         const int k = std::stoi(argv[3]), pad = std::stoi(argv[4]);
         size_t parsed=0;
-        const int tile_index=argc == 6 ? std::stoi(argv[5],&parsed) : -1;
+        const bool plans=argc == 6 && std::string(argv[5]) == "plans";
+        const int tile_index=argc == 6 && !plans ? std::stoi(argv[5],&parsed) : -1;
         if (m <= 0 || n <= 0 || k <= 0 || pad < 0) return 1;
-        if (argc == 6 && (tile_index < 0 || tile_index > 4 || parsed != std::string(argv[5]).size())) return 1;
-        run(m, n, k, pad, tile_index);
+        if (argc == 6 && !plans && (tile_index < 0 || tile_index > 4 || parsed != std::string(argv[5]).size())) return 1;
+        run(m, n, k, pad, tile_index, plans);
         std::puts("PASS selected SGEMM shape");
         return 0;
     }
