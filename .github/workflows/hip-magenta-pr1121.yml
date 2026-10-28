@@ -1,0 +1,139 @@
+name: Magenta RealTime 2 HIP smoke PR 1121
+
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-magenta-pr1121.yml
+      - .github/tests/magenta-pr1121-check.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hip:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 60
+    env:
+      SOURCE_REF: 577a60cca85aad224078168c60a3c27ebbfc24e8
+      MODEL_REVISION: 16ebc99233e394fdb673ca1de94f1c81b560b5a0
+      GIT_LFS_SKIP_SMUDGE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout pinned audio.cpp source
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source
+          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
+            -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE_REF"
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+            test ! -d source/assets
+            du -sh source
+          } 2>&1 | tee results/source-download.log
+          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
+            -o results/check.py \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/magenta-pr1121-check.py"
+          echo "$SOURCE_REF" > results/source-ref.txt
+
+      - name: Restore Small Q8_0 weights
+        id: weights
+        uses: actions/cache/restore@v4
+        with:
+          path: models/magenta-rt2-small-q8_0.gguf
+          key: magenta-rt2-small-q8_0-0b09d7a32bbb0e389fc204dd7be996a5c908699db34fbf0b3eb42f27ae2d3d99
+
+      - name: Download only Small Q8_0 if missing
+        if: steps.weights.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          /usr/bin/time -p curl --fail --location --silent --show-error \
+            --connect-timeout 30 --max-time 900 --retry 2 \
+            -o models/magenta-rt2-small-q8_0.gguf \
+            "https://huggingface.co/audio-cpp/Magenta-RealTime-2-GGUF/resolve/$MODEL_REVISION/magenta-rt2-small-q8_0.gguf" \
+            2>&1 | tee results/model-download.log
+
+      - name: Verify weights and prepare validation dependencies
+        run: |
+          set -euo pipefail
+          echo '0b09d7a32bbb0e389fc204dd7be996a5c908699db34fbf0b3eb42f27ae2d3d99  models/magenta-rt2-small-q8_0.gguf' | sha256sum -c - | tee results/model-check.log
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check numpy soundfile \
+            2>&1 | tee results/python-dependencies.log
+
+      - name: Cache verified model before the build
+        if: steps.weights.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: models/magenta-rt2-small-q8_0.gguf
+          key: ${{ steps.weights.outputs.cache-primary-key }}
+
+      - name: Build native HIP CLI with Magenta only
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          echo "arch=$arch" | tee -a results/environment.log
+          uname -a | tee -a results/environment.log
+          lscpu >> results/environment.log
+          cmake -S source -B source/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=magenta_realtime_2 \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+            -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            2>&1 | tee results/configure.log
+          /usr/bin/time -p cmake --build source/build --target audiocpp_cli -j 16 \
+            2>&1 | tee results/build.log
+          cp source/build/CMakeCache.txt results/CMakeCache.txt
+          source/build/bin/audiocpp_cli --list-devices 2>&1 | tee results/devices.log
+
+      - name: Run eight-second HIP streaming and offline requests
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          for mode in streaming offline; do
+            /usr/bin/time -v timeout 600 source/build/bin/audiocpp_cli \
+              --task gen --family magenta_realtime_2 \
+              --model "$PWD/models/magenta-rt2-small-q8_0.gguf" \
+              --backend hip --threads 8 --mode "$mode" \
+              --text 'A gentle acoustic guitar with warm piano' \
+              --request-option duration_sec=8 --request-option seed=0 \
+              --out "results/$mode.wav" --out-format float32 \
+              --log --log-file "results/$mode-framework.log" \
+              2>&1 | tee "results/$mode-cli.log"
+          done
+          .venv/bin/python results/check.py results | tee results/validation.json
+          cat results/validation.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs and generated audio
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: magenta-rt2-small-q8-hip-pr1121-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
