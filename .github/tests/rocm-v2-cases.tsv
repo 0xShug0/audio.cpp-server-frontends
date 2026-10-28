@@ -248,3 +248,7 @@
 247	MUL_MAT	type_a=f32,type_b=f32,m=32768,n=128,k=127,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,prec=f32
 248	MUL_MAT	type_a=f32,type_b=f32,m=32768,n=128,k=128,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,prec=f32
 249	MUL_MAT	type_a=f32,type_b=f32,m=32768,n=128,k=129,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,prec=f32
+250	MUL_MAT	type_a=f32,type_b=f32,m=124800,n=96,k=672,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,prec=f32
+251	MUL_MAT	type_a=f32,type_b=f32,m=124800,n=96,k=672,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,vulkan_f32_inputs=1
+252	MUL_MAT	type_a=f32,type_b=f32,m=124800,n=96,k=672,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,prec=def,input_range=large_f32
+253	MUL_MAT	type_a=f32,type_b=f32,m=124800,n=96,k=672,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,prec=f32,input_range=large_f32

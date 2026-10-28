@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads','integrated'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -351,6 +351,40 @@ elif args.focus == 'loads':
                 ('cache',['L2CacheHit','MemUnitBusy']),('occupancy',['MeanOccupancyPerCU','VALUInsts'])]
             for mode in ['fusedwide-bf16','vector-bf16']]),
         dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+    ]
+elif args.focus == 'integrated':
+    builds = [build for build in builds if build['id'] in {
+        'device-health','ggml','framework','vulkan'}]
+    indices = sorted(set(list(range(221,len(entries))) +
+        [0,1,5,22,25,44,48,124,125,189,190,191,205,208,209,210,218]))
+    suites = [
+        dict(id='correctness', build='ggml', gpu=True, timeout_s=120, cases=[
+            dict(id=f'{i:03d}-candidate', argv=probe + ['test'] + selection +
+                 ['--case-index',str(i),'--backend-params','rocm_v2']) for i in indices] +
+            [dict(id='126-rejected-graph', argv=probe + ['test'] + selection +
+                  ['--case-index','126','--backend-params','rocm_v2'])]),
+        dict(id='paired', build='ggml', gpu=True, timeout_s=180, cases=[
+            dict(id=f'{i:03d}-hip', argv=probe + ['perf'] + selection +
+                 ['--case-index',str(i),'--backend-params','rocm_v2','--compare-params',''])
+            for i in indices]),
+        dict(id='controls', build='ggml', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-same-hip', argv=probe + ['perf'] + selection +
+                 ['--case-index',str(i),'--backend-params','','--compare-params',''])
+            for i in [14,17,51,55]]),
+        dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
+                 '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
+            for i in list(range(221,238)) + [0,1,5,125]]),
+        dict(id='trace', build='ggml', gpu=True, required=False, timeout_s=120, cases=[
+            dict(id=label, argv=['/opt/rocm/bin/rocprofv3','--kernel-trace',
+                 '--output-format','csv','--output-directory','../results/profile-'+label,'--'] +
+                 probe + ['test'] + selection + ['--case-index',str(i),'--backend-params','rocm_v2'])
+            for label,i in [('default',236),('strict-f32',250)]]),
+        dict(id='framework', build='framework', gpu=True, timeout_s=45, cases=[
+            dict(id='selection', argv=['build/debug/bin/framework_backend_probe','--require-rocm-v2','--log']),
+            dict(id='parsing', argv=['build/debug/bin/backend_config_args_test','--log'])]),
+        dict(id='health', build='device-health', gpu=True, timeout_s=15,
              cases=[dict(id='device-after', argv=health['argv'])]),
     ]
 if args.focus not in {'matrix','fused','dispatch','split','loads'}:
