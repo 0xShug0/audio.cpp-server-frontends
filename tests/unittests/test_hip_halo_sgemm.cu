@@ -143,7 +143,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
             return;
         }
         if (fused && mode == 2) {
-            if (fused_index == 19 || fused_index == 20)
+            if (fused_index >= 19 && fused_index <= 25)
                 ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr,fused_index,&loads_route);
             else ggml_hip_halo_sgemm(da,db,dc,m,n,k,lda,ldb,ldc,0,0,0,1,nullptr,fused_index);
             return;
@@ -447,8 +447,8 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
                         partial_payload_bytes,partial_bytes,explicit_device_bytes,lowp == 1 ? 1e-6 : 1e-4,nmse,max_abs,cosine,double_max_abs,quantized_double_max_abs);
             if (split_k) std::printf("SGEMM_SPLITK,split_k=%d,partial_ldc=%d,partial_payload_bytes=%zu,partial_guard_bytes=%zu,partial_cap_bytes=%zu,reduction=%s,private_stream=1\n",
                 split_k,ldc,partial_payload_bytes,2*guard*sizeof(float),worksize,split_k == 2 ? "ggml_add" : "ggml_fused_add");
-            if (fused_index == 19 || fused_index == 20) {
-                const bool aligned=std::strcmp(loads_route,"aligned_f32x8") == 0;
+            if (fused_index >= 19 && fused_index <= 25) {
+                const bool aligned=std::strncmp(loads_route,"aligned_f32x8",sizeof("aligned_f32x8")-1) == 0;
                 std::printf("SGEMM_LOADS,tile_index=%d,eligible=%d,used=%d,route=%s\n",fused_index,int(aligned),int(aligned),loads_route);
             }
         } else if (lowp) {
@@ -495,7 +495,7 @@ static void run(int m, int n, int k, int pad, int tile_index = -1, bool plans = 
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc != 1 && argc != 2 && argc != 5 && argc != 6) {
-        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16|fusedn128-bf16|fusedn128-f16|fusedwide-bf16|fusedwide-f16|split2-bf16|split2-f16|split4-bf16|split4-f16|split8-bf16|split8-f16|vector-bf16|vector-f16]] (low precision requires F16RAW)\n",argv[0]);
+        std::fprintf(stderr,"usage: %s [shape_log | m n k pad [tile_index:0..4|plans|blas|f16|bf16|fused-bf16|fused-f16|fused128-bf16|fused128-f16|fusedn128-bf16|fusedn128-f16|fusedwide-bf16|fusedwide-f16|split2-bf16|split2-f16|split4-bf16|split4-f16|split8-bf16|split8-f16|vector-bf16|vector-f16|vector64x128-bf16|vector128x64-bf16|vector-stream-bf16|vector-bstream-bf16|vector128x64w4-bf16]] (low precision requires F16RAW)\n",argv[0]);
         return 1;
     }
     int devices=0;
@@ -517,9 +517,12 @@ int main(int argc, char **argv) {
                               mode == "split2-bf16" ? 13 : mode == "split2-f16" ? 14 :
                               mode == "split4-bf16" ? 15 : mode == "split4-f16" ? 16 :
                               mode == "split8-bf16" ? 17 : mode == "split8-f16" ? 18 :
-                              mode == "vector-bf16" ? 19 : mode == "vector-f16" ? 20 : 0;
+                              mode == "vector-bf16" ? 19 : mode == "vector-f16" ? 20 :
+                              mode == "vector64x128-bf16" ? 21 : mode == "vector128x64-bf16" ? 22 :
+                              mode == "vector-stream-bf16" ? 23 : mode == "vector-bstream-bf16" ? 24 :
+                              mode == "vector128x64w4-bf16" ? 25 : 0;
         const int lowp=(mode == "f16" || fused_index == 6 || fused_index == 8 || fused_index == 10 || fused_index == 12 || fused_index == 14 || fused_index == 16 || fused_index == 18 || fused_index == 20) ? 1 :
-                       (mode == "bf16" || fused_index == 5 || fused_index == 7 || fused_index == 9 || fused_index == 11 || fused_index == 13 || fused_index == 15 || fused_index == 17 || fused_index == 19) ? 2 : 0;
+                       (mode == "bf16" || fused_index == 5 || fused_index == 7 || fused_index == 9 || fused_index == 11 || fused_index == 13 || fused_index == 15 || fused_index == 17 || fused_index == 19 || fused_index == 21 || fused_index == 22 || fused_index == 23 || fused_index == 24 || fused_index == 25) ? 2 : 0;
 #ifndef F16RAW
         if (lowp) { std::fprintf(stderr,"f16/bf16 require a -DF16RAW build\n"); return 1; }
 #endif

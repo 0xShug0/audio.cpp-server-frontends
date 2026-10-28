@@ -84,7 +84,7 @@ __global__ __launch_bounds__(256) void halo_sgemm(
 // threadIdx.x is the wave32 lane: GGML's fragment coordinates require x < 32.
 template<int TileM, typename Packed, int TileN = 64,
          int Nwarps = (TileM == 128 && TileN == 128 ? 8 : 4), int SplitK = 1,
-         bool AlignedLoads = false>
+         bool AlignedLoads = false, bool StreamFragments = false, bool StreamBOnly = false>
 __global__ __launch_bounds__(32 * Nwarps) void halo_sgemm_wmma(
     const float * __restrict__ a, const float * __restrict__ b, float * __restrict__ c,
     int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
@@ -188,21 +188,50 @@ __global__ __launch_bounds__(32 * Nwarps) void halo_sgemm_wmma(
         __syncthreads();
 #pragma unroll
         for (int kp = 0; kp < 16; kp += 8) {
-            tile_AB a_frag[fragments_m];
-            tile_AB b_frag[fragments_n];
+            if constexpr (StreamFragments) {
 #pragma unroll
-            for (int i = 0; i < fragments_m; ++i) {
-                load_ldmatrix(a_frag[i], &aa[wave_row + 16 * i][kp], pitch);
-            }
+                for (int i = 0; i < fragments_m; ++i) {
+                    tile_AB a_frag;
+                    load_ldmatrix(a_frag, &aa[wave_row + 16 * i][kp], pitch);
 #pragma unroll
-            for (int j = 0; j < fragments_n; ++j) {
-                load_ldmatrix(b_frag[j], &bb[wave_col + 16 * j][kp], pitch);
-            }
+                    for (int j = 0; j < fragments_n; ++j) {
+                        tile_AB b_frag;
+                        load_ldmatrix(b_frag, &bb[wave_col + 16 * j][kp], pitch);
+                        mma(acc[i][j], a_frag, b_frag);
+                    }
+                }
+            } else if constexpr (StreamBOnly) {
+                tile_AB a_frag[fragments_m];
 #pragma unroll
-            for (int i = 0; i < fragments_m; ++i) {
+                for (int i = 0; i < fragments_m; ++i) {
+                    load_ldmatrix(a_frag[i], &aa[wave_row + 16 * i][kp], pitch);
+                }
 #pragma unroll
                 for (int j = 0; j < fragments_n; ++j) {
-                    mma(acc[i][j], a_frag[i], b_frag[j]);
+                    tile_AB b_frag;
+                    load_ldmatrix(b_frag, &bb[wave_col + 16 * j][kp], pitch);
+#pragma unroll
+                    for (int i = 0; i < fragments_m; ++i) {
+                        mma(acc[i][j], a_frag[i], b_frag);
+                    }
+                }
+            } else {
+                tile_AB a_frag[fragments_m];
+                tile_AB b_frag[fragments_n];
+#pragma unroll
+                for (int i = 0; i < fragments_m; ++i) {
+                    load_ldmatrix(a_frag[i], &aa[wave_row + 16 * i][kp], pitch);
+                }
+#pragma unroll
+                for (int j = 0; j < fragments_n; ++j) {
+                    load_ldmatrix(b_frag[j], &bb[wave_col + 16 * j][kp], pitch);
+                }
+#pragma unroll
+                for (int i = 0; i < fragments_m; ++i) {
+#pragma unroll
+                    for (int j = 0; j < fragments_n; ++j) {
+                        mma(acc[i][j], a_frag[i], b_frag[j]);
+                    }
                 }
             }
         }
@@ -331,16 +360,72 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
                 a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
             break;
         case 19:
-        case 20: {
+        case 20:
+        case 21:
+        case 22:
+        case 23:
+        case 24:
+        case 25: {
             const bool aligned = reinterpret_cast<std::uintptr_t>(a) % 16 == 0 &&
                 reinterpret_cast<std::uintptr_t>(b) % 16 == 0 &&
                 lda % 4 == 0 && ldb % 4 == 0 && k % 32 == 0 &&
                 (batches <= 1 || (sa % 4 == 0 && sb % 4 == 0));
             if (route != nullptr) {
-                *route = aligned ? "aligned_f32x8" : "wide_guarded";
+                if (tile_index == 21) {
+                    *route = aligned ? "aligned_f32x8_64x128_w8" : "guarded_64x128_w8";
+                } else if (tile_index == 22) {
+                    *route = aligned ? "aligned_f32x8_128x64_w8" : "guarded_128x64_w8";
+                } else if (tile_index == 23) {
+                    *route = aligned ? "aligned_f32x8_stream" : "wide_guarded_stream";
+                } else {
+                    *route = aligned ? "aligned_f32x8" : "wide_guarded";
+                }
             }
             const dim3 grid((m + 127) / 128, (n + 127) / 128, batches);
-            if (tile_index == 19) {
+            if (tile_index == 21) {
+                const dim3 tile_grid((m + 63) / 64, (n + 127) / 128, batches);
+                if (aligned) {
+                    halo_sgemm_wmma<64, nv_bfloat162, 128, 8, 1, true><<<tile_grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<64, nv_bfloat162, 128, 8><<<tile_grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            } else if (tile_index == 22) {
+                const dim3 tile_grid((m + 127) / 128, (n + 63) / 64, batches);
+                if (aligned) {
+                    halo_sgemm_wmma<128, nv_bfloat162, 64, 8, 1, true><<<tile_grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<128, nv_bfloat162, 64, 8><<<tile_grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            } else if (tile_index == 23) {
+                if (aligned) {
+                    halo_sgemm_wmma<128, nv_bfloat162, 128, 8, 1, true, true><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<128, nv_bfloat162, 128, 8, 1, false, true><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            } else if (tile_index == 24) {
+                if (aligned) {
+                    halo_sgemm_wmma<128, nv_bfloat162, 128, 8, 1, true, false, true><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<128, nv_bfloat162, 128, 8, 1, false, false, true><<<grid, dim3(32, 8), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            } else if (tile_index == 25) {
+                const dim3 tile_grid((m + 127) / 128, (n + 63) / 64, batches);
+                if (aligned) {
+                    halo_sgemm_wmma<128, nv_bfloat162, 64, 4, 1, true><<<tile_grid, dim3(32, 4), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                } else {
+                    halo_sgemm_wmma<128, nv_bfloat162, 64, 4><<<tile_grid, dim3(32, 4), 0, stream>>>(
+                        a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
+                }
+            } else if (tile_index == 19) {
                 if (aligned) {
                     halo_sgemm_wmma<128, nv_bfloat162, 128, 8, 1, true><<<grid, dim3(32, 8), 0, stream>>>(
                         a, b, c, m, n, k, lda, ldb, ldc, sa, sb, sc);
@@ -362,7 +447,7 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
 #endif
         default:
 #ifdef F16RAW
-            throw std::invalid_argument("SGEMM tile index must be 0..20");
+            throw std::invalid_argument("SGEMM tile index must be 0..25");
 #else
             throw std::invalid_argument("SGEMM tile index must be 0..4");
 #endif

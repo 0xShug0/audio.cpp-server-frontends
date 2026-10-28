@@ -5,7 +5,7 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads','integrated'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads','integrated','refine'], default='complete')
 args = parser.parse_args()
 root = args.root
 entries = []
@@ -263,8 +263,8 @@ elif args.focus == 'fused':
 elif args.focus == 'dispatch':
     builds = [build for build in builds if build['id'] in {
         'device-health','ggml','matrix-candidate','vulkan'}]
-    new_indices = list(range(221,len(entries)))
-    comparisons = new_indices + [0,1,5,44,48,124,125,208,209,210]
+    new_indices = list(range(209,len(entries)))
+    comparisons = new_indices + [0,1,5,44,48,124,125,202,203,204]
     raw_shapes = [(m,n,k,pad) for m,n,k in (
         (2080,768,5376),(3840,2080,768),(1536,10400,384),(124800,96,672),
         (128,8192,1792),(129,769,5377),(67,131,97)) for pad in (0,3)]
@@ -285,7 +285,7 @@ elif args.focus == 'dispatch':
         dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
             dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
                  '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
-            for i in list(range(221,238)) + [0,1,5,125]]),
+            for i in list(range(209,226)) + [0,1,5,125]]),
         dict(id='counters', build='matrix-candidate', gpu=True, required=False, timeout_s=60, cases=[
             dict(id=group+'-'+mode, argv=['/opt/rocm/bin/rocprofv3','--pmc'] + metrics +
                  ['--output-format','csv','--output-directory','../results/pmc-'+group+'-'+mode,'--',
@@ -340,7 +340,7 @@ elif args.focus == 'loads':
         dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
             dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
                  '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
-            for i in list(range(221,238)) + [0,1,5]]),
+            for i in list(range(209,226)) + [0,1,5]]),
         dict(id='counters', build='matrix-candidate', gpu=True, required=False, timeout_s=90, cases=[
             dict(id=group+'-'+mode, argv=['/opt/rocm/bin/rocprofv3','--pmc'] + metrics +
                  ['--kernel-include-regex','Cijk_|halo_sgemm',
@@ -356,8 +356,8 @@ elif args.focus == 'loads':
 elif args.focus == 'integrated':
     builds = [build for build in builds if build['id'] in {
         'device-health','ggml','framework','vulkan'}]
-    indices = sorted(set(list(range(221,len(entries))) +
-        [0,1,5,22,25,44,48,124,125,189,190,191,205,208,209,210,218]))
+    indices = sorted(set(list(range(209,len(entries))) +
+        [0,1,5,22,25,44,48,124,125,189,190,191,201,202,203,204,208]))
     suites = [
         dict(id='correctness', build='ggml', gpu=True, timeout_s=120, cases=[
             dict(id=f'{i:03d}-candidate', argv=probe + ['test'] + selection +
@@ -375,19 +375,39 @@ elif args.focus == 'integrated':
         dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
             dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
                  '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
-            for i in list(range(221,238)) + [0,1,5,125]]),
+            for i in list(range(209,226)) + [0,1,5,125]]),
         dict(id='trace', build='ggml', gpu=True, required=False, timeout_s=120, cases=[
             dict(id=label, argv=['/opt/rocm/bin/rocprofv3','--kernel-trace',
                  '--output-format','csv','--output-directory','../results/profile-'+label,'--'] +
                  probe + ['test'] + selection + ['--case-index',str(i),'--backend-params','rocm_v2'])
-            for label,i in [('default',236),('strict-f32',250)]]),
+            for label,i in [('default',224),('strict-f32',238)]]),
         dict(id='framework', build='framework', gpu=True, timeout_s=45, cases=[
             dict(id='selection', argv=['build/debug/bin/framework_backend_probe','--require-rocm-v2','--log']),
             dict(id='parsing', argv=['build/debug/bin/backend_config_args_test','--log'])]),
         dict(id='health', build='device-health', gpu=True, timeout_s=15,
              cases=[dict(id='device-after', argv=health['argv'])]),
     ]
-if args.focus not in {'matrix','fused','dispatch','split','loads'}:
+elif args.focus == 'refine':
+    builds = [build for build in builds if build['id'] in {
+        'device-health','ggml','matrix-candidate','vulkan'}]
+    shapes = [(m,n,k,pad) for m,n,k in sorted(captured_shapes | {
+        (128,8192,1792),(128,8192,5376),(256,1024,3584),
+        (129,769,5376),(129,769,5377),(67,131,97)}) for pad in (0,3)]
+    suites = [
+        # Complete integrated correctness is inexpensive relative to machine allocation.
+        next(suite for suite in suites if suite['id'] == 'correctness'),
+        dict(id='matrix', build='matrix-candidate', gpu=True, timeout_s=90, cases=[
+            dict(id=mode+'-'+'-'.join(map(str,shape)), argv=['build/debug/raw-matrix']+
+                 list(map(str,shape))+[mode]) for shape in shapes
+            for mode in ['vector-bf16','vector64x128-bf16','vector128x64-bf16','vector-stream-bf16','vector-bstream-bf16','vector128x64w4-bf16']]),
+        dict(id='vulkan', build='vulkan', gpu=True, timeout_s=90, cases=[
+            dict(id=f'{i:03d}-reference', argv=['../source-vulkan/build/debug/bin/test-backend-ops','perf',
+                 '--suite','rocm-v2','-b','Vulkan0','--case-index',str(i),'--compare-params',''])
+            for i in list(range(209,226)) + [0,1,5]]),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='device-after', argv=health['argv'])]),
+    ]
+if args.focus not in {'matrix','fused','dispatch','split','loads','refine'}:
     builds = [build for build in builds if build['id'] != 'matrix-candidate']
 manifest = dict(version=1, builds=builds, suites=suites, health_check=health)
 (root / 'campaign.json').write_text(json.dumps(manifest, indent=2) + '\n')

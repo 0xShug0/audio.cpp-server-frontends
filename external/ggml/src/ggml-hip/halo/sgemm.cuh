@@ -32,6 +32,20 @@ void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
 // M/N tails are zero-filled; output addressing and WMMA scheduling are unchanged.
 // Optional F16RAW route output is "aligned_f32x8" or "wide_guarded" for 19/20,
 // and nullptr for 0..18. Ineligible inputs use the existing same-dtype wide kernel.
+// BF16-only, unsplit, eight-wave probes sharing the 19/20 alignment gate:
+// 21=64x128 (four accumulator fragments/wave, 15 KiB LDS),
+// 22=128x64 (four accumulator fragments/wave, 15 KiB LDS),
+// 23=128x128 (eight accumulator fragments/wave, 20 KiB LDS), streaming one A
+// fragment and then one B fragment per i/j, preserving each accumulator's K order.
+// Routes: 21 "aligned_f32x8_64x128_w8" / "guarded_64x128_w8";
+// 22 "aligned_f32x8_128x64_w8" / "guarded_128x64_w8";
+// 23 "aligned_f32x8_stream" / "wide_guarded_stream".
+// Guarded routes retain the requested tile, wave count, and fragment schedule.
+// 24=BF16 128x128, eight waves: retain two A fragments and stream one B at a
+// time, keeping the base fragment-load count and per-accumulator K sequence.
+// 25=BF16 128x64, four waves: index 7 geometry with aligned global loading.
+// Both share the 19/20 alignment gate and report "aligned_f32x8" / "wide_guarded";
+// guarded routes preserve their respective tile, wave count, and fragment schedule.
 // Keep explicit-F32 requests on the original overload or indices 0..4.
 void ggml_hip_halo_sgemm(const float * a, const float * b, float * c,
     int64_t m, int64_t n, int64_t k, int64_t lda, int64_t ldb, int64_t ldc,
