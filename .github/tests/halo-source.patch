@@ -258,10 +258,18 @@ index f592d404..61447030 100644
      cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
      cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 diff --git a/external/ggml/src/ggml-cuda/cpy.cu b/external/ggml/src/ggml-cuda/cpy.cu
-index 7434b1d5..2db65cbb 100644
+index 7434b1d5..56331793 100644
 --- a/external/ggml/src/ggml-cuda/cpy.cu
 +++ b/external/ggml/src/ggml-cuda/cpy.cu
-@@ -417,7 +417,14 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
+@@ -1,4 +1,7 @@
+ #include "cpy.cuh"
++#ifdef GGML_USE_HIP
++#include "ggml-hip/implementation.cuh"
++#endif
+ #include "dequantize.cuh"
+ #include "cpy-utils.cuh"
+ #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
+@@ -417,7 +420,14 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
          {
              CUDA_CHECK(cudaMemcpyAsync(src1_ddc, src0_ddc, ggml_nbytes(src0), cudaMemcpyDeviceToDevice, main_stream));
          }
@@ -396,10 +404,18 @@ index 7226f790..42ed1761 100644
      const ggml_tensor * src1 = dst->src[1];
      const float * src1_d = (const float *)src1->data;
 diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
-index d629b805..9726b6c0 100644
+index d629b805..8c3f85f1 100644
 --- a/external/ggml/src/ggml-cuda/mmvq.cu
 +++ b/external/ggml/src/ggml-cuda/mmvq.cu
-@@ -391,7 +391,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int
+@@ -1,4 +1,7 @@
+ #include "mmvq.cuh"
++#ifdef GGML_USE_HIP
++#include "ggml-hip/implementation.cuh"
++#endif
+ #include "quantize.cuh"
+ #include "unary.cuh"
+ #include "vecdotq.cuh"
+@@ -391,7 +394,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int
      return 1;
  }
  
@@ -408,7 +424,7 @@ index d629b805..9726b6c0 100644
  __launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), 1)
  static __global__ void mul_mat_vec_q(
          const void * __restrict__ vx, const void * __restrict__ vy, const int32_t * __restrict__ ids, const ggml_cuda_mm_fusion_args_device fusion, float * __restrict__ dst,
-@@ -408,7 +408,7 @@ static __global__ void mul_mat_vec_q(
+@@ -408,7 +411,7 @@ static __global__ void mul_mat_vec_q(
      constexpr int vdr = get_vdr_mmvq(type);
      constexpr mmvq_parameter_table_id table_id = get_device_table_id();
      constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id);
@@ -417,7 +433,7 @@ index d629b805..9726b6c0 100644
      constexpr int warp_size = ggml_cuda_get_physical_warp_size();
  
      constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
-@@ -1047,6 +1047,35 @@ static void mul_mat_vec_q_switch_type(
+@@ -1047,6 +1050,35 @@ static void mul_mat_vec_q_switch_type(
      }
  }
  
@@ -453,7 +469,7 @@ index d629b805..9726b6c0 100644
  void ggml_cuda_mul_mat_vec_q(
          ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
          const ggml_cuda_mm_fusion_args_host * fusion) {
-@@ -1141,6 +1170,13 @@ void ggml_cuda_mul_mat_vec_q(
+@@ -1141,6 +1173,13 @@ void ggml_cuda_mul_mat_vec_q(
  
      const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
  
@@ -468,10 +484,19 @@ index d629b805..9726b6c0 100644
          src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
          ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
 diff --git a/external/ggml/src/ggml-cuda/norm.cu b/external/ggml/src/ggml-cuda/norm.cu
-index d8a2ae47..4de3a5fc 100644
+index d8a2ae47..715ede56 100644
 --- a/external/ggml/src/ggml-cuda/norm.cu
 +++ b/external/ggml/src/ggml-cuda/norm.cu
-@@ -191,6 +191,43 @@ static __global__ void rms_norm_f32(const float * x,
+@@ -1,4 +1,8 @@
+ #include "norm.cuh"
++#ifdef GGML_USE_HIP
++#include "ggml-hip/implementation.cuh"
++#endif
++#include <climits>
+ #include <cstdint>
+ 
+ template <int block_size>
+@@ -191,6 +195,43 @@ static __global__ void rms_norm_f32(const float * x,
      }
  }
  
@@ -515,7 +540,7 @@ index d8a2ae47..4de3a5fc 100644
  template <typename T, int block_size, bool apply_silu, bool add_bias>
  static __global__ void rms_norm_channels_f32(
          const T *     x,
-@@ -710,6 +747,12 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+@@ -710,6 +751,12 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
      const int64_t s02 = nb02 / ts0;
      const int64_t s03 = nb03 / ts0;
  
@@ -528,7 +553,7 @@ index d8a2ae47..4de3a5fc 100644
      rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
  }
  
-@@ -896,6 +939,13 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor *
+@@ -896,6 +943,13 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor *
      const int mul_nchannels = mul_src->ne[2];
      const int mul_nsamples  = mul_src->ne[3];
  
@@ -2470,10 +2495,10 @@ index aeaddacc..022110e7 100644
      if (argc > 3) {
 diff --git a/external/ggml/src/ggml-hip/halo/cpy.cu b/external/ggml/src/ggml-hip/halo/cpy.cu
 new file mode 100644
-index 00000000..68eb4043
+index 00000000..0f66d1ba
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/halo/cpy.cu
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,56 @@
 +#include "halo.cuh"
 +
 +#include <algorithm>
@@ -2510,7 +2535,8 @@ index 00000000..68eb4043
 +
 +bool ggml_hip_halo_cpy(const ggml_tensor * src, ggml_tensor * dst, hipStream_t stream) {
 +    if (src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
-+        src->ne[0] != dst->ne[0] || src->ne[0] % 4 != 0 ||
++        src->ne[0] != dst->ne[0] || src->ne[0] <= 0 || ggml_nelements(src) == 0 ||
++        src->ne[0] % 4 != 0 ||
 +        src->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
 +        return false;
 +    }
