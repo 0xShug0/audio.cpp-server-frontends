@@ -208,9 +208,47 @@ def hip_baseline_manifest(root):
     return plan
 
 
-def summarize_models(root, baseline_implementation='halo'):
+def typed_manifest(root):
+    plan = hip_baseline_manifest(root)
+    build = next(b for b in plan['builds'] if b['id'] == 'candidate')
+    build['commands'][1].insert(build['commands'][1].index('--parallel'), 'halo_backend_ops')
+    probe = ['build/debug/bin/halo_backend_ops']
+    checks, timing = [], []
+    for impl in ['default', 'halo']:
+        for kind in ['f16', 'bf16', 'q8_0', 'q4_0']:
+            checks.append(dict(id=impl+'-'+kind, argv=probe+[
+                'test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl,
+                '-o', 'MUL_MAT', '-p', 'type_a='+kind]))
+    for slot, impl in enumerate(['default', 'halo', 'halo', 'default']):
+        for kind in ['f16', 'bf16', 'q8_0', 'q4_0']:
+            timing.append(dict(id=f's{slot}-{impl}-{kind}', argv=probe+[
+                'perf', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl,
+                '-o', 'MUL_MAT', '-p', 'type_a='+kind]))
+    timing.append(dict(id='trace', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace',
+        '--output-format', 'csv', '--output-directory', '../results/profile/typed', '--']+probe+[
+            'test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', 'halo',
+            '-o', 'MUL_MAT', '-p', 'type_a=(f16|bf16|q8_0|q4_0)']))
+    models = dict(plan, suites=[s for s in plan['suites'] if s['id'].startswith('yue2-')])
+    models['builds'] = [dict(id='candidate', build_type='Debug', timeout_s=30,
+                            commands=[['ldd', 'build/debug/bin/audiocpp_cli']])]
+    for suite in models['suites']:
+        argv = suite['cases'][0]['argv']
+        index = argv.index('--out-dir') + 1
+        argv[index] = argv[index].replace('../results/wavs/', '../results/models/wavs/')
+    models['suites'].append(dict(id='framework', gpu=False, timeout_s=180, cases=[dict(
+        id='summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results/models',
+                           '--summarize-models', '--baseline-implementation', 'default', '--families', 'yue2'])]))
+    (root/'model-campaign.json').write_text(json.dumps(models, indent=2)+'\n')
+    plan['suites'] = [dict(id='correctness', build='candidate', gpu=True, timeout_s=480, cases=checks),
+                      dict(id='framework', build='candidate', gpu=True, timeout_s=900, cases=timing)]
+    return plan
+
+
+def summarize_models(root, baseline_implementation='halo', families=None):
     report = {}
     for family, requests in model_requests().items():
+        if families and family not in families:
+            continue
         names = [r['id'] for r in requests]
         rows, audio = [], {}
         for variant in ['a1', 'b1', 'b2', 'a2']:
@@ -411,12 +449,14 @@ if __name__ == '__main__':
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--source', type=Path)
     parser.add_argument('--baseline-implementation',choices=['default','halo'],default='halo')
+    parser.add_argument('--families', nargs='+')
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--operators', action='store_true')
     actions.add_argument('--followup', action='store_true')
     actions.add_argument('--select-candidate', action='store_true')
     actions.add_argument('--models', action='store_true')
     actions.add_argument('--hip-baseline', action='store_true')
+    actions.add_argument('--typed', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -430,7 +470,7 @@ if __name__ == '__main__':
     elif args.summarize_operators:
         summarize_operators(args.root)
     elif args.summarize_models:
-        summarize_models(args.root,args.baseline_implementation)
+        summarize_models(args.root,args.baseline_implementation,args.families)
     else:
-        plan = hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')
