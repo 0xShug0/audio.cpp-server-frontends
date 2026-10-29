@@ -1,0 +1,5 @@
+cf73f414e8d81db8f424f5ea8160495cd4f5b033ea94aee0a91e8148fab1061c  external/ggml/src/ggml-cuda/mmvq.cu
+a11bc8bc8b91566527d97e612844ae36a8c753b9992884bf530827cfda8f4da5  external/ggml/src/ggml-cuda/ggml-cuda.cu
+43a4b5c5ad9bd899a56215cc24f9399af783d323c614cf1f618b9812d21af483  external/ggml/src/ggml-hip/implementation.cuh
+bf6e3ca83274d8f09d3058e8f71f8e6b6639fd993aed0f45589604cc1c24902e  external/ggml/src/ggml-hip/halo/halo.cuh
+9072c8df83bfda02be66eb2018f3dff1ee5705d2fbddb4d573bc39471b5de907  external/ggml/src/ggml-hip/halo/cpy.cu

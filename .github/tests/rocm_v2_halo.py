@@ -193,7 +193,22 @@ def model_manifest(root, candidate='.', output='../results/models'):
     return dict(version=1, builds=builds, health_check=plan['health_check'], suites=suites)
 
 
-def summarize_models(root):
+def hip_baseline_manifest(root):
+    plan = model_manifest(root, output='../results')
+    plan['builds'] = [b for b in plan['builds'] if b['id'] != 'baseline']
+    for suite in plan['suites']:
+        if suite.get('build') == 'baseline':
+            suite['build'] = 'candidate'
+            for case in suite['cases']:
+                argv = case['argv']
+                argv[0] = './build/debug/bin/audiocpp_cli'
+                index = argv.index('--backend-impl')
+                del argv[index:index + 2]
+    plan['suites'][-1]['cases'][0]['argv'] += ['--baseline-implementation','default']
+    return plan
+
+
+def summarize_models(root, baseline_implementation='halo'):
     report = {}
     for family, requests in model_requests().items():
         names = [r['id'] for r in requests]
@@ -201,8 +216,15 @@ def summarize_models(root):
         for variant in ['a1', 'b1', 'b2', 'a2']:
             label = family + '-' + variant
             text = (root / 'case' / label / 'session.log').read_text()
-            if 'implementation=halo' not in text or 'session.wall_ms' not in text:
-                raise ValueError('Missing implementation or canonical timing: ' + label)
+            selected_halo = 'implementation=halo' in text
+            expected_halo = baseline_implementation == 'halo' or variant.startswith('b')
+            command = json.loads(text.splitlines()[0])['argv']
+            if selected_halo != expected_halo or 'session.wall_ms' not in text:
+                raise ValueError('Wrong implementation or missing canonical timing: ' + label)
+            if not expected_halo and '--backend-impl' in command:
+                raise ValueError('Original HIP baseline must omit --backend-impl: ' + label)
+            if expected_halo and command[command.index('--backend-impl') + 1] != 'halo':
+                raise ValueError('Candidate must explicitly select Halo: ' + label)
             metrics = {}
             for name, key, value in re.findall(r'^metrics\[([^\]]+)\]\.([^=]+)=(.*)$', text, re.M):
                 metrics.setdefault(name, {})[key] = value
@@ -247,6 +269,7 @@ def summarize_models(root):
         repeated, original = names[-1], names[1]
         repeats = {v: audio[v, original] == audio[v, repeated] for v in ['a1','b1','b2','a2']}
         report[family] = dict(rows=rows, aggregate=aggregate, parity=parity, repeat_pcm_identical=repeats)
+    (root / 'comparison.json').write_text(json.dumps(dict(baseline_implementation=baseline_implementation, candidate_implementation='halo'),indent=2) + '\n')
     (root / 'models-summary.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
     print(json.dumps({k: dict(aggregate=v['aggregate'], repeat_pcm_identical=v['repeat_pcm_identical'])
                       for k,v in report.items()}, indent=2))
@@ -387,11 +410,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--source', type=Path)
+    parser.add_argument('--baseline-implementation',choices=['default','halo'],default='halo')
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--operators', action='store_true')
     actions.add_argument('--followup', action='store_true')
     actions.add_argument('--select-candidate', action='store_true')
     actions.add_argument('--models', action='store_true')
+    actions.add_argument('--hip-baseline', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -405,7 +430,7 @@ if __name__ == '__main__':
     elif args.summarize_operators:
         summarize_operators(args.root)
     elif args.summarize_models:
-        summarize_models(args.root)
+        summarize_models(args.root,args.baseline_implementation)
     else:
-        plan = operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

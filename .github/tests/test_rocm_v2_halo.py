@@ -8,7 +8,7 @@ import re
 from unittest.mock import patch
 import rocm_v2_halo
 from rocm_v2_campaign import validate_manifest
-from rocm_v2_halo import manifest, operator_manifest, model_manifest, model_requests, followup_manifest, select_candidate
+from rocm_v2_halo import manifest, operator_manifest, model_manifest, model_requests, followup_manifest, select_candidate, hip_baseline_manifest
 
 
 class HaloCampaignTests(unittest.TestCase):
@@ -112,6 +112,30 @@ class HaloCampaignTests(unittest.TestCase):
                     self.assertEqual((source/name).read_bytes(),(results/'selected-source'/name).read_bytes())
                 if not accept:
                     self.assertTrue(all((source/name).read_bytes()==(copy/name).read_bytes() for name in names))
+
+    def test_original_hip_baseline_omits_selector_and_uses_same_binary(self):
+        plan = hip_baseline_manifest(Path('.'))
+        validate_manifest(plan)
+        self.assertEqual([b['id'] for b in plan['builds']],['device-health','candidate'])
+        for family in model_requests():
+            paired=[]
+            for v in ['a1','b1','b2','a2']:
+                suite=next(s for s in plan['suites'] if s['id']==family+'-'+v)
+                self.assertEqual(suite['build'],'candidate')
+                argv=suite['cases'][0]['argv'].copy()
+                self.assertEqual(argv[0],'./build/debug/bin/audiocpp_cli')
+                if v.startswith('a'):
+                    self.assertNotIn('--backend-impl',argv)
+                else:
+                    index=argv.index('--backend-impl')
+                    self.assertEqual(argv[index+1],'halo')
+                    del argv[index:index+2]
+                argv[argv.index('--out-dir')+1]='<out>'
+                self.assertIn('../results/wavs/'+family+'-',suite['cases'][0]['argv'][suite['cases'][0]['argv'].index('--out-dir')+1])
+                paired.append(argv)
+            self.assertTrue(all(x==paired[0] for x in paired))
+        summary=plan['suites'][-1]['cases'][0]['argv']
+        self.assertEqual(summary[-2:],['--baseline-implementation','default'])
 
     def test_selection_changes_only_implementation(self):
         plan = manifest(Path('.'))

@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline]
         default: complete
   push:
     branches: [experiment/rocm-v2-probes]
@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   prepare:
@@ -41,6 +42,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
+          if [[ "$VALIDATION_GROUP" == hip-baseline ]]; then
+            mkdir -p source/.github/tests
+            cp .github/tests/rocm_v2_*.py .github/tests/halo-hip-baseline.patch .github/tests/halo-hip-baseline-sha256.txt source/.github/tests/
+            python3 source/.github/tests/rocm_v2_halo.py --root source --hip-baseline
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            tar -czf probe-source.tar.gz source
+            du -h probe-source.tar.gz
+            exit 0
+          fi
           mkdir -p source/toolchain
           curl --fail --location --max-time 120 --retry 2 \
             -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
@@ -182,13 +192,28 @@ jobs:
         with:
           name: validation-inputs
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.focus == 'hip-baseline' }}
+        with:
+          name: validation-inputs
+          run-id: 40824970260
+          github-token: ${{ github.token }}
+          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/previous
       - name: Prepare check environment
         shell: bash
         run: |
           set -euo pipefail
           ulimit -c 0
+          if [[ "$VALIDATION_GROUP" == hip-baseline ]]; then
+            tar -xzf previous/probe-source.tar.gz source
+          fi
           tar -xzf probe-source.tar.gz
           mkdir -p results
+          if [[ "$VALIDATION_GROUP" == hip-baseline ]]; then
+            (cd source && git apply --check .github/tests/halo-hip-baseline.patch && git apply .github/tests/halo-hip-baseline.patch)
+            (cd source && sha256sum --check .github/tests/halo-hip-baseline-sha256.txt) > results/source-integrity.log
+            cp source/.github/tests/halo-hip-baseline-sha256.txt results/
+          fi
           if [[ -f source/inputs/input-sha256.txt ]]; then
             (cd source && sha256sum --check inputs/input-sha256.txt) > results/input-integrity.log
             cp source/inputs/model-provenance.json results/

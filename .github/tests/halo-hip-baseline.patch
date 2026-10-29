@@ -1,0 +1,123 @@
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 0447e7f..2da4515 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5695,7 +5695,7 @@ static ggml_backend_t ggml_backend_hip_init_with_implementation(
+         return nullptr;
+     }
+     static const ggml_hip_implementation halo = {
+-        "halo", ggml_hip_halo_mul_mat, ggml_hip_halo_im2col, ggml_hip_halo_cpy, ggml_hip_halo_mmvq,
++        "halo", ggml_hip_halo_mul_mat, ggml_hip_halo_im2col, ggml_hip_halo_cpy,
+     };
+     ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
+     if (backend) {
+diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
+index 8535129..d629b80 100644
+--- a/external/ggml/src/ggml-cuda/mmvq.cu
++++ b/external/ggml/src/ggml-cuda/mmvq.cu
+@@ -1,7 +1,4 @@
+ #include "mmvq.cuh"
+-#ifdef GGML_USE_HIP
+-#include "ggml-hip/implementation.cuh"
+-#endif
+ #include "quantize.cuh"
+ #include "unary.cuh"
+ #include "vecdotq.cuh"
+@@ -394,7 +391,7 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int
+     return 1;
+ }
+ 
+-template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false, bool residual_only = false, int halo_rows = 0>
++template <ggml_type type, int ncols_dst, bool has_fusion, bool small_k = false, bool residual_only = false>
+ __launch_bounds__(calc_nwarps(type, ncols_dst, get_device_table_id())*ggml_cuda_get_physical_warp_size(), 1)
+ static __global__ void mul_mat_vec_q(
+         const void * __restrict__ vx, const void * __restrict__ vy, const int32_t * __restrict__ ids, const ggml_cuda_mm_fusion_args_device fusion, float * __restrict__ dst,
+@@ -411,7 +408,7 @@ static __global__ void mul_mat_vec_q(
+     constexpr int vdr = get_vdr_mmvq(type);
+     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+     constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id);
+-    constexpr int rows_per_cuda_block = halo_rows ? halo_rows : calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
++    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
+     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+ 
+     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+@@ -1050,36 +1047,6 @@ static void mul_mat_vec_q_switch_type(
+     }
+ }
+ 
+-#ifdef GGML_USE_HIP
+-bool ggml_hip_halo_mmvq(const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
+-                        const void * quantized, const ggml_cuda_mm_fusion_args_device * fusion,
+-                        hipStream_t stream) {
+-    if (src0->type != GGML_TYPE_Q8_0 || src0->ne[0] < 512 || src0->ne[1] < 1024 ||
+-        src0->ne[1] % 4 != 0 ||
+-        src1->ne[1] != 1 || src0->ne[2] != 1 || src0->ne[3] != 1 ||
+-        src1->ne[2] != 1 || src1->ne[3] != 1) {
+-        return false;
+-    }
+-    const dim3 grid(src0->ne[1] / 4);
+-    const dim3 block(32, 1);
+-    const auto launch = [&](auto fused_tag) {
+-        constexpr bool fused = decltype(fused_tag)::value;
+-        mul_mat_vec_q<GGML_TYPE_Q8_0, 1, fused, false, false, 4><<<grid, block, 0, stream>>>(
+-            src0->data, quantized, nullptr, *fusion, static_cast<float *>(dst->data),
+-            src0->ne[0], make_uint3(0, 0, 0), src0->nb[1] / sizeof(block_q8_0),
+-            GGML_PAD(src1->ne[0], MATRIX_ROW_PADDING) / QK8_1, dst->nb[1] / sizeof(float),
+-            init_fastdiv_values(1), src0->nb[2] / sizeof(block_q8_0), 0, dst->nb[2] / sizeof(float),
+-            init_fastdiv_values(1), src0->nb[3] / sizeof(block_q8_0), 0, dst->nb[3] / sizeof(float), 0);
+-    };
+-    if (fusion->gate || fusion->x_bias || fusion->gate_bias) {
+-        launch(std::true_type{});
+-    } else {
+-        launch(std::false_type{});
+-    }
+-    return true;
+-}
+-#endif
+-
+ void ggml_cuda_mul_mat_vec_q(
+         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
+         const ggml_cuda_mm_fusion_args_host * fusion) {
+@@ -1174,13 +1141,6 @@ void ggml_cuda_mul_mat_vec_q(
+ 
+     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
+ 
+-#ifdef GGML_USE_HIP
+-    if (!ids && ctx.implementation && ctx.implementation->mmvq &&
+-        !fusion_local.residual_only &&
+-        ctx.implementation->mmvq(src0, src1, dst, src1_q8_1.get(), &fusion_local, stream)) {
+-        return;
+-    }
+-#endif
+     mul_mat_vec_q_switch_type(
+         src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
+         ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
+diff --git a/external/ggml/src/ggml-hip/halo/halo.cuh b/external/ggml/src/ggml-hip/halo/halo.cuh
+index 1377bd2..366126e 100644
+--- a/external/ggml/src/ggml-hip/halo/halo.cuh
++++ b/external/ggml/src/ggml-hip/halo/halo.cuh
+@@ -6,5 +6,3 @@ bool ggml_hip_halo_mul_mat(const ggml_tensor *, const ggml_tensor *, ggml_tensor
+ bool ggml_hip_halo_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t);
+ 
+ bool ggml_hip_halo_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
+-bool ggml_hip_halo_mmvq(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, const void *,
+-                        const ggml_cuda_mm_fusion_args_device *, hipStream_t);
+diff --git a/external/ggml/src/ggml-hip/implementation.cuh b/external/ggml/src/ggml-hip/implementation.cuh
+index 8c71ae3..508d69b 100644
+--- a/external/ggml/src/ggml-hip/implementation.cuh
++++ b/external/ggml/src/ggml-hip/implementation.cuh
+@@ -3,14 +3,10 @@
+ #include "ggml.h"
+ #include <hip/hip_runtime.h>
+ 
+-struct ggml_cuda_mm_fusion_args_device;
+-
+ // False means ineligible, before any kernel launches. Execution errors are not retried.
+ struct ggml_hip_implementation {
+     const char * name;
+     bool (*mul_mat)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t);
+     bool (*im2col)(const ggml_tensor *, ggml_tensor *, hipStream_t);
+     bool (*cpy)(const ggml_tensor *, ggml_tensor *, hipStream_t);
+-    bool (*mmvq)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, const void *,
+-                 const ggml_cuda_mm_fusion_args_device *, hipStream_t);
+ };
