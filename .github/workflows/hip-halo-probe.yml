@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m unittest discover -s .github/tests -p test_rocm_v2_campaign.py -v
+          python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
           mkdir -p source/toolchain
           curl --fail --location --max-time 120 --retry 2 \
             -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
@@ -64,8 +64,6 @@ jobs:
             git -C source apply --check ../.github/tests/rocm-v2-model.patch
             git -C source apply ../.github/tests/rocm-v2-model.patch
             python3 .github/tests/rocm_v2_qwen.py --prepare source
-            curl --fail --location --max-time 180 --retry 2 -o source/toolchain/miniforge.sh https://github.com/conda-forge/miniforge/releases/download/25.3.1-0/Miniforge3-Linux-x86_64.sh
-            sha256sum source/toolchain/miniforge.sh > source/miniforge-sha256.txt
           fi
           cp -a source/external/ggml source-vulkan
           cat >> source/external/ggml/CMakeLists.txt <<'CMAKE'
@@ -94,21 +92,9 @@ jobs:
           cp .github/tests/rocm_v2_*.py source/.github/tests/
           cp .github/tests/rocm-v2-cases.tsv source/.github/tests/
           cp source-commit.txt source/
-          sha256sum .github/tests/rocm-v2-source.patch > source/patch-sha256.txt
+          sha256sum .github/tests/rocm-v2-source.patch .github/tests/rocm-v2-framework.patch .github/tests/rocm-v2-model.patch > source/patch-sha256.txt
           python3 source/.github/tests/rocm_v2_manifest.py --root source --focus "$VALIDATION_GROUP"
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
-          if [[ "$VALIDATION_GROUP" == qwen ]]; then
-            python3 - <<'PY'
-          import json, subprocess
-          from pathlib import Path
-          root = Path('source')
-          build = next(item for item in json.loads((root / 'campaign.json').read_text())['builds'] if item['id'] == 'model')
-          with (root / 'conda-setup-preflight.log').open('w') as log:
-              subprocess.run(build['commands'][0], cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
-              subprocess.run(['toolchain/conda/bin/python', '-m', 'conda', 'run', '--no-capture-output', '-n', 'qwen3-tts', '/bin/true'], cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
-          PY
-            rm -rf source/toolchain/conda
-          fi
           if [[ "$VALIDATION_GROUP" == complete ]]; then
             cmake -S source/external/ggml -B source/build/debug -G Ninja \
               -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF \
@@ -152,6 +138,11 @@ jobs:
           ulimit -c 0
           tar -xzf probe-source.tar.gz
           mkdir -p results
+          if [[ -f source/inputs/input-sha256.txt ]]; then
+            (cd source && sha256sum --check inputs/input-sha256.txt) > results/input-integrity.log
+            cp source/inputs/model-provenance.json results/
+            cp source/inputs/qwen-requests.json results/
+          fi
           echo "campaign_deadline=$(( $(date +%s) + 2400 ))" >> "$GITHUB_ENV"
           echo "$PWD/source/toolchain" >> "$GITHUB_PATH"
           source/toolchain/ccache --version > results/ccache.log
