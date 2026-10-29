@@ -32,7 +32,7 @@ def prepare(root):
         ('long', 'At the edge of the village stood a small observatory. Every evening, Mara climbed the stairs and opened the heavy shutters before the stars appeared. She wrote down what she saw in a notebook, including the weather, the brightness of the moon, and any unusual lights above the hills. One evening a group of children came to visit. They expected a complicated lesson, but she simply asked them to look through the telescope. There was Saturn, surrounded by its pale rings. For a moment nobody spoke. Then one child asked whether the planet had always been waiting there for them. Mara smiled and said that some things become new only when we finally notice them.'),
     ]
     rows = [dict(id=name, text=text, voice_ref='reference.wav', language='English', seed=1234,
-                 options=dict(temperature=0.0, x_vector_only_mode=True)) for name, text in texts]
+                 options=dict(x_vector_only_mode=True)) for name, text in texts]
     rows.append({**rows[1], 'id': 'short_repeat'})
     (inputs / 'qwen-requests.json').write_text(json.dumps(rows, indent=2))
     (inputs / 'qwen-trace.json').write_text(json.dumps(rows[:2], indent=2))
