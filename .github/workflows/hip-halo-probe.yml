@@ -46,7 +46,7 @@ jobs:
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             git -C source fetch --no-tags --depth=1 --filter=blob:none origin 46e3893bec3be00f24e8db742ec4a03283a53746
-            git -C source sparse-checkout set include src app docs model_specs tools/cmake webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source checkout --detach FETCH_HEAD
             git -C source rev-parse HEAD > source/source-commit.txt
             mkdir -p source/.github/tests source/toolchain source/inputs
