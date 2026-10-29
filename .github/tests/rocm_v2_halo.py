@@ -209,6 +209,34 @@ def hip_baseline_manifest(root):
 
 
 
+def irodori_main_manifest(root):
+    plan = qwen_manifest(root)
+    build = plan['builds'][1]
+    build['commands'][0] = [x.replace('-DAUDIOCPP_MODELS=qwen3_tts', '-DAUDIOCPP_MODELS=irodori_tts')
+                             for x in build['commands'][0]]
+    def command(label, selected):
+        argv = ['build/debug/bin/audiocpp_cli', '--task', 'tts', '--family', 'irodori_tts',
+                '--backend', 'hip', '--threads', '8', '--model', 'inputs/irodori.gguf',
+                '--request-sequence', 'inputs/irodori_tts-requests.json',
+                '--out-dir', '../results/wavs/irodori_tts-' + label, '--log', '--metrics']
+        if selected:
+            argv += ['--backend-impl', 'gfx1151_v1']
+        return argv
+    suites = [dict(id='correctness', build='model', gpu=True, timeout_s=30,
+                   cases=[dict(id='health', argv=['build/debug/device-health', 'health'])])]
+    for label in ['a1', 'b1', 'b2', 'a2']:
+        suites.append(dict(id='irodori_tts-' + label, build='model', gpu=True, timeout_s=600,
+                           cases=[dict(id='session', argv=command(label, label.startswith('b')))]))
+    suites.append(dict(id='framework', build='model', gpu=True, timeout_s=300,
+        cases=[dict(id='trace', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+            '--output-directory', '../results/profile/gfx1151_v1', '--'] + command('trace', True))]))
+    suites.append(dict(id='report', build='model', gpu=False, timeout_s=120,
+        cases=[dict(id='summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results',
+            '--summarize-models', '--families', 'irodori_tts', '--baseline-implementation', 'default',
+            '--candidate-implementation', 'gfx1151_v1'])]))
+    return dict(version=1, builds=plan['builds'], health_check=plan['health_check'], suites=suites)
+
+
 def ggml_v1_manifest(root):
     plan = operator_manifest(root)
     probe = ['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
@@ -250,7 +278,7 @@ def typed_manifest(root):
     return plan
 
 
-def summarize_models(root, baseline_implementation='halo', families=None):
+def summarize_models(root, baseline_implementation='halo', families=None, candidate_implementation='halo'):
     report = {}
     for family, requests in model_requests().items():
         if families and family not in families:
@@ -260,14 +288,14 @@ def summarize_models(root, baseline_implementation='halo', families=None):
         for variant in ['a1', 'b1', 'b2', 'a2']:
             label = family + '-' + variant
             text = (root / 'case' / label / 'session.log').read_text()
-            selected_halo = 'implementation=halo' in text
-            expected_halo = baseline_implementation == 'halo' or variant.startswith('b')
+            selected_halo = ('implementation=' + candidate_implementation) in text
+            expected_halo = baseline_implementation == candidate_implementation or variant.startswith('b')
             command = json.loads(text.splitlines()[0])['argv']
             if selected_halo != expected_halo or 'session.wall_ms' not in text:
                 raise ValueError('Wrong implementation or missing canonical timing: ' + label)
             if not expected_halo and '--backend-impl' in command:
                 raise ValueError('Original HIP baseline must omit --backend-impl: ' + label)
-            if expected_halo and command[command.index('--backend-impl') + 1] != 'halo':
+            if expected_halo and command[command.index('--backend-impl') + 1] != candidate_implementation:
                 raise ValueError('Candidate must explicitly select Halo: ' + label)
             metrics = {}
             for name, key, value in re.findall(r'^metrics\[([^\]]+)\]\.([^=]+)=(.*)$', text, re.M):
@@ -313,7 +341,7 @@ def summarize_models(root, baseline_implementation='halo', families=None):
         repeated, original = names[-1], names[1]
         repeats = {v: audio[v, original] == audio[v, repeated] for v in ['a1','b1','b2','a2']}
         report[family] = dict(rows=rows, aggregate=aggregate, parity=parity, repeat_pcm_identical=repeats)
-    (root / 'comparison.json').write_text(json.dumps(dict(baseline_implementation=baseline_implementation, candidate_implementation='halo'),indent=2) + '\n')
+    (root / 'comparison.json').write_text(json.dumps(dict(baseline_implementation=baseline_implementation, candidate_implementation=candidate_implementation),indent=2) + '\n')
     (root / 'models-summary.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
     print(json.dumps({k: dict(aggregate=v['aggregate'], repeat_pcm_identical=v['repeat_pcm_identical'])
                       for k,v in report.items()}, indent=2))
@@ -457,6 +485,7 @@ if __name__ == '__main__':
     parser.add_argument('--source', type=Path)
     parser.add_argument('--baseline-implementation',choices=['default','halo'],default='halo')
     parser.add_argument('--families', nargs='+')
+    parser.add_argument('--candidate-implementation', default='halo')
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--operators', action='store_true')
     actions.add_argument('--followup', action='store_true')
@@ -465,6 +494,7 @@ if __name__ == '__main__':
     actions.add_argument('--hip-baseline', action='store_true')
     actions.add_argument('--typed', action='store_true')
     actions.add_argument('--ggml-v1', action='store_true')
+    actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -478,7 +508,7 @@ if __name__ == '__main__':
     elif args.summarize_operators:
         summarize_operators(args.root)
     elif args.summarize_models:
-        summarize_models(args.root,args.baseline_implementation,args.families)
+        summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation)
     else:
-        plan = ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

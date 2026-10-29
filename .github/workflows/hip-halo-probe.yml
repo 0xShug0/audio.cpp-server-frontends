@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -42,6 +42,53 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
+          if [[ "$VALIDATION_GROUP" == irodori-main ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin 46e3893bec3be00f24e8db742ec4a03283a53746
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source checkout --detach FETCH_HEAD
+            git -C source rev-parse HEAD > source/source-commit.txt
+            mkdir -p source/.github/tests source/toolchain source/inputs
+            cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            cp .github/tests/halo-model-files.json source/.github/tests/
+            curl --fail --location --max-time 120 --retry 2 -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+            tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain ccache-4.13.6-linux-x86_64-musl-static/ccache
+            python3 - <<'PYTHON'
+          import hashlib, json, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/tests')
+          from rocm_v2_halo import model_requests
+          root = Path('source')
+          record = next(r for r in json.loads(Path('.github/tests/halo-model-files.json').read_text()) if r['destination'] == 'inputs/irodori.gguf')
+          target = root / record['destination']
+          url = 'https://huggingface.co/{repo}/resolve/{revision}/{file}?download=true'.format(**record)
+          subprocess.run(['curl', '--fail', '--location', '--connect-timeout', '20', '--max-time', '600', '--retry', '2', '-o', str(target), url], check=True)
+          with target.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          assert digest == record['sha256'] and target.stat().st_size == record['size'], 'model integrity mismatch'
+          requests = root / 'inputs/irodori_tts-requests.json'
+          requests.write_text(json.dumps(model_requests()['irodori_tts'], ensure_ascii=False, indent=2) + '\n')
+          (root / 'inputs/model-provenance.json').write_text(json.dumps([record], indent=2))
+          with requests.open('rb') as stream:
+              request_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          (root / 'inputs/input-sha256.txt').write_text(digest + '  inputs/irodori.gguf\n' + request_digest + '  inputs/irodori_tts-requests.json\n')
+          hashes = []
+          for name in subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0'):
+              file = root / name
+              if name and file.is_file():
+                  with file.open('rb') as stream:
+                      hashes.append(hashlib.file_digest(stream, 'sha256').hexdigest() + '  ' + name)
+          manifest = '\n'.join(hashes) + '\n'
+          (root / 'main-source-sha256.txt').write_text(manifest)
+          (root / 'patch-sha256.txt').write_text(manifest)
+          PYTHON
+            python3 source/.github/tests/rocm_v2_halo.py --root source --irodori-main
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+            du -h probe-source.tar.gz
+            exit 0
+          fi
           if [[ "$VALIDATION_GROUP" == ggml-v1 ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
@@ -266,6 +313,10 @@ jobs:
             (cd source && sha256sum --check .github/tests/halo-hip-baseline-sha256.txt) > results/source-integrity.log
             cp source/.github/tests/halo-hip-baseline-sha256.txt results/
           fi
+          if [[ "$VALIDATION_GROUP" == irodori-main ]]; then
+            (cd source && sha256sum --check main-source-sha256.txt) > results/source-integrity.log
+            cp source/main-source-sha256.txt results/
+          fi
           if [[ "$VALIDATION_GROUP" == ggml-v1 ]]; then
             (cd source && sha256sum --check ggml-source-sha256.txt) > results/source-integrity.log
             cp source/ggml-source-sha256.txt source/cpu-preflight.log results/
@@ -351,7 +402,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}

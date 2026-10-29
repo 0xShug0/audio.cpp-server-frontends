@@ -28,6 +28,35 @@ class HaloCampaignTests(unittest.TestCase):
         self.assertNotIn('https://', json.dumps(plan))
         self.assertNotIn('conda', json.dumps(plan))
 
+    def test_irodori_current_main_has_one_build_and_serial_abba(self):
+        plan = rocm_v2_halo.irodori_main_manifest(Path('.'))
+        validate_manifest(plan)
+        self.assertEqual(len(plan['builds']), 2)
+        model = plan['builds'][1]
+        self.assertIn('-DAUDIOCPP_MODELS=irodori_tts', model['commands'][0])
+        self.assertIn('-DCMAKE_BUILD_TYPE=Debug', model['commands'][0])
+        self.assertEqual(model['commands'][1][-2:], ['--parallel', '8'])
+        normalized = []
+        for label in ['a1', 'b1', 'b2', 'a2']:
+            suite = next(s for s in plan['suites'] if s['id'] == 'irodori_tts-' + label)
+            argv = suite['cases'][0]['argv'].copy()
+            self.assertEqual(argv[0], 'build/debug/bin/audiocpp_cli')
+            self.assertIn('--log', argv)
+            self.assertIn('--metrics', argv)
+            if label.startswith('a'):
+                self.assertNotIn('--backend-impl', argv)
+            else:
+                idx = argv.index('--backend-impl')
+                self.assertEqual(argv[idx+1], 'gfx1151_v1')
+                del argv[idx:idx+2]
+            argv[argv.index('--out-dir')+1] = '<out>'
+            normalized.append(argv)
+        self.assertTrue(all(c == normalized[0] for c in normalized))
+        self.assertNotIn('conda', json.dumps(plan))
+        self.assertNotIn('pip install', json.dumps(plan))
+        self.assertNotIn('max_tokens', json.dumps(model_requests()['irodori_tts']))
+        self.assertEqual(plan['suites'][-1]['cases'][0]['argv'][-1], 'gfx1151_v1')
+
     def test_native_and_portable(self):
         plan = manifest(Path('/hosted/source'))
         self.assertEqual(plan, manifest(Path('/runner/source')))
