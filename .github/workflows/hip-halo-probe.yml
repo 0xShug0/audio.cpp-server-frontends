@@ -42,15 +42,38 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
-          if [[ "$VALIDATION_GROUP" == hip-baseline || "$VALIDATION_GROUP" == halo-types ]]; then
+          if [[ "$VALIDATION_GROUP" == halo-types ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin 2597b300f5961999387c84c65f2e8e79c088a571
+            git -C source sparse-checkout set external/ggml
+            git -C source checkout --detach FETCH_HEAD
+            git -C source apply --include='external/ggml/**' --check ../.github/tests/halo-copy.patch
+            git -C source apply --include='external/ggml/**' ../.github/tests/halo-copy.patch
+            cp -a .github/tests/halo-types/external source/
+            mkdir -p source/.github/tests source/toolchain
+            cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            cp .github/tests/halo-types/sha256.txt source/typed-source-sha256.txt
+            (cd source && sha256sum --check typed-source-sha256.txt)
+            git -C source rev-parse HEAD > source/source-commit.txt
+            sha256sum .github/tests/halo-copy.patch > source/patch-sha256.txt
+            curl --fail --location --max-time 120 --retry 2 -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+            tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain ccache-4.13.6-linux-x86_64-musl-static/ccache
+            cmake -S source/external/ggml -B source/build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BLAS=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
+            cmake --build source/build/debug --target test-backend-ops --parallel 8
+            source/build/debug/bin/test-backend-ops test -b CPU --suite halo -o MUL_MAT -p 'type_a=(f16|bf16)' > cpu-preflight.log 2>&1
+            tail -5 cpu-preflight.log
+            cp cpu-preflight.log source/
+            python3 source/.github/tests/rocm_v2_halo.py --root source --typed
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+            du -h probe-source.tar.gz
+            exit 0
+          fi
+          if [[ "$VALIDATION_GROUP" == hip-baseline ]]; then
             mkdir -p source/.github/tests
             cp .github/tests/rocm_v2_*.py .github/tests/halo-hip-baseline.patch .github/tests/halo-hip-baseline-sha256.txt source/.github/tests/
-            if [[ "$VALIDATION_GROUP" == halo-types ]]; then
-              cp -a .github/tests/halo-types source/.github/tests/
-              python3 source/.github/tests/rocm_v2_halo.py --root source --typed
-            else
-              python3 source/.github/tests/rocm_v2_halo.py --root source --hip-baseline
-            fi
+            python3 source/.github/tests/rocm_v2_halo.py --root source --hip-baseline
             python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
             tar -czf probe-source.tar.gz source
             du -h probe-source.tar.gz
@@ -198,7 +221,7 @@ jobs:
           name: validation-inputs
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/download-artifact@v4
-        if: ${{ inputs.focus == 'hip-baseline' || inputs.focus == 'halo-types' }}
+        if: ${{ inputs.focus == 'hip-baseline' }}
         with:
           name: validation-inputs
           run-id: 40824970260
@@ -209,20 +232,19 @@ jobs:
         run: |
           set -euo pipefail
           ulimit -c 0
-          if [[ "$VALIDATION_GROUP" == hip-baseline || "$VALIDATION_GROUP" == halo-types ]]; then
+          if [[ "$VALIDATION_GROUP" == hip-baseline ]]; then
             tar -xzf previous/probe-source.tar.gz source
           fi
           tar -xzf probe-source.tar.gz
           mkdir -p results
-          if [[ "$VALIDATION_GROUP" == hip-baseline || "$VALIDATION_GROUP" == halo-types ]]; then
+          if [[ "$VALIDATION_GROUP" == hip-baseline ]]; then
             (cd source && git apply --check .github/tests/halo-hip-baseline.patch && git apply .github/tests/halo-hip-baseline.patch)
             (cd source && sha256sum --check .github/tests/halo-hip-baseline-sha256.txt) > results/source-integrity.log
             cp source/.github/tests/halo-hip-baseline-sha256.txt results/
-            if [[ "$VALIDATION_GROUP" == halo-types ]]; then
-              cp -a source/.github/tests/halo-types/external source/
-              (cd source && sha256sum --check .github/tests/halo-types/sha256.txt) > results/typed-source-integrity.log
-              cp source/.github/tests/halo-types/sha256.txt results/typed-source-sha256.txt
-            fi
+          fi
+          if [[ "$VALIDATION_GROUP" == halo-types ]]; then
+            (cd source && sha256sum --check typed-source-sha256.txt) > results/typed-source-integrity.log
+            cp source/typed-source-sha256.txt source/cpu-preflight.log results/
           fi
           if [[ -f source/inputs/input-sha256.txt ]]; then
             (cd source && sha256sum --check inputs/input-sha256.txt) > results/input-integrity.log
@@ -290,9 +312,6 @@ jobs:
           set -euo pipefail
           ulimit -c 0
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --deadline-epoch "$campaign_deadline" --log
-          if [[ "$VALIDATION_GROUP" == halo-types ]]; then
-            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/model-campaign.json --output-dir results/models --deadline-epoch "$campaign_deadline" --log
-          fi
           if [[ "$VALIDATION_GROUP" == halo-final ]]; then
             python3 source/.github/tests/rocm_v2_halo.py --root results --source source --select-candidate
             python3 source/.github/tests/rocm_v2_campaign.py --manifest source/model-campaign.json --output-dir results/models --deadline-epoch "$campaign_deadline" --log

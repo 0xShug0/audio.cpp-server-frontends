@@ -1,5 +1,9 @@
 f0023b7b87b9089115da5b0bfa0f9efed2de3b80f8e092a4e3798c78e55be8d6  external/ggml/src/ggml-hip/halo/sgemm.cu
-652ba15899e6c3246b72fc4b541969ac6faf4db75641d245376907ca5943bcc3  external/ggml/src/ggml-hip/halo/matmul.cu
+e2172b2f3f72323a5fe0a07175ed83e0fd7ca9b5515f466c11dc5c5ecc578c3f  external/ggml/src/ggml-hip/halo/matmul.cu
 f55e717d416f08bccd92ad24dfbaa7f5474d494c06e5eb13f40edc7acb3993fd  external/ggml/src/ggml-hip/halo/halo.cuh
+9072c8df83bfda02be66eb2018f3dff1ee5705d2fbddb4d573bc39471b5de907  external/ggml/src/ggml-hip/halo/cpy.cu
+43a4b5c5ad9bd899a56215cc24f9399af783d323c614cf1f618b9812d21af483  external/ggml/src/ggml-hip/implementation.cuh
+a1831aa07de48c995a56885866a12a900095a6e5db686379337fd5e9ceb05aa4  external/ggml/src/ggml-cuda/cpy.cu
+a11bc8bc8b91566527d97e612844ae36a8c753b9992884bf530827cfda8f4da5  external/ggml/src/ggml-cuda/ggml-cuda.cu
 fb4a4bad26140e63b30108bde986246c41596f364f82f6eca876ccde0bbf36ea  external/ggml/src/ggml-hip/CMakeLists.txt
-bfa65a0d6c6540a833cf1f19cb8d311b43ca6d7bf8c801cc30d3d4eb6f84ffe2  external/ggml/tests/test-backend-ops.cpp
+54071c1a52f40709c982d6e04e830d88f971565e32e1f557b54caca8e4a36617  external/ggml/tests/test-backend-ops.cpp

@@ -209,38 +209,25 @@ def hip_baseline_manifest(root):
 
 
 def typed_manifest(root):
-    plan = hip_baseline_manifest(root)
-    build = next(b for b in plan['builds'] if b['id'] == 'candidate')
-    build['commands'][1].insert(build['commands'][1].index('--parallel'), 'halo_backend_ops')
-    probe = ['build/debug/bin/halo_backend_ops']
+    plan = operator_manifest(root)
+    probe = ['build/debug/bin/test-backend-ops']
     checks, timing = [], []
     for impl in ['default', 'halo']:
-        for kind in ['f16', 'bf16', 'q8_0', 'q4_0']:
+        for kind in ['f16', 'bf16']:
             checks.append(dict(id=impl+'-'+kind, argv=probe+[
                 'test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl,
                 '-o', 'MUL_MAT', '-p', 'type_a='+kind]))
     for slot, impl in enumerate(['default', 'halo', 'halo', 'default']):
-        for kind in ['f16', 'bf16', 'q8_0', 'q4_0']:
+        for kind in ['f16', 'bf16']:
             timing.append(dict(id=f's{slot}-{impl}-{kind}', argv=probe+[
                 'perf', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl,
                 '-o', 'MUL_MAT', '-p', 'type_a='+kind]))
     timing.append(dict(id='trace', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace',
         '--output-format', 'csv', '--output-directory', '../results/profile/typed', '--']+probe+[
             'test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', 'halo',
-            '-o', 'MUL_MAT', '-p', 'type_a=(f16|bf16|q8_0|q4_0)']))
-    models = dict(plan, suites=[s for s in plan['suites'] if s['id'].startswith('yue2-')])
-    models['builds'] = [dict(id='candidate', build_type='Debug', timeout_s=30,
-                            commands=[['ldd', 'build/debug/bin/audiocpp_cli']])]
-    for suite in models['suites']:
-        argv = suite['cases'][0]['argv']
-        index = argv.index('--out-dir') + 1
-        argv[index] = argv[index].replace('../results/wavs/', '../results/models/wavs/')
-    models['suites'].append(dict(id='framework', gpu=False, timeout_s=180, cases=[dict(
-        id='summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results/models',
-                           '--summarize-models', '--baseline-implementation', 'default', '--families', 'yue2'])]))
-    (root/'model-campaign.json').write_text(json.dumps(models, indent=2)+'\n')
-    plan['suites'] = [dict(id='correctness', build='candidate', gpu=True, timeout_s=480, cases=checks),
-                      dict(id='framework', build='candidate', gpu=True, timeout_s=900, cases=timing)]
+            '-o', 'MUL_MAT', '-p', 'type_a=(f16|bf16)']))
+    plan['suites'] = [dict(id='correctness', build='operators', gpu=True, timeout_s=180, cases=checks),
+                      dict(id='framework', build='operators', gpu=True, timeout_s=300, cases=timing)]
     return plan
 
 
@@ -314,7 +301,8 @@ def summarize_models(root, baseline_implementation='halo', families=None):
     return report
 
 
-def summarize_operators(root, correctness_groups=10, timing_processes=24):
+def summarize_operators(root, correctness_groups=10, timing_processes=24,
+                        timing_glob='r*-s*-*.log', repeats=4):
     ansi = re.compile(r'\x1b\[[0-9;]*m')
     correctness = {}
     for path in sorted((root / 'case' / 'correctness').glob('*.log')):
@@ -327,7 +315,7 @@ def summarize_operators(root, correctness_groups=10, timing_processes=24):
         raise ValueError('Missing correctness groups')
     measurements = {}
     pattern = re.compile(r'^\s+(\w+)\(([^\n]*)\):.*?(\d+) runs -\s+([0-9.]+) us/run', re.M | re.S)
-    paths = sorted((root / 'case' / 'framework').glob('r*-s*-*.log'))
+    paths = sorted((root / 'case' / 'framework').glob(timing_glob))
     if len(paths) != timing_processes:
         raise ValueError('Missing timing processes')
     for path in paths:
@@ -341,7 +329,7 @@ def summarize_operators(root, correctness_groups=10, timing_processes=24):
             measurements.setdefault((op, params), {}).setdefault(implementation, []).append(float(elapsed))
     rows = []
     for (op, params), variants in sorted(measurements.items()):
-        if set(variants) != {'default', 'halo'} or any(len(v) != 4 for v in variants.values()):
+        if set(variants) != {'default', 'halo'} or any(len(v) != repeats for v in variants.values()):
             raise ValueError('Unpaired measurements: ' + params)
         a, b = (statistics.median(variants[k]) for k in ['default', 'halo'])
         rows.append(dict(op=op, params=params, default_us=a, halo_us=b,

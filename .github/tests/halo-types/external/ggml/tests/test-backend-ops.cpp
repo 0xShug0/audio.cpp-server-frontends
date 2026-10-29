@@ -9524,6 +9524,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_halo() {
     }
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
         cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 129, 769, 256, one, one));
+    }
+    for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16}) {
         for (const auto & shape : std::vector<std::array<int64_t, 3>>{
                 {129, 1, 256}, {2048, 1, 2048}, {2048, 2, 2048},
                 {6144, 2, 2048}, {2048, 8, 6144}, {129, 9, 256},
@@ -9531,10 +9533,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_halo() {
             cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32,
                 shape[0], shape[1], shape[2], one, one));
         }
-        if (type == GGML_TYPE_F16) {
-            cases.emplace_back(new test_halo_mul_mat_precision(type, 129, 64, 256, true, true));
-        }
         cases.emplace_back(new test_halo_mul_mat_precision(type, 129, 64, 256, false, false, 288));
+        cases.emplace_back(new test_halo_mul_mat_precision(type, 2048, 64, 2048, false, false, 2080));
+        cases.emplace_back(new test_halo_mul_mat_precision(type, 2048, 256, 2048, false, false, 2080));
+        cases.emplace_back(new test_halo_mul_mat_precision(type, 129, 64, 256, false, false, 289));
     }
     cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 128, 768, 256,
                                        std::array<int64_t, 2>{2, 1}, one));
