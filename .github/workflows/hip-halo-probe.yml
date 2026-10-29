@@ -60,7 +60,7 @@ jobs:
           git -C source apply --check ../.github/tests/rocm-v2-framework.patch
           git -C source apply ../.github/tests/rocm-v2-framework.patch
           if [[ "$VALIDATION_GROUP" == qwen ]]; then
-            git -C source sparse-checkout set include src app model_specs tools/cmake tests/unittests webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source sparse-checkout set include src app model_specs tools/cmake tests/unittests tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source apply --check ../.github/tests/rocm-v2-model.patch
             git -C source apply ../.github/tests/rocm-v2-model.patch
             python3 .github/tests/rocm_v2_qwen.py --prepare source
