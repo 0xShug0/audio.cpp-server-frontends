@@ -2,8 +2,13 @@
 from pathlib import Path
 import json
 import unittest
+import tempfile
+import csv
+import re
+from unittest.mock import patch
+import rocm_v2_halo
 from rocm_v2_campaign import validate_manifest
-from rocm_v2_halo import manifest, operator_manifest
+from rocm_v2_halo import manifest, operator_manifest, model_manifest, model_requests, followup_manifest, select_candidate
 
 
 class HaloCampaignTests(unittest.TestCase):
@@ -30,6 +35,83 @@ class HaloCampaignTests(unittest.TestCase):
         self.assertEqual(len(plan['suites'][0]['cases']), 10)
         self.assertEqual(len(plan['suites'][1]['cases']), 24)
         self.assertTrue(all('fused' not in x['id'] for x in plan['suites'][1]['cases']))
+
+    def test_model_pairs_use_separate_binaries_and_identical_controls(self):
+        plan = model_manifest(Path('.'))
+        validate_manifest(plan)
+        for build in plan['builds'][1:]:
+            self.assertIn('-DCMAKE_BUILD_TYPE=Debug', build['commands'][0])
+            self.assertIn('-DCMAKE_CXX_STANDARD=17', build['commands'][0])
+            self.assertIn('-DAUDIOCPP_MODELS=qwen3_tts,irodori_tts,yue2', build['commands'][0])
+        for family, requests in model_requests().items():
+            self.assertEqual(requests[0]['id'], 'warmup')
+            self.assertEqual(requests[-1]['text'], requests[1]['text'])
+            self.assertTrue(all('max_tokens' not in r['options'] for r in requests))
+            cases = [next(s for s in plan['suites'] if s['id'] == family + '-' + v)['cases'][0]['argv']
+                     for v in ['a1','b1','b2','a2']]
+            self.assertTrue(cases[0][0].startswith('../source-baseline/'))
+            self.assertFalse(cases[1][0].startswith('../source-baseline/'))
+            normalized = []
+            for argv in cases:
+                argv = argv.copy()
+                self.assertEqual(argv[argv.index('--backend-impl') + 1], 'halo')
+                argv[0] = '<binary>'
+                argv[argv.index('--out-dir') + 1] = '<out>'
+                normalized.append(argv)
+            self.assertTrue(all(row == normalized[0] for row in normalized))
+
+    def test_followup_times_actual_one_token_work_and_copy(self):
+        plan = followup_manifest(Path('.'))
+        validate_manifest(plan)
+        self.assertEqual(len(plan['suites'][0]['cases']),6)
+        self.assertEqual(len(plan['suites'][1]['cases']),17)
+        build = plan['builds'][1]
+        self.assertEqual(build['commands'][0][2],'.')
+        self.assertIn('halo_backend_ops',build['commands'][1])
+        self.assertIn('--kernel-trace',plan['suites'][1]['cases'][-1]['argv'])
+
+    def test_selection_rejects_weak_results_and_preserves_proven_copy(self):
+        for accept in [False,True]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, copy, results = root/'source', root/'source-copy', root/'results'
+                names = ['external/ggml/src/ggml-cuda/mmvq.cu',
+                         'external/ggml/src/ggml-cuda/ggml-cuda.cu',
+                         'external/ggml/src/ggml-hip/implementation.cuh',
+                         'external/ggml/src/ggml-hip/halo/halo.cuh',
+                         'external/ggml/src/ggml-hip/halo/cpy.cu']
+                for name in names:
+                    (source/name).parent.mkdir(parents=True,exist_ok=True)
+                    (copy/name).parent.mkdir(parents=True,exist_ok=True)
+                    (source/name).write_text('candidate: src0->ne[0] < 512 || src0->ne[1] < 1024; src->ne[0] < 64')
+                    (copy/name).write_text('proven copy-only baseline')
+                results.mkdir()
+                (results/'summary.json').write_text(json.dumps(dict(status='PASS',complete=True)))
+                profile=results/'profile/q8';profile.mkdir(parents=True)
+                with (profile/'test_kernel_trace.csv').open('w') as stream:
+                    writer=csv.DictWriter(stream,fieldnames=['Kernel_Name']);writer.writeheader()
+                    writer.writerow(dict(Kernel_Name='void mul_mat_vec_q<(ggml_type)8, 1, false, false, false, 4>(...)'))
+                    writer.writerow(dict(Kernel_Name='halo_copy_rows(...)'))
+                records=[]
+                speed=2.0 if accept else 0.9
+                for k in [512,1024,2048,3072,8192]:
+                    for m in [1024,3072]:
+                        records.append(dict(op='MUL_MAT',params=f'type_a=q8_0,m={m},n=1,k={k}',
+                            speedup=speed,default_min=10.,halo_max=10./speed))
+                for w in [64,128]:
+                    for i in range(4):
+                        records.append(dict(op='CPY',params=f'ne=[{w},16,4,1],perm={i}',
+                            speedup=speed,default_min=10.,halo_max=10./speed))
+                with patch.object(rocm_v2_halo,'summarize_operators',return_value=records):
+                    select_candidate(results,source)
+                decision=json.loads((results/'selection.json').read_text())
+                self.assertEqual(decision['min_k'],512 if accept else None)
+                self.assertEqual(decision['copy_min_columns'],64 if accept else 256)
+                validate_manifest(json.loads((source/'model-campaign.json').read_text()))
+                for name,digest in decision['selected_source_sha256'].items():
+                    self.assertEqual((source/name).read_bytes(),(results/'selected-source'/name).read_bytes())
+                if not accept:
+                    self.assertTrue(all((source/name).read_bytes()==(copy/name).read_bytes() for name in names))
 
     def test_selection_changes_only_implementation(self):
         plan = manifest(Path('.'))

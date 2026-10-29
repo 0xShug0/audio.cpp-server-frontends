@@ -1,8 +1,18 @@
 """Native Halo implementation selection and operator/model checks. No environment setup."""
 import argparse
+import array
+import math
+import wave
+import csv
+import hashlib
+import subprocess
+import shutil
+import urllib.request
+import re
+import statistics
 import json
 from pathlib import Path
-from rocm_v2_qwen import manifest as qwen_manifest
+from rocm_v2_qwen import manifest as qwen_manifest, REQUESTS as QWEN_REQUESTS
 
 
 def manifest(root):
@@ -68,9 +78,334 @@ def operator_manifest(root):
         dict(id='framework', build='operators', gpu=True, timeout_s=150, cases=timed)])
 
 
+def followup_manifest(root):
+    plan = qwen_manifest(root)
+    build = plan['builds'][1]
+    build['id'] = 'operators'
+    build['commands'][0] = [x.replace('-DAUDIOCPP_MODELS=qwen3_tts', '-DAUDIOCPP_MODELS=qwen3_tts,irodori_tts,yue2')
+                            for x in build['commands'][0]]
+    build['commands'][1] = ['cmake', '--build', 'build/debug', '--target', 'halo_backend_ops', '--parallel', '8']
+    prefix = ['build/debug/bin/halo_backend_ops']
+    checks = []
+    for impl in ['default', 'halo']:
+        for name, extra in [('copy', ['-o', 'CPY,CONT']),
+                            ('matvec', ['-o', 'MUL_MAT', '-p', 'type_a=q8_0']),
+                            ('matvec-fused', ['-o', 'MUL_MAT_VEC_FUSION'])]:
+            checks.append(dict(id=impl + '-' + name, argv=prefix +
+                ['test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl] + extra))
+    timed = []
+    for repeat in range(2):
+        for slot, impl in enumerate(['default','halo','halo','default']):
+            for name, extra in [('matvec', ['-o','MUL_MAT','-p','type_a=q8_0']),
+                                ('copy', ['-o','CPY','-p',r'ne=\[(64|128),'])]:
+                timed.append(dict(id=f'r{repeat}-s{slot}-{impl}-{name}', argv=prefix +
+                    ['perf','-b','ROCm0','--suite','halo','--backend-impl',impl] + extra))
+    timed.append(dict(id='trace', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+        '--output-directory', '../results/profile/q8', '--'] + prefix +
+        ['test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', 'halo',
+         '-o', 'CPY,CONT,MUL_MAT,MUL_MAT_VEC_FUSION', '-p', r'ne=\[(64|128),|type_a=q8_0|type=q8_0']))
+    return dict(version=1, builds=[plan['builds'][0], build], health_check=plan['health_check'], suites=[
+        dict(id='correctness', build='operators', gpu=True, timeout_s=180, cases=checks),
+        dict(id='framework', build='operators', gpu=True, timeout_s=120, cases=timed)])
+
+
+def model_requests():
+    short = '今日は穏やかな朝です。窓を開けると、庭から花の香りが入ってきました。遠くで鳥が鳴いています。温かいお茶を飲みながら、今日の予定をゆっくり考えました。'
+    long = '駅前の小さな本屋には、いつも静かな音楽が流れています。私は仕事が終わると、よくその店に立ち寄ります。店主のおじいさんは本について詳しく、私が探しているものをすぐに見つけてくれます。ある雨の日、古い旅行記を手に取ると、ページの間から一枚の写真が落ちました。そこには、海に向かって建つ白い灯台が写っていました。写真の裏には、またここで会いましょう、とだけ書かれていました。私はその言葉が気になって、閉店の時間まで本を読み続けました。外に出ると雨はすっかり止み、夕焼けが濡れた道を明るく照らしていました。'
+    irodori = [dict(id=name, text=text, language='ja', seed=1234, options=dict(no_ref=True))
+        for name, text in [('warmup', 'こんにちは。今日はよい天気ですね。'), ('short', short),
+                           ('long', long), ('short_repeat', short)]]
+    lyrics = '[Verse]\nSoft morning light is touching the window.\nI hear the city waking below.\n[Chorus]\nStay with the rhythm, let it carry us home.\nSing with the sunrise, we are never alone.'
+    yue2 = [dict(id=name, text=text, seed=1234, options=dict(cot='off', num_inference_steps=8,
+            style='English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix'))
+        for name, text in [('warmup', '[Verse]\nThe morning sun is shining.\nI hear a song outside.'),
+                           ('song', lyrics), ('song_repeat', lyrics)]]
+    return dict(irodori_tts=irodori, qwen3_tts=QWEN_REQUESTS, yue2=yue2)
+
+
+def prepare_models(root):
+    records = json.loads((root / '.github/tests/halo-model-files.json').read_text())
+    for record in records:
+        target = root / record['destination']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        url = 'https://huggingface.co/{repo}/resolve/{revision}/{file}?download=true'.format(**record)
+        subprocess.run(['curl', '--fail', '--location', '--connect-timeout', '20', '--max-time', '600',
+                        '--retry', '2', '-o', str(target), url], check=True)
+        data_hash = hashlib.sha256()
+        with target.open('rb') as stream:
+            while block := stream.read(1024 * 1024):
+                data_hash.update(block)
+        if target.stat().st_size != record['size']:
+            raise ValueError('Size mismatch: ' + record['file'])
+        digest = data_hash.hexdigest()
+        if record['sha256'] and digest != record['sha256']:
+            raise ValueError('SHA256 mismatch: ' + record['file'])
+        if record.get('blob_id'):
+            data = target.read_bytes()
+            blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+            if blob != record['blob_id']:
+                raise ValueError('Git blob mismatch: ' + record['file'])
+        record['sha256'] = digest
+    inputs = root / 'inputs'
+    with (inputs / 'reference.wav').open('wb') as stream:
+        subprocess.run(['git', 'show', 'HEAD:assets/resources/a.wav'], cwd=root, stdout=stream, check=True)
+    for family, requests in model_requests().items():
+        (inputs / (family + '-requests.json')).write_text(json.dumps(requests, ensure_ascii=False, indent=2) + '\n')
+    (inputs / 'model-provenance.json').write_text(json.dumps(records, indent=2) + '\n')
+    hashes = []
+    for file in sorted(inputs.rglob('*')):
+        if file.is_file() and file.name != 'input-sha256.txt':
+            with file.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            hashes.append(digest + '  ' + file.relative_to(root).as_posix())
+    (inputs / 'input-sha256.txt').write_text('\n'.join(hashes) + '\n')
+
+
+def model_manifest(root, candidate='.', output='../results/models'):
+    plan = qwen_manifest(root)
+    base = plan['builds'][1]
+    config = [x.replace('-DAUDIOCPP_MODELS=qwen3_tts', '-DAUDIOCPP_MODELS=qwen3_tts,irodori_tts,yue2')
+              for x in base['commands'][0]]
+    builds = [plan['builds'][0]]
+    for variant, cwd in [('baseline', '../source-baseline'), ('candidate', candidate)]:
+        builds.append(dict(id=variant, cwd=cwd, build_type='Debug', timeout_s=1800, commands=[config,
+            ['cmake', '--build', 'build/debug', '--target', 'audiocpp_cli', '--parallel', '8'],
+            ['ldd', 'build/debug/bin/audiocpp_cli']]))
+    suites = [dict(id='correctness', build='candidate', gpu=True, timeout_s=30,
+        cases=[dict(id='health', argv=['build/debug/device-health', 'health'])])]
+    for family, model, extra in [
+            ('irodori_tts', 'inputs/irodori.gguf', []),
+            ('qwen3_tts', 'inputs/qwen.gguf', []),
+            ('yue2', 'inputs/yue2', ['--session-option', 'yue2.model_gguf=yue2-3b-q4_0.gguf',
+                                    '--session-option', 'yue2.vae_gguf=yue2-vae-f16.gguf'])]:
+        for label, variant in [('a1', 'baseline'), ('b1', 'candidate'), ('b2', 'candidate'), ('a2', 'baseline')]:
+            binary = ('../source-baseline/' if variant == 'baseline' else (candidate + '/')) + 'build/debug/bin/audiocpp_cli'
+            name = family + '-' + label
+            argv = [binary, '--task', 'gen' if family == 'yue2' else 'tts', '--family', family,
+                    '--backend', 'hip', '--backend-impl', 'halo', '--threads', '8', '--model', model,
+                    '--request-sequence', 'inputs/' + family + '-requests.json',
+                    '--out-dir', output + '/wavs/' + name, '--log', '--metrics'] + extra
+            suites.append(dict(id=name, build=variant, gpu=True, timeout_s=900,
+                               cases=[dict(id='session', argv=argv)]))
+    suites.append(dict(id='framework', gpu=False, timeout_s=180,
+        cases=[dict(id='summary', argv=['python3', '.github/tests/rocm_v2_halo.py',
+                                       '--root', output, '--summarize-models'])]))
+    return dict(version=1, builds=builds, health_check=plan['health_check'], suites=suites)
+
+
+def summarize_models(root):
+    report = {}
+    for family, requests in model_requests().items():
+        names = [r['id'] for r in requests]
+        rows, audio = [], {}
+        for variant in ['a1', 'b1', 'b2', 'a2']:
+            label = family + '-' + variant
+            text = (root / 'case' / label / 'session.log').read_text()
+            if 'implementation=halo' not in text or 'session.wall_ms' not in text:
+                raise ValueError('Missing implementation or canonical timing: ' + label)
+            metrics = {}
+            for name, key, value in re.findall(r'^metrics\[([^\]]+)\]\.([^=]+)=(.*)$', text, re.M):
+                metrics.setdefault(name, {})[key] = value
+            if set(metrics) != set(names):
+                raise ValueError('Missing request metrics: ' + label)
+            for name in names:
+                file = root / 'wavs' / label / (name + '.wav')
+                with wave.open(str(file), 'rb') as wav:
+                    if wav.getsampwidth() != 2 or wav.getnchannels() not in (1, 2):
+                        raise ValueError('Unexpected WAV format: ' + str(file))
+                    pcm = array.array('h', wav.readframes(wav.getnframes()))
+                    seconds = wav.getnframes() / wav.getframerate()
+                    shape = (wav.getframerate(), wav.getnchannels())
+                if not pcm or not any(pcm):
+                    raise ValueError('Empty/silent WAV: ' + str(file))
+                audio[variant, name] = (shape, pcm)
+                wall = float(metrics[name]['wall_ms'])
+                if not math.isfinite(wall) or wall <= 0 or abs(float(metrics[name]['audio_duration_ms']) - seconds * 1000) > 1:
+                    raise ValueError('Invalid duration/timing: ' + label)
+                if name != 'warmup':
+                    rows.append(dict(variant='baseline' if variant.startswith('a') else 'candidate',
+                                     session=variant, request=name, wall_ms=wall, audio_seconds=seconds,
+                                     rtf=wall / (1000 * seconds)))
+        aggregate = {}
+        for variant in ['baseline', 'candidate']:
+            group = [row for row in rows if row['variant'] == variant]
+            wall, seconds = sum(r['wall_ms'] for r in group), sum(r['audio_seconds'] for r in group)
+            aggregate[variant] = dict(wall_ms=wall, audio_seconds=seconds, rtf=wall / (1000 * seconds))
+        parity = []
+        for name in names[1:]:
+            shape, reference = audio['a1', name]
+            for variant in ['a2', 'b1', 'b2']:
+                other_shape, candidate = audio[variant, name]
+                row = dict(request=name, session=variant, equal_shape=shape == other_shape,
+                           equal_length=len(reference) == len(candidate), pcm_identical=reference == candidate)
+                if row['equal_shape'] and row['equal_length']:
+                    aa, bb = sum(x*x for x in reference), sum(x*x for x in candidate)
+                    error = sum((x-y)**2 for x,y in zip(reference, candidate))
+                    row['cosine'] = sum(x*y for x,y in zip(reference, candidate)) / math.sqrt(aa*bb)
+                    row['snr_db'] = 10 * math.log10(aa/error) if error else None
+                parity.append(row)
+        repeated, original = names[-1], names[1]
+        repeats = {v: audio[v, original] == audio[v, repeated] for v in ['a1','b1','b2','a2']}
+        report[family] = dict(rows=rows, aggregate=aggregate, parity=parity, repeat_pcm_identical=repeats)
+    (root / 'models-summary.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
+    print(json.dumps({k: dict(aggregate=v['aggregate'], repeat_pcm_identical=v['repeat_pcm_identical'])
+                      for k,v in report.items()}, indent=2))
+    return report
+
+
+def summarize_operators(root, correctness_groups=10, timing_processes=24):
+    ansi = re.compile(r'\x1b\[[0-9;]*m')
+    correctness = {}
+    for path in sorted((root / 'case' / 'correctness').glob('*.log')):
+        text = ansi.sub('', path.read_text())
+        totals = re.findall(r'(\d+)/(\d+) tests passed', text)
+        if not totals or any(int(a) != int(b) or int(b) == 0 for a, b in totals):
+            raise ValueError('Incomplete or failed correctness group: ' + path.name)
+        correctness[path.stem] = sum(int(a) for a, _ in totals)
+    if len(correctness) != correctness_groups:
+        raise ValueError('Missing correctness groups')
+    measurements = {}
+    pattern = re.compile(r'^\s+(\w+)\(([^\n]*)\):.*?(\d+) runs -\s+([0-9.]+) us/run', re.M | re.S)
+    paths = sorted((root / 'case' / 'framework').glob('r*-s*-*.log'))
+    if len(paths) != timing_processes:
+        raise ValueError('Missing timing processes')
+    for path in paths:
+        implementation = 'halo' if '-halo-' in path.name else 'default'
+        matches = pattern.findall(ansi.sub('', path.read_text()))
+        if not matches:
+            raise ValueError('No timings in ' + path.name)
+        for op, params, count, elapsed in matches:
+            if int(count) <= 0 or float(elapsed) <= 0:
+                raise ValueError('Invalid timing row in ' + path.name)
+            measurements.setdefault((op, params), {}).setdefault(implementation, []).append(float(elapsed))
+    rows = []
+    for (op, params), variants in sorted(measurements.items()):
+        if set(variants) != {'default', 'halo'} or any(len(v) != 4 for v in variants.values()):
+            raise ValueError('Unpaired measurements: ' + params)
+        a, b = (statistics.median(variants[k]) for k in ['default', 'halo'])
+        rows.append(dict(op=op, params=params, default_us=a, halo_us=b,
+                         speedup=a / b, default_min=min(variants['default']),
+                         default_max=max(variants['default']), halo_min=min(variants['halo']),
+                         halo_max=max(variants['halo'])))
+    with (root / 'operators.csv').open('w') as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    (root / 'operator-correctness.json').write_text(json.dumps(correctness, indent=2) + '\n')
+    print(json.dumps(dict(correctness_checks=sum(correctness.values()), shapes=len(rows)), indent=2))
+    return rows
+
+
+def select_candidate(root, source):
+    summary = json.loads((root / 'summary.json').read_text())
+    if summary['status'] != 'PASS' or not summary['complete']:
+        raise ValueError('Probes must finish successfully before any model runs')
+    rows = summarize_operators(root, correctness_groups=6, timing_processes=16)
+    kernels = set()
+    for path in (root / 'profile/q8').rglob('*kernel_trace.csv'):
+        with path.open() as stream:
+            kernels.update(row['Kernel_Name'] for row in csv.DictReader(stream))
+    grouped = [x for x in kernels if 'mul_mat_vec_q<(ggml_type)8,1,' in ''.join(x.split())
+               and ',4>(' in ''.join(x.split())]
+    if not grouped:
+        raise ValueError('Trace did not execute the four-row Q8 kernel')
+    actual = []
+    for row in rows:
+        if row['op'] != 'MUL_MAT':
+            continue
+        dims = {key: int(value) for key, value in re.findall(r'(?:^|,)(m|n|k)=(\d+)', row['params'])}
+        if dims['n'] == 1:
+            if dims['m'] not in [1024,3072]:
+                raise ValueError('Unexpected output row count')
+            actual.append((dims, row))
+    if len(actual) != 10:
+        raise ValueError('Expected ten actual one-token GEMV shapes')
+    selected = None
+    for threshold in [512,1024,2048]:
+        group = [row for dims,row in actual if dims['k'] >= threshold]
+        # Accept only a broad, repeatable regime, never one isolated fast shape.
+        if len(group) >= 6 and all(float(r['default_min']) > 1.02 * float(r['halo_max']) for r in group) and \
+                statistics.geometric_mean(float(r['speedup']) for r in group) >= 1.05:
+            selected = threshold
+            break
+    candidate = '.'
+    if selected:
+        path = source / 'external/ggml/src/ggml-cuda/mmvq.cu'
+        text = path.read_bytes()
+        old = b'src0->ne[0] < 512 || src0->ne[1] < 1024'
+        if text.count(old) != 1:
+            raise ValueError('Q8 admission rule differs from the measured candidate')
+        path.write_bytes(text.replace(old, ('src0->ne[0] < %d || src0->ne[1] < 1024' % selected).encode()))
+    else:
+        for name in ['external/ggml/src/ggml-cuda/mmvq.cu',
+                     'external/ggml/src/ggml-cuda/ggml-cuda.cu',
+                     'external/ggml/src/ggml-hip/implementation.cuh',
+                     'external/ggml/src/ggml-hip/halo/halo.cuh']:
+            shutil.copyfile(source.parent / 'source-copy' / name, source / name)
+    if not any('halo_copy_rows' in name for name in kernels):
+        raise ValueError('Trace did not execute the narrow-copy kernel')
+    copy_min = 256
+    for threshold in [64,128]:
+        group = []
+        for row in rows:
+            if row['op'] != 'CPY':
+                continue
+            width, count = map(int,re.search(r'ne=\[(\d+),(\d+),',row['params']).groups())
+            if width >= threshold and count > 1:
+                group.append(row)
+        if len(group) >= 4 and all(float(r['default_min']) > 1.02 * float(r['halo_max']) for r in group) and \
+                statistics.geometric_mean(float(r['speedup']) for r in group) >= 1.05:
+            copy_min = threshold
+            break
+    path = source / 'external/ggml/src/ggml-hip/halo/cpy.cu'
+    if copy_min == 256:
+        shutil.copyfile(source.parent / 'source-copy' / path.relative_to(source), path)
+    else:
+        text = path.read_text()
+        if text.count('src->ne[0] < 64') != 1:
+            raise ValueError('Narrow-copy admission rule differs from the probe')
+        path.write_text(text.replace('src->ne[0] < 64','src->ne[0] < ' + str(copy_min)))
+    kept = ['external/ggml/src/ggml-cuda/mmvq.cu', 'external/ggml/src/ggml-cuda/ggml-cuda.cu',
+            'external/ggml/src/ggml-hip/implementation.cuh', 'external/ggml/src/ggml-hip/halo/halo.cuh',
+            'external/ggml/src/ggml-hip/halo/cpy.cu']
+    hashes = {}
+    for name in kept:
+        target = root / 'selected-source' / name
+        target.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(source/name,target)
+        hashes[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+    decision = dict(selected='copy-plus-q8' if selected else 'copy-only', min_k=selected,
+        copy_min_columns=copy_min, selected_source_sha256=hashes,
+        reason='Q8 accepted only with a stable >=5% aggregate win and separated ranges across >=6 shapes; otherwise rejected',
+        grouped_q8_kernel_names=sorted(grouped), measurements=rows)
+    (root / 'selection.json').write_text(json.dumps(decision,indent=2) + '\n')
+    (source / 'model-campaign.json').write_text(json.dumps(model_manifest(source,candidate=candidate),indent=2) + '\n')
+    print(json.dumps({k:v for k,v in decision.items() if k != 'measurements'},indent=2))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--operators', action='store_true')
+    parser.add_argument('--source', type=Path)
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument('--operators', action='store_true')
+    actions.add_argument('--followup', action='store_true')
+    actions.add_argument('--select-candidate', action='store_true')
+    actions.add_argument('--models', action='store_true')
+    actions.add_argument('--prepare-models', action='store_true')
+    actions.add_argument('--summarize-operators', action='store_true')
+    actions.add_argument('--summarize-models', action='store_true')
     args = parser.parse_args()
-    (args.root / 'campaign.json').write_text(json.dumps(operator_manifest(args.root) if args.operators else manifest(args.root), indent=2) + '\n')
+    if args.select_candidate:
+        if args.source is None:
+            parser.error('--select-candidate requires --source')
+        select_candidate(args.root, args.source)
+    elif args.prepare_models:
+        prepare_models(args.root)
+    elif args.summarize_operators:
+        summarize_operators(args.root)
+    elif args.summarize_models:
+        summarize_models(args.root)
+    else:
+        plan = operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

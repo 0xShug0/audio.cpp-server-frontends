@@ -1,5 +1,5 @@
 diff --git a/app/cli/main.cpp b/app/cli/main.cpp
-index 2f35eb86..1e0601f2 100644
+index 2f35eb8..1e0601f 100644
 --- a/app/cli/main.cpp
 +++ b/app/cli/main.cpp
 @@ -62,6 +62,7 @@ void print_task_list_help() {
@@ -35,7 +35,7 @@ index 2f35eb86..1e0601f2 100644
          const int threads = parse_int_arg(argc, argv, "--threads", 4);
          if (threads <= 0) {
 diff --git a/app/server/config.cpp b/app/server/config.cpp
-index 2d9fd4f5..f73f5d17 100644
+index 2d9fd4f..f73f5d1 100644
 --- a/app/server/config.cpp
 +++ b/app/server/config.cpp
 @@ -244,6 +244,7 @@ ServerConfig load_server_config(const std::filesystem::path & path, bool paralle
@@ -47,7 +47,7 @@ index 2d9fd4f5..f73f5d17 100644
      config.threads = engine::io::json::optional_i32(root, "threads", config.threads);
      config.lazy_load = engine::io::json::optional_bool(root, "lazy_load", config.lazy_load);
 diff --git a/app/server/config.h b/app/server/config.h
-index 6ac50dbd..2e8314cb 100644
+index 6ac50db..2e8314c 100644
 --- a/app/server/config.h
 +++ b/app/server/config.h
 @@ -80,6 +80,7 @@ struct ServerConfig {
@@ -59,7 +59,7 @@ index 6ac50dbd..2e8314cb 100644
      int threads = 1;
      bool lazy_load = false;
 diff --git a/app/server/main.cpp b/app/server/main.cpp
-index 77653541..96088184 100644
+index 7765354..9608818 100644
 --- a/app/server/main.cpp
 +++ b/app/server/main.cpp
 @@ -102,6 +102,7 @@ void print_help() {
@@ -81,7 +81,7 @@ index 77653541..96088184 100644
              config.device = std::stoi(*device);
          }
 diff --git a/app/server/parallel_runtime.cpp b/app/server/parallel_runtime.cpp
-index 97054498..734b0cd8 100644
+index 9705449..734b0cd 100644
 --- a/app/server/parallel_runtime.cpp
 +++ b/app/server/parallel_runtime.cpp
 @@ -321,6 +321,7 @@ void ParallelServerState::validate_replacement_slots(
@@ -101,7 +101,7 @@ index 97054498..734b0cd8 100644
      session_options.backend.threads = config_.threads;
      session_options.options = model.config.session_options;
 diff --git a/app/server/runtime.cpp b/app/server/runtime.cpp
-index 91aca745..385cf406 100644
+index 91aca74..385cf40 100644
 --- a/app/server/runtime.cpp
 +++ b/app/server/runtime.cpp
 @@ -693,6 +693,7 @@ void ServerState::ensure_model_loaded_locked(LoadedModel & model) {
@@ -113,7 +113,7 @@ index 91aca745..385cf406 100644
      session_options.backend.threads = config_.threads;
      session_options.options = model.config.session_options;
 diff --git a/app/workflow/workflow.cpp b/app/workflow/workflow.cpp
-index ae73a0be..582bc5ca 100644
+index ae73a0b..582bc5c 100644
 --- a/app/workflow/workflow.cpp
 +++ b/app/workflow/workflow.cpp
 @@ -568,6 +568,10 @@ engine::core::BackendConfig parse_step_backend(
@@ -128,7 +128,7 @@ index ae73a0be..582bc5ca 100644
      if (const auto device = workflow_optional_number(step, "device")) {
          fallback.device = static_cast<int>(*device);
 diff --git a/docs/build/HIP.md b/docs/build/HIP.md
-index 5d423d48..521b6c88 100644
+index 5d423d4..521b6c8 100644
 --- a/docs/build/HIP.md
 +++ b/docs/build/HIP.md
 @@ -424,3 +424,24 @@ These are skipped entirely on HIP builds. To enable GPU acceleration for ISTFT a
@@ -157,7 +157,7 @@ index 5d423d48..521b6c88 100644
 +initialization and identity through optional backend registry hooks, so other
 +backends need no changes until they provide an alternative implementation.
 diff --git a/docs/usage.md b/docs/usage.md
-index 2dd58fdf..bdeaab90 100644
+index 2dd58fd..bdeaab9 100644
 --- a/docs/usage.md
 +++ b/docs/usage.md
 @@ -214,3 +214,10 @@ If a CUDA or HIP device cannot give the process a context, for example a GPU in
@@ -172,7 +172,7 @@ index 2dd58fdf..bdeaab90 100644
 +existing implementation. This is backend configuration, not a model session
 +option. Availability depends on the build and device; see [HIP](build/HIP.md).
 diff --git a/external/ggml/include/ggml-backend.h b/external/ggml/include/ggml-backend.h
-index 8ca69845..002693b6 100644
+index 8ca6984..002693b 100644
 --- a/external/ggml/include/ggml-backend.h
 +++ b/external/ggml/include/ggml-backend.h
 @@ -201,6 +201,18 @@ extern "C" {
@@ -195,7 +195,7 @@ index 8ca69845..002693b6 100644
      // Context management and operations for faster communication between backends, used for tensor parallelism (meta backend)
      typedef void * (*ggml_backend_comm_init_t)(ggml_backend_t * backends, size_t n_backends);
 diff --git a/external/ggml/src/ggml-backend.cpp b/external/ggml/src/ggml-backend.cpp
-index 8730f804..b703a96e 100644
+index 8730f80..b703a96 100644
 --- a/external/ggml/src/ggml-backend.cpp
 +++ b/external/ggml/src/ggml-backend.cpp
 @@ -599,6 +599,36 @@ ggml_backend_reg_t ggml_backend_dev_backend_reg(ggml_backend_dev_t device) {
@@ -236,7 +236,7 @@ index 8730f804..b703a96e 100644
  
  ggml_backend_buffer_type_t ggml_backend_dev_buffer_type(ggml_backend_dev_t device) {
 diff --git a/external/ggml/src/ggml-cuda/common.cuh b/external/ggml/src/ggml-cuda/common.cuh
-index f592d404..61447030 100644
+index f592d40..6144703 100644
 --- a/external/ggml/src/ggml-cuda/common.cuh
 +++ b/external/ggml/src/ggml-cuda/common.cuh
 @@ -1378,10 +1378,17 @@ struct ggml_cuda_stream_context {
@@ -258,7 +258,7 @@ index f592d404..61447030 100644
      cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
      cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 diff --git a/external/ggml/src/ggml-cuda/cpy.cu b/external/ggml/src/ggml-cuda/cpy.cu
-index 7434b1d5..56331793 100644
+index 7434b1d..5633179 100644
 --- a/external/ggml/src/ggml-cuda/cpy.cu
 +++ b/external/ggml/src/ggml-cuda/cpy.cu
 @@ -1,4 +1,7 @@
@@ -286,7 +286,7 @@ index 7434b1d5..56331793 100644
              ggml_cpy_scalar_cuda<float, float, true>
                  (src0_ddc, src1_ddc, ne, ne00, ne01, ne02, nb00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb13, main_stream);
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 539f5807..e4f32fd6 100644
+index 539f580..0447e7f 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,4 +1,7 @@
@@ -336,7 +336,7 @@ index 539f5807..e4f32fd6 100644
 +        return nullptr;
 +    }
 +    static const ggml_hip_implementation halo = {
-+        "halo", ggml_hip_halo_mul_mat, ggml_hip_halo_im2col, ggml_hip_halo_cpy, ggml_hip_halo_mmvq, ggml_hip_halo_rms_norm,
++        "halo", ggml_hip_halo_mul_mat, ggml_hip_halo_im2col, ggml_hip_halo_cpy, ggml_hip_halo_mmvq,
 +    };
 +    ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
 +    if (backend) {
@@ -375,7 +375,7 @@ index 539f5807..e4f32fd6 100644
          return (void *)ggml_backend_cuda_comm_init;
      }
 diff --git a/external/ggml/src/ggml-cuda/im2col.cu b/external/ggml/src/ggml-cuda/im2col.cu
-index 7226f790..42ed1761 100644
+index 7226f79..42ed176 100644
 --- a/external/ggml/src/ggml-cuda/im2col.cu
 +++ b/external/ggml/src/ggml-cuda/im2col.cu
 @@ -1,4 +1,7 @@
@@ -404,7 +404,7 @@ index 7226f790..42ed1761 100644
      const ggml_tensor * src1 = dst->src[1];
      const float * src1_d = (const float *)src1->data;
 diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
-index d629b805..8c3f85f1 100644
+index d629b80..8535129 100644
 --- a/external/ggml/src/ggml-cuda/mmvq.cu
 +++ b/external/ggml/src/ggml-cuda/mmvq.cu
 @@ -1,4 +1,7 @@
@@ -433,7 +433,7 @@ index d629b805..8c3f85f1 100644
      constexpr int warp_size = ggml_cuda_get_physical_warp_size();
  
      constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
-@@ -1047,6 +1050,35 @@ static void mul_mat_vec_q_switch_type(
+@@ -1047,6 +1050,36 @@ static void mul_mat_vec_q_switch_type(
      }
  }
  
@@ -441,7 +441,8 @@ index d629b805..8c3f85f1 100644
 +bool ggml_hip_halo_mmvq(const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
 +                        const void * quantized, const ggml_cuda_mm_fusion_args_device * fusion,
 +                        hipStream_t stream) {
-+    if (src0->type != GGML_TYPE_Q8_0 || src0->ne[1] % 4 != 0 ||
++    if (src0->type != GGML_TYPE_Q8_0 || src0->ne[0] < 512 || src0->ne[1] < 1024 ||
++        src0->ne[1] % 4 != 0 ||
 +        src1->ne[1] != 1 || src0->ne[2] != 1 || src0->ne[3] != 1 ||
 +        src1->ne[2] != 1 || src1->ne[3] != 1) {
 +        return false;
@@ -469,7 +470,7 @@ index d629b805..8c3f85f1 100644
  void ggml_cuda_mul_mat_vec_q(
          ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
          const ggml_cuda_mm_fusion_args_host * fusion) {
-@@ -1141,6 +1173,13 @@ void ggml_cuda_mul_mat_vec_q(
+@@ -1141,6 +1174,13 @@ void ggml_cuda_mul_mat_vec_q(
  
      const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
  
@@ -483,92 +484,8 @@ index d629b805..8c3f85f1 100644
      mul_mat_vec_q_switch_type(
          src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
          ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
-diff --git a/external/ggml/src/ggml-cuda/norm.cu b/external/ggml/src/ggml-cuda/norm.cu
-index d8a2ae47..715ede56 100644
---- a/external/ggml/src/ggml-cuda/norm.cu
-+++ b/external/ggml/src/ggml-cuda/norm.cu
-@@ -1,4 +1,8 @@
- #include "norm.cuh"
-+#ifdef GGML_USE_HIP
-+#include "ggml-hip/implementation.cuh"
-+#endif
-+#include <climits>
- #include <cstdint>
- 
- template <int block_size>
-@@ -191,6 +195,43 @@ static __global__ void rms_norm_f32(const float * x,
-     }
- }
- 
-+#ifdef GGML_USE_HIP
-+bool ggml_hip_halo_rms_norm(const ggml_tensor * src, ggml_tensor * dst,
-+                           const ggml_tensor * mul, float eps, bool round, hipStream_t stream) {
-+    if (src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
-+        src->nb[0] != sizeof(float) || !ggml_is_contiguous(dst) ||
-+        src->ne[0] < 256 || src->ne[0] > 4096 ||
-+        src->ne[1] > INT_MAX || src->ne[2] > 65535 || src->ne[3] > 65535) {
-+        return false;
-+    }
-+    if (mul && (mul->type != GGML_TYPE_F32 || mul->nb[0] != sizeof(float))) {
-+        return false;
-+    }
-+    const dim3 grid(src->ne[1], src->ne[2], src->ne[3]);
-+    const auto * x = static_cast<const float *>(src->data);
-+    auto * y = static_cast<float *>(dst->data);
-+    if (!mul) {
-+        rms_norm_f32<128><<<grid, 128, 32 * sizeof(float), stream>>>(x, y, src->ne[0],
-+            src->nb[1] / 4, src->nb[2] / 4, src->nb[3] / 4, eps);
-+    } else {
-+        const auto launch = [&](auto round_tag) {
-+            constexpr bool do_round = decltype(round_tag)::value;
-+            rms_norm_f32<128, true, false, do_round><<<grid, 128, 32 * sizeof(float), stream>>>(
-+                x, y, src->ne[0], src->nb[1] / 4, src->nb[2] / 4, src->nb[3] / 4, eps,
-+                static_cast<const float *>(mul->data), mul->nb[1] / 4, mul->nb[2] / 4, mul->nb[3] / 4,
-+                init_fastdiv_values(mul->ne[0]), init_fastdiv_values(mul->ne[1]),
-+                init_fastdiv_values(mul->ne[2]), init_fastdiv_values(mul->ne[3]));
-+        };
-+        if (round) {
-+            launch(std::true_type{});
-+        } else {
-+            launch(std::false_type{});
-+        }
-+    }
-+    return true;
-+}
-+#endif
-+
- template <typename T, int block_size, bool apply_silu, bool add_bias>
- static __global__ void rms_norm_channels_f32(
-         const T *     x,
-@@ -710,6 +751,12 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-     const int64_t s02 = nb02 / ts0;
-     const int64_t s03 = nb03 / ts0;
- 
-+#ifdef GGML_USE_HIP
-+    if (ctx.implementation && ctx.implementation->rms_norm &&
-+        ctx.implementation->rms_norm(src0, dst, nullptr, eps, false, stream)) {
-+        return;
-+    }
-+#endif
-     rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
- }
- 
-@@ -896,6 +943,13 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor *
-     const int mul_nchannels = mul_src->ne[2];
-     const int mul_nsamples  = mul_src->ne[3];
- 
-+#ifdef GGML_USE_HIP
-+    if (ctx.implementation && ctx.implementation->rms_norm &&
-+        ctx.implementation->rms_norm(rms_norm_src, round_bf16_tensor ? round_bf16_tensor : mul_tensor,
-+                                     mul_src, eps, round_bf16_tensor != nullptr, stream)) {
-+        return;
-+    }
-+#endif
-     rms_norm_mul_f32_cuda(src0_d, mul_d, nullptr, dst_d,
-                           ne00, ne01, ne02, ne03,
-                           /*s00*/ s01, s02, s03,
 diff --git a/external/ggml/src/ggml-hip/CMakeLists.txt b/external/ggml/src/ggml-hip/CMakeLists.txt
-index deb063b7..59922cbf 100644
+index deb063b..59922cb 100644
 --- a/external/ggml/src/ggml-hip/CMakeLists.txt
 +++ b/external/ggml/src/ggml-hip/CMakeLists.txt
 @@ -95,6 +95,8 @@ else()
@@ -580,12 +497,75 @@ index deb063b7..59922cbf 100644
  if (CXX_IS_HIPCC)
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
  else()
+diff --git a/external/ggml/src/ggml-hip/halo/cpy.cu b/external/ggml/src/ggml-hip/halo/cpy.cu
+new file mode 100644
+index 0000000..970e4d4
+--- /dev/null
++++ b/external/ggml/src/ggml-hip/halo/cpy.cu
+@@ -0,0 +1,57 @@
++#include "halo.cuh"
++
++#include <algorithm>
++#include <cstdint>
++
++namespace {
++
++struct row_layout {
++    int64_t rows, channels;
++    size_t row_stride, channel_stride, sample_stride;
++};
++
++__global__ void halo_copy_rows(const char * src, char * dst, int64_t width, int64_t rows,
++                              row_layout a, row_layout b) {
++    for (int64_t row = blockIdx.y; row < rows; row += gridDim.y) {
++        const int64_t ar = row % a.rows;
++        const int64_t ac = row / a.rows % a.channels;
++        const int64_t as = row / (a.rows * a.channels);
++        const int64_t br = row % b.rows;
++        const int64_t bc = row / b.rows % b.channels;
++        const int64_t bs = row / (b.rows * b.channels);
++        const auto * x = reinterpret_cast<const int4 *>(src + ar * a.row_stride +
++            ac * a.channel_stride + as * a.sample_stride);
++        auto * y = reinterpret_cast<int4 *>(dst + br * b.row_stride +
++            bc * b.channel_stride + bs * b.sample_stride);
++        const int64_t col = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
++        if (col < width) {
++            y[col] = x[col];
++        }
++    }
++}
++
++} // namespace
++
++bool ggml_hip_halo_cpy(const ggml_tensor * src, ggml_tensor * dst, hipStream_t stream) {
++    if (src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
++        src->ne[0] != dst->ne[0] || src->ne[0] < 64 || ggml_nelements(src) == 0 ||
++        src->ne[0] % 4 != 0 ||
++        src->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
++        return false;
++    }
++    for (const auto * tensor : {src, static_cast<const ggml_tensor *>(dst)}) {
++        if (reinterpret_cast<uintptr_t>(tensor->data) % 16 != 0 ||
++            tensor->nb[1] % 16 != 0 || tensor->nb[2] % 16 != 0 || tensor->nb[3] % 16 != 0) {
++            return false;
++        }
++    }
++    const int64_t width = src->ne[0] / 4;
++    const int64_t rows = ggml_nelements(src) / src->ne[0];
++    const int threads = width <= 32 ? 32 : 256;
++    const dim3 grid((width + threads - 1) / threads, std::min<int64_t>(rows, 65535));
++    const row_layout a{src->ne[1], src->ne[2], src->nb[1], src->nb[2], src->nb[3]};
++    const row_layout b{dst->ne[1], dst->ne[2], dst->nb[1], dst->nb[2], dst->nb[3]};
++    halo_copy_rows<<<grid, threads, 0, stream>>>(static_cast<const char *>(src->data),
++        static_cast<char *>(dst->data), width, rows, a, b);
++    return true;
++}
 diff --git a/external/ggml/src/ggml-hip/halo/halo.cuh b/external/ggml/src/ggml-hip/halo/halo.cuh
 new file mode 100644
-index 00000000..c25a0655
+index 0000000..1377bd2
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/halo/halo.cuh
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,10 @@
 +#pragma once
 +
 +#include "../implementation.cuh"
@@ -594,12 +574,11 @@ index 00000000..c25a0655
 +bool ggml_hip_halo_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t);
 +
 +bool ggml_hip_halo_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
-+bool ggml_hip_halo_rms_norm(const ggml_tensor *, ggml_tensor *, const ggml_tensor *, float, bool, hipStream_t);
 +bool ggml_hip_halo_mmvq(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, const void *,
 +                        const ggml_cuda_mm_fusion_args_device *, hipStream_t);
 diff --git a/external/ggml/src/ggml-hip/halo/im2col.cu b/external/ggml/src/ggml-hip/halo/im2col.cu
 new file mode 100644
-index 00000000..c97aba82
+index 0000000..c97aba8
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/halo/im2col.cu
 @@ -0,0 +1,103 @@
@@ -708,7 +687,7 @@ index 00000000..c97aba82
 +}
 diff --git a/external/ggml/src/ggml-hip/halo/sgemm.cu b/external/ggml/src/ggml-hip/halo/sgemm.cu
 new file mode 100644
-index 00000000..fb8b5d3a
+index 0000000..fb8b5d3
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/halo/sgemm.cu
 @@ -0,0 +1,210 @@
@@ -924,10 +903,10 @@ index 00000000..fb8b5d3a
 +}
 diff --git a/external/ggml/src/ggml-hip/implementation.cuh b/external/ggml/src/ggml-hip/implementation.cuh
 new file mode 100644
-index 00000000..86a71baa
+index 0000000..8c71ae3
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/implementation.cuh
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,16 @@
 +#pragma once
 +
 +#include "ggml.h"
@@ -943,13 +922,12 @@ index 00000000..86a71baa
 +    bool (*cpy)(const ggml_tensor *, ggml_tensor *, hipStream_t);
 +    bool (*mmvq)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, const void *,
 +                 const ggml_cuda_mm_fusion_args_device *, hipStream_t);
-+    bool (*rms_norm)(const ggml_tensor *, ggml_tensor *, const ggml_tensor *, float, bool, hipStream_t);
 +};
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 725bdc79..cf05f235 100644
+index 725bdc7..0a45dcb 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
-@@ -9446,8 +9446,135 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
+@@ -9446,8 +9446,139 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_from_file(const c
      return test_cases;
  }
  
@@ -1037,7 +1015,7 @@ index 725bdc79..cf05f235 100644
 +    cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 128, 768, 256,
 +                                       std::array<int64_t, 2>{2, 3}, one,
 +                                       std::array<int64_t, 4>{0, 3, 2, 1}));
-+    for (int64_t width : {64, 256, 1024, 3072}) {
++    for (int64_t width : {64, 128, 256, 1024, 3072}) {
 +        for (int64_t rows : {1, 16, 147}) {
 +            cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32,
 +                std::array<int64_t, 4>{width, rows, 4, 1}, std::array<int64_t, 4>{0, 2, 1, 3}));
@@ -1046,6 +1024,10 @@ index 725bdc79..cf05f235 100644
 +                std::array<int64_t, 4>{0, 2, 1, 3}));
 +        }
 +    }
++    cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32,
++        std::array<int64_t, 4>{64, 32769, 2, 1}, std::array<int64_t, 4>{0, 2, 1, 3}));
++    cases.emplace_back(new test_cont(GGML_TYPE_F32, {128, 2, 4, 1}, true));
++    cases.emplace_back(new test_cont(GGML_TYPE_F32, {128, 5, 4, 1}, true));
 +    for (bool multiply : {false, true}) {
 +        for (int64_t width : {255, 256, 512, 1024, 2048, 3072, 4096, 4097}) {
 +            for (int64_t rows : {1, 16}) {
@@ -1056,7 +1038,7 @@ index 725bdc79..cf05f235 100644
 +    }
 +    for (int64_t k : {512, 1024, 2048, 3072, 8192}) {
 +        for (int64_t m : {1024, 3072}) {
-+            cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 1, m, k, one, one));
++            cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, m, 1, k, one, one));
 +        }
 +    }
 +    for (bool bias : {false, true}) {
@@ -1086,7 +1068,7 @@ index 725bdc79..cf05f235 100644
      auto filter_test_cases = [](std::vector<std::unique_ptr<test_case>> & test_cases, const char * params_filter) {
          if (params_filter == nullptr) {
              return;
-@@ -9467,7 +9594,9 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
+@@ -9467,7 +9598,9 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
  
      std::vector<std::unique_ptr<test_case>> test_cases;
  
@@ -1097,7 +1079,7 @@ index 725bdc79..cf05f235 100644
          switch (mode) {
          case MODE_TEST:
          case MODE_GRAD:
-@@ -9671,6 +9800,8 @@ static void usage(char ** argv) {
+@@ -9671,6 +9804,8 @@ static void usage(char ** argv) {
      printf("    op names for -o are as given by ggml_op_desc() (e.g. ADD, MUL_MAT, etc),\n");
      printf("        optionally including the full test case string (e.g. \"ADD(type=f16,ne=[1,1,8,1],nr=[1,1,1,1],nf=1)\")\n");
      printf("    --output specifies output format (default: console, options: console, sql, csv)\n");
@@ -1106,7 +1088,7 @@ index 725bdc79..cf05f235 100644
      printf("    --list-ops lists all available GGML operations\n");
      printf("    --show-coverage shows test coverage\n");
      printf("    --test-file reads test operators from a test file generated by llama-export-graph-ops\n");
-@@ -9683,6 +9814,8 @@ int main(int argc, char ** argv) {
+@@ -9683,6 +9818,8 @@ int main(int argc, char ** argv) {
      const char * backend_filter = nullptr;
      const char * params_filter = nullptr;
      const char * test_file_path = nullptr;
@@ -1115,7 +1097,7 @@ index 725bdc79..cf05f235 100644
  
      for (int i = 1; i < argc; i++) {
          if (strcmp(argv[i], "test") == 0) {
-@@ -9714,6 +9847,12 @@ int main(int argc, char ** argv) {
+@@ -9714,6 +9851,12 @@ int main(int argc, char ** argv) {
                  usage(argv);
                  return 1;
              }
@@ -1128,7 +1110,7 @@ index 725bdc79..cf05f235 100644
          } else if (strcmp(argv[i], "--output") == 0) {
              if (i + 1 < argc) {
                  if (!output_format_from_str(argv[++i], output_format)) {
-@@ -9742,6 +9881,8 @@ int main(int argc, char ** argv) {
+@@ -9742,6 +9885,8 @@ int main(int argc, char ** argv) {
              return 1;
          }
      }
@@ -1137,7 +1119,7 @@ index 725bdc79..cf05f235 100644
  
      // load and enumerate backends
      ggml_backend_load_all();
-@@ -9773,8 +9914,9 @@ int main(int argc, char ** argv) {
+@@ -9773,8 +9918,9 @@ int main(int argc, char ** argv) {
              continue;
          }
  
@@ -1149,7 +1131,7 @@ index 725bdc79..cf05f235 100644
  
          ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
          auto ggml_backend_set_n_threads_fn = (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
-@@ -9789,7 +9931,7 @@ int main(int argc, char ** argv) {
+@@ -9789,7 +9935,7 @@ int main(int argc, char ** argv) {
                                                               false, "", ggml_backend_dev_description(dev),
                                                               total / 1024 / 1024, free / 1024 / 1024, true));
  
@@ -1159,7 +1141,7 @@ index 725bdc79..cf05f235 100644
          if (ok) {
              n_ok++;
 diff --git a/include/audiocpp.h b/include/audiocpp.h
-index d13e6f97..1f03823c 100644
+index d13e6f9..1f03823 100644
 --- a/include/audiocpp.h
 +++ b/include/audiocpp.h
 @@ -251,6 +251,11 @@ AUDIOCPP_API audiocpp_status audiocpp_session_create(const audiocpp_model * mode
@@ -1175,7 +1157,7 @@ index d13e6f97..1f03823c 100644
  
  AUDIOCPP_API const char * audiocpp_session_family(const audiocpp_session * session);
 diff --git a/include/engine/community_models/outetts/llama.h b/include/engine/community_models/outetts/llama.h
-index b312d060..df070108 100644
+index b312d06..df07010 100644
 --- a/include/engine/community_models/outetts/llama.h
 +++ b/include/engine/community_models/outetts/llama.h
 @@ -53,9 +53,7 @@ class OuteTTSLlamaRuntime final {
@@ -1190,7 +1172,7 @@ index b312d060..df070108 100644
          size_t weight_context_bytes = 1024ull * 1024ull * 1024ull,
  #else
 diff --git a/include/engine/community_models/vieneu_v3_turbo/talker.h b/include/engine/community_models/vieneu_v3_turbo/talker.h
-index 05983c37..c6de5033 100644
+index 05983c3..c6de503 100644
 --- a/include/engine/community_models/vieneu_v3_turbo/talker.h
 +++ b/include/engine/community_models/vieneu_v3_turbo/talker.h
 @@ -1,6 +1,7 @@
@@ -1213,7 +1195,7 @@ index 05983c37..c6de5033 100644
          size_t talker_constant_context_bytes,
          size_t code_predictor_constant_context_bytes,
 diff --git a/include/engine/community_models/zipvoice/synthesize.h b/include/engine/community_models/zipvoice/synthesize.h
-index 869f8276..8657b368 100644
+index 869f827..8657b36 100644
 --- a/include/engine/community_models/zipvoice/synthesize.h
 +++ b/include/engine/community_models/zipvoice/synthesize.h
 @@ -19,13 +19,11 @@ std::shared_ptr<ZipVoiceRuntimeState> make_zipvoice_runtime_state();
@@ -1233,7 +1215,7 @@ index 869f8276..8657b368 100644
      std::shared_ptr<ZipVoiceRuntimeState> runtime = make_zipvoice_runtime_state();
  };
 diff --git a/include/engine/framework/core/backend.h b/include/engine/framework/core/backend.h
-index b02db0fd..936e3ad5 100644
+index b02db0f..936e3ad 100644
 --- a/include/engine/framework/core/backend.h
 +++ b/include/engine/framework/core/backend.h
 @@ -20,6 +20,8 @@ struct BackendConfig {
@@ -1246,7 +1228,7 @@ index b02db0fd..936e3ad5 100644
  
  struct BackendMemorySnapshot {
 diff --git a/include/engine/models/heartmula/mula.h b/include/engine/models/heartmula/mula.h
-index 77e43b6c..629f6b34 100644
+index 77e43b6..629f6b3 100644
 --- a/include/engine/models/heartmula/mula.h
 +++ b/include/engine/models/heartmula/mula.h
 @@ -167,9 +167,7 @@ class HeartMuLaWeightsRuntime final {
@@ -1261,7 +1243,7 @@ index 77e43b6c..629f6b34 100644
          size_t constant_context_bytes = 256ull * 1024ull * 1024ull,
          size_t backbone_prefill_graph_arena_bytes = 1536ull * 1024ull * 1024ull,
 diff --git a/include/engine/models/qwen3_tts/talker.h b/include/engine/models/qwen3_tts/talker.h
-index 22509d54..5b8ed502 100644
+index 22509d5..5b8ed50 100644
 --- a/include/engine/models/qwen3_tts/talker.h
 +++ b/include/engine/models/qwen3_tts/talker.h
 @@ -1,6 +1,7 @@
@@ -1284,7 +1266,7 @@ index 22509d54..5b8ed502 100644
          size_t talker_constant_context_bytes,
          size_t code_predictor_constant_context_bytes,
 diff --git a/include/engine/models/vibevoice/connector.h b/include/engine/models/vibevoice/connector.h
-index 899f6c6f..2723d6d4 100644
+index 899f6c6..2723d6d 100644
 --- a/include/engine/models/vibevoice/connector.h
 +++ b/include/engine/models/vibevoice/connector.h
 @@ -50,9 +50,7 @@ class VibeVoiceConnectorWeightsRuntime final {
@@ -1299,7 +1281,7 @@ index 899f6c6f..2723d6d4 100644
          size_t constant_context_bytes = 32ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
 diff --git a/include/engine/models/vibevoice/decoder.h b/include/engine/models/vibevoice/decoder.h
-index 151d43f2..5251eb1a 100644
+index 151d43f..5251eb1 100644
 --- a/include/engine/models/vibevoice/decoder.h
 +++ b/include/engine/models/vibevoice/decoder.h
 @@ -107,9 +107,7 @@ class VibeVoiceQwen2WeightsRuntime final {
@@ -1314,7 +1296,7 @@ index 151d43f2..5251eb1a 100644
          size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
 diff --git a/include/engine/models/vibevoice/diffusion_head.h b/include/engine/models/vibevoice/diffusion_head.h
-index 24f055cf..8961adcc 100644
+index 24f055c..8961adc 100644
 --- a/include/engine/models/vibevoice/diffusion_head.h
 +++ b/include/engine/models/vibevoice/diffusion_head.h
 @@ -59,9 +59,7 @@ class VibeVoiceDiffusionHeadWeightsRuntime final {
@@ -1329,7 +1311,7 @@ index 24f055cf..8961adcc 100644
          size_t constant_context_bytes = 64ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
 diff --git a/include/engine/models/vibevoice/tokenizer_audio.h b/include/engine/models/vibevoice/tokenizer_audio.h
-index 874fc2f8..b10a91c2 100644
+index 874fc2f..b10a91c 100644
 --- a/include/engine/models/vibevoice/tokenizer_audio.h
 +++ b/include/engine/models/vibevoice/tokenizer_audio.h
 @@ -95,9 +95,7 @@ class VibeVoiceTokenizerWeightsRuntime final {
@@ -1344,7 +1326,7 @@ index 874fc2f8..b10a91c2 100644
          size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
 diff --git a/include/engine/models/vibevoice_asr/connector.h b/include/engine/models/vibevoice_asr/connector.h
-index 7f792579..dcec7084 100644
+index 7f79257..dcec708 100644
 --- a/include/engine/models/vibevoice_asr/connector.h
 +++ b/include/engine/models/vibevoice_asr/connector.h
 @@ -50,9 +50,7 @@ class VibeVoiceConnectorWeightsRuntime final {
@@ -1359,7 +1341,7 @@ index 7f792579..dcec7084 100644
          size_t constant_context_bytes = 32ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
 diff --git a/include/engine/models/vibevoice_asr/speech_encoder.h b/include/engine/models/vibevoice_asr/speech_encoder.h
-index 1e4d6cde..f870e53a 100644
+index 1e4d6cd..f870e53 100644
 --- a/include/engine/models/vibevoice_asr/speech_encoder.h
 +++ b/include/engine/models/vibevoice_asr/speech_encoder.h
 @@ -15,9 +15,7 @@ class VibeVoiceASRSpeechEncoder {
@@ -1374,7 +1356,7 @@ index 1e4d6cde..f870e53a 100644
          size_t connector_weight_context_bytes,
          assets::TensorStorageType tokenizer_weight_storage_type,
 diff --git a/include/engine/models/vibevoice_asr/speech_tokenizer.h b/include/engine/models/vibevoice_asr/speech_tokenizer.h
-index f566636a..434c43ef 100644
+index f566636..434c43e 100644
 --- a/include/engine/models/vibevoice_asr/speech_tokenizer.h
 +++ b/include/engine/models/vibevoice_asr/speech_tokenizer.h
 @@ -95,9 +95,7 @@ class VibeVoiceTokenizerWeightsRuntime final {
@@ -1389,7 +1371,7 @@ index f566636a..434c43ef 100644
          size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
 diff --git a/include/engine/models/vibevoice_asr/text_decoder.h b/include/engine/models/vibevoice_asr/text_decoder.h
-index 60479c35..6af4ed3b 100644
+index 60479c3..6af4ed3 100644
 --- a/include/engine/models/vibevoice_asr/text_decoder.h
 +++ b/include/engine/models/vibevoice_asr/text_decoder.h
 @@ -108,9 +108,7 @@ class VibeVoiceQwen2WeightsRuntime final {
@@ -1404,7 +1386,7 @@ index 60479c35..6af4ed3b 100644
          size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
          assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native,
 diff --git a/src/capi/audiocpp.cpp b/src/capi/audiocpp.cpp
-index eed6e572..40b966cb 100644
+index eed6e57..40b966c 100644
 --- a/src/capi/audiocpp.cpp
 +++ b/src/capi/audiocpp.cpp
 @@ -553,6 +553,14 @@ audiocpp_status audiocpp_session_create(const audiocpp_model * model,
@@ -1431,7 +1413,7 @@ index eed6e572..40b966cb 100644
  
          auto handle = std::make_unique<audiocpp_session>();
 diff --git a/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h b/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h
-index 27b26398..7e15448f 100644
+index 27b2639..7e15448 100644
 --- a/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h
 +++ b/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h
 @@ -388,7 +388,8 @@ T3TurboLayerOutput build_t3_turbo_layer_cached(
@@ -1445,7 +1427,7 @@ index 27b26398..7e15448f 100644
  
  class T3TurboBackendOwner {
 diff --git a/src/community_models/fish_drama3/generator.cpp b/src/community_models/fish_drama3/generator.cpp
-index d7ce7d00..64f48fc7 100644
+index d7ce7d0..64f48fc 100644
 --- a/src/community_models/fish_drama3/generator.cpp
 +++ b/src/community_models/fish_drama3/generator.cpp
 @@ -157,7 +157,10 @@ Drama3Generator::Drama3Generator(std::shared_ptr<const Drama3Assets> assets,
@@ -1461,7 +1443,7 @@ index d7ce7d00..64f48fc7 100644
      }
      codec_execution_ = std::make_unique<core::ExecutionContext>(codec_backend);
 diff --git a/src/community_models/outetts/llama.cpp b/src/community_models/outetts/llama.cpp
-index d63b904a..40c86581 100644
+index d63b904..40c8658 100644
 --- a/src/community_models/outetts/llama.cpp
 +++ b/src/community_models/outetts/llama.cpp
 @@ -532,19 +532,17 @@ private:
@@ -1519,7 +1501,7 @@ index d63b904a..40c86581 100644
  
  OuteTTSLlamaRuntime::~OuteTTSLlamaRuntime() = default;
 diff --git a/src/community_models/outetts/session.cpp b/src/community_models/outetts/session.cpp
-index 87feefba..838030bb 100644
+index 87feefb..838030b 100644
 --- a/src/community_models/outetts/session.cpp
 +++ b/src/community_models/outetts/session.cpp
 @@ -587,9 +587,10 @@ OuteTTSLlamaRuntime &OuteTTSSession::llama(bool voice_cloning) {
@@ -1536,7 +1518,7 @@ index 87feefba..838030bb 100644
                                        {"outetts.llama_weight_context_mb"},
                                        kDefaultLlamaWeightContextBytes),
 diff --git a/src/community_models/vieneu_v3_turbo/session.cpp b/src/community_models/vieneu_v3_turbo/session.cpp
-index 2b69e374..eaf429fc 100644
+index 2b69e37..eaf429f 100644
 --- a/src/community_models/vieneu_v3_turbo/session.cpp
 +++ b/src/community_models/vieneu_v3_turbo/session.cpp
 @@ -331,6 +331,7 @@ core::BackendConfig voice_prompt_backend_config(const runtime::SessionOptions &
@@ -1563,7 +1545,7 @@ index 2b69e374..eaf429fc 100644
          talker_constant_context_bytes_,
          code_predictor_constant_context_bytes_,
 diff --git a/src/community_models/vieneu_v3_turbo/talker.cpp b/src/community_models/vieneu_v3_turbo/talker.cpp
-index 0eb8f38f..a0d9bd6b 100644
+index 0eb8f38..a0d9bd6 100644
 --- a/src/community_models/vieneu_v3_turbo/talker.cpp
 +++ b/src/community_models/vieneu_v3_turbo/talker.cpp
 @@ -1070,15 +1070,13 @@ class VieNeuTalkerWeightsRuntime {
@@ -1626,7 +1608,7 @@ index 0eb8f38f..a0d9bd6b 100644
          talker_constant_context_bytes,
          code_predictor_constant_context_bytes,
 diff --git a/src/community_models/zipvoice/session.cpp b/src/community_models/zipvoice/session.cpp
-index 43f170f7..70ead06d 100644
+index 43f170f..70ead06 100644
 --- a/src/community_models/zipvoice/session.cpp
 +++ b/src/community_models/zipvoice/session.cpp
 @@ -167,9 +167,7 @@ public:
@@ -1641,7 +1623,7 @@ index 43f170f7..70ead06d 100644
  
      std::string family() const noexcept override { return kFamily; }
 diff --git a/src/community_models/zipvoice/synthesize.cpp b/src/community_models/zipvoice/synthesize.cpp
-index 79f458e7..4b68efab 100644
+index 79f458e..4b68efa 100644
 --- a/src/community_models/zipvoice/synthesize.cpp
 +++ b/src/community_models/zipvoice/synthesize.cpp
 @@ -233,7 +233,7 @@ core::BackendType resolve_backend_type(const ZipVoiceComputeDevice & device) {
@@ -1696,7 +1678,7 @@ index 79f458e7..4b68efab 100644
  
  // Fill per-stack pad bias / conv gate leaves given the valid frame count in
 diff --git a/src/framework/codecs/s3gen_runtime.cpp b/src/framework/codecs/s3gen_runtime.cpp
-index 61321949..2a08620a 100644
+index 6132194..2a08620 100644
 --- a/src/framework/codecs/s3gen_runtime.cpp
 +++ b/src/framework/codecs/s3gen_runtime.cpp
 @@ -471,7 +471,8 @@ std::vector<float> flow_relative_positional_encoding(int64_t frames, int64_t cha
@@ -1710,7 +1692,7 @@ index 61321949..2a08620a 100644
  
  using Clock = std::chrono::steady_clock;
 diff --git a/src/framework/core/backend.cpp b/src/framework/core/backend.cpp
-index d7e8f79f..e365c676 100644
+index d7e8f79..e365c67 100644
 --- a/src/framework/core/backend.cpp
 +++ b/src/framework/core/backend.cpp
 @@ -216,11 +216,13 @@ ggml_backend_t init_device_backend(BackendType type, const char * label, const B
@@ -1750,7 +1732,7 @@ index d7e8f79f..e365c676 100644
              if (backend == nullptr) {
                  throw std::runtime_error("Failed to initialize best backend");
 diff --git a/src/framework/core/execution_context.cpp b/src/framework/core/execution_context.cpp
-index 30c20261..7f98e7e2 100644
+index 30c2026..7f98e7e 100644
 --- a/src/framework/core/execution_context.cpp
 +++ b/src/framework/core/execution_context.cpp
 @@ -20,7 +20,7 @@ ExecutionContext::~ExecutionContext() {
@@ -1772,7 +1754,7 @@ index 30c20261..7f98e7e2 100644
      other.backend_ = nullptr;
      return *this;
 diff --git a/src/framework/modules/speaker_encoders/campplus_encoder.cpp b/src/framework/modules/speaker_encoders/campplus_encoder.cpp
-index 3fc8f419..23b913f6 100644
+index 3fc8f41..23b913f 100644
 --- a/src/framework/modules/speaker_encoders/campplus_encoder.cpp
 +++ b/src/framework/modules/speaker_encoders/campplus_encoder.cpp
 @@ -21,7 +21,8 @@ namespace engine::modules {
@@ -1786,7 +1768,7 @@ index 3fc8f419..23b913f6 100644
  
  int64_t tensor_elements(const std::vector<int64_t> & shape) {
 diff --git a/src/framework/modules/speech_encoders/s3_tokenizer.cpp b/src/framework/modules/speech_encoders/s3_tokenizer.cpp
-index a21bf321..14526706 100644
+index a21bf32..1452670 100644
 --- a/src/framework/modules/speech_encoders/s3_tokenizer.cpp
 +++ b/src/framework/modules/speech_encoders/s3_tokenizer.cpp
 @@ -32,7 +32,8 @@ inline int torch_round_to_int(float value) {
@@ -1800,7 +1782,7 @@ index a21bf321..14526706 100644
  
  struct S3TokenizerLogMelOutputs {
 diff --git a/src/models/chatterbox/components/t3_runtime.h b/src/models/chatterbox/components/t3_runtime.h
-index 06d86003..a5ccc7b6 100644
+index 06d8600..a5ccc7b 100644
 --- a/src/models/chatterbox/components/t3_runtime.h
 +++ b/src/models/chatterbox/components/t3_runtime.h
 @@ -691,7 +691,8 @@ T3LayerBackendOutputs build_t3_layer_backend_cached(
@@ -1814,7 +1796,7 @@ index 06d86003..a5ccc7b6 100644
  
  inline void fill_t3_decode_attention_mask(
 diff --git a/src/models/chatterbox/s3_tokenizer_impl.cpp b/src/models/chatterbox/s3_tokenizer_impl.cpp
-index 8637abbb..8ceec8f0 100644
+index 8637abb..8ceec8f 100644
 --- a/src/models/chatterbox/s3_tokenizer_impl.cpp
 +++ b/src/models/chatterbox/s3_tokenizer_impl.cpp
 @@ -18,7 +18,8 @@ inline int torch_round_to_int(float value) {
@@ -1828,7 +1810,7 @@ index 8637abbb..8ceec8f0 100644
  
  S3TokenizerV2Weights::Conv1dWeights load_tokenizer_conv1d(
 diff --git a/src/models/heartmula/mula.cpp b/src/models/heartmula/mula.cpp
-index fed7d0b4..f688eebf 100644
+index fed7d0b..f688eeb 100644
 --- a/src/models/heartmula/mula.cpp
 +++ b/src/models/heartmula/mula.cpp
 @@ -1771,9 +1771,7 @@ HeartMuLaDecoderCachedState & HeartMuLaDecoderCachedState::operator=(
@@ -1868,7 +1850,7 @@ index fed7d0b4..f688eebf 100644
      backbone_constants_ = std::make_unique<core::ConstantTensorCache>(
          backend_,
 diff --git a/src/models/heartmula/session.cpp b/src/models/heartmula/session.cpp
-index 5cc8284f..f937cc5d 100644
+index 5cc8284..f937cc5 100644
 --- a/src/models/heartmula/session.cpp
 +++ b/src/models/heartmula/session.cpp
 @@ -182,9 +182,7 @@ HeartMuLaSession::HeartMuLaSession(
@@ -1883,7 +1865,7 @@ index 5cc8284f..f937cc5d 100644
                RuntimeSessionBase::options().options,
                {"heartmula.generator_weight_context_mb"},
 diff --git a/src/models/irodori_tts/session.cpp b/src/models/irodori_tts/session.cpp
-index 553c8a4a..2e7ed605 100644
+index 553c8a4..2e7ed60 100644
 --- a/src/models/irodori_tts/session.cpp
 +++ b/src/models/irodori_tts/session.cpp
 @@ -557,6 +557,7 @@ IrodoriTTSSession::IrodoriTTSSession(
@@ -1895,7 +1877,7 @@ index 553c8a4a..2e7ed605 100644
      codec_execution_context_ =
          std::make_unique<engine::core::ExecutionContext>(codec_backend_config);
 diff --git a/src/models/meanvc2/session.cpp b/src/models/meanvc2/session.cpp
-index 669997cf..a0655642 100644
+index 669997c..a065564 100644
 --- a/src/models/meanvc2/session.cpp
 +++ b/src/models/meanvc2/session.cpp
 @@ -52,6 +52,7 @@ std::unique_ptr<runtime::IVoiceTaskSession> create_meanvc2_session(
@@ -1907,7 +1889,7 @@ index 669997cf..a0655642 100644
      return config;
  }
 diff --git a/src/models/qwen3_tts/session.cpp b/src/models/qwen3_tts/session.cpp
-index 29f52bc5..c1527d07 100644
+index 29f52bc..c1527d0 100644
 --- a/src/models/qwen3_tts/session.cpp
 +++ b/src/models/qwen3_tts/session.cpp
 @@ -152,6 +152,7 @@ core::BackendConfig voice_prompt_backend_config(const runtime::SessionOptions &
@@ -1934,7 +1916,7 @@ index 29f52bc5..c1527d07 100644
          talker_constant_context_bytes_,
          code_predictor_constant_context_bytes_,
 diff --git a/src/models/qwen3_tts/talker.cpp b/src/models/qwen3_tts/talker.cpp
-index 9a425221..8a0b24da 100644
+index 9a42522..8a0b24d 100644
 --- a/src/models/qwen3_tts/talker.cpp
 +++ b/src/models/qwen3_tts/talker.cpp
 @@ -958,9 +958,7 @@ class Qwen3TalkerWeightsRuntime {
@@ -2000,7 +1982,7 @@ index 9a425221..8a0b24da 100644
          talker_constant_context_bytes,
          code_predictor_constant_context_bytes,
 diff --git a/src/models/vibevoice/connector.cpp b/src/models/vibevoice/connector.cpp
-index 51ce3429..43315fae 100644
+index 51ce342..43315fa 100644
 --- a/src/models/vibevoice/connector.cpp
 +++ b/src/models/vibevoice/connector.cpp
 @@ -244,15 +244,13 @@ VibeVoiceConnectorWeightsBundle load_vibevoice_connector_weights(
@@ -2041,7 +2023,7 @@ index 51ce3429..43315fae 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/src/models/vibevoice/decoder.cpp b/src/models/vibevoice/decoder.cpp
-index 8fed455b..14838016 100644
+index 8fed455..1483801 100644
 --- a/src/models/vibevoice/decoder.cpp
 +++ b/src/models/vibevoice/decoder.cpp
 @@ -1465,15 +1465,13 @@ VibeVoiceQwen2CachedState & VibeVoiceQwen2CachedState::operator=(VibeVoiceQwen2C
@@ -2081,7 +2063,7 @@ index 8fed455b..14838016 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/src/models/vibevoice/diffusion_head.cpp b/src/models/vibevoice/diffusion_head.cpp
-index b781e459..a43ecf7c 100644
+index b781e45..a43ecf7 100644
 --- a/src/models/vibevoice/diffusion_head.cpp
 +++ b/src/models/vibevoice/diffusion_head.cpp
 @@ -400,15 +400,13 @@ VibeVoiceDiffusionHeadWeights load_vibevoice_diffusion_head_weights(
@@ -2122,7 +2104,7 @@ index b781e459..a43ecf7c 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/src/models/vibevoice/session.cpp b/src/models/vibevoice/session.cpp
-index 9c218ca5..c13e2da5 100644
+index 9c218ca..c13e2da 100644
 --- a/src/models/vibevoice/session.cpp
 +++ b/src/models/vibevoice/session.cpp
 @@ -208,9 +208,7 @@ VibeVoiceSession::VibeVoiceSession(
@@ -2170,7 +2152,7 @@ index 9c218ca5..c13e2da5 100644
            64ull * 1024ull * 1024ull,
            options.options.find("vibevoice.diffusion_head_weight_type") != options.options.end()
 diff --git a/src/models/vibevoice/tokenizer_audio.cpp b/src/models/vibevoice/tokenizer_audio.cpp
-index 809aa3d6..84eecdb8 100644
+index 809aa3d..84eecdb 100644
 --- a/src/models/vibevoice/tokenizer_audio.cpp
 +++ b/src/models/vibevoice/tokenizer_audio.cpp
 @@ -1658,15 +1658,13 @@ VibeVoiceTokenizerLatents unscale_vibevoice_acoustic_latents_for_decoder(
@@ -2211,7 +2193,7 @@ index 809aa3d6..84eecdb8 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/src/models/vibevoice_asr/connector.cpp b/src/models/vibevoice_asr/connector.cpp
-index 7620735a..72fa04ec 100644
+index 7620735..72fa04e 100644
 --- a/src/models/vibevoice_asr/connector.cpp
 +++ b/src/models/vibevoice_asr/connector.cpp
 @@ -247,15 +247,13 @@ VibeVoiceConnectorWeightsBundle load_vibevoice_connector_weights(
@@ -2252,7 +2234,7 @@ index 7620735a..72fa04ec 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/src/models/vibevoice_asr/session.cpp b/src/models/vibevoice_asr/session.cpp
-index a2438e62..b4273977 100644
+index a2438e6..b427397 100644
 --- a/src/models/vibevoice_asr/session.cpp
 +++ b/src/models/vibevoice_asr/session.cpp
 @@ -571,18 +571,14 @@ VibeVoiceASRSession::VibeVoiceASRSession(
@@ -2277,7 +2259,7 @@ index a2438e62..b4273977 100644
            128ull * 1024ull * 1024ull,
            decoder_weight_storage_type_,
 diff --git a/src/models/vibevoice_asr/speech_encoder.cpp b/src/models/vibevoice_asr/speech_encoder.cpp
-index 2883b5c7..8fc7820a 100644
+index 2883b5c..8fc7820 100644
 --- a/src/models/vibevoice_asr/speech_encoder.cpp
 +++ b/src/models/vibevoice_asr/speech_encoder.cpp
 @@ -42,37 +42,31 @@ void append_latents(VibeVoiceTokenizerLatents & dst, const VibeVoiceTokenizerLat
@@ -2325,7 +2307,7 @@ index 2883b5c7..8fc7820a 100644
            64ull * 1024ull * 1024ull,
            connector_weight_storage_type) {
 diff --git a/src/models/vibevoice_asr/speech_tokenizer.cpp b/src/models/vibevoice_asr/speech_tokenizer.cpp
-index 1f4cd233..b73bc758 100644
+index 1f4cd23..b73bc75 100644
 --- a/src/models/vibevoice_asr/speech_tokenizer.cpp
 +++ b/src/models/vibevoice_asr/speech_tokenizer.cpp
 @@ -1704,15 +1704,13 @@ VibeVoiceTokenizerLatents unscale_vibevoice_acoustic_latents_for_decoder(
@@ -2366,7 +2348,7 @@ index 1f4cd233..b73bc758 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/src/models/vibevoice_asr/text_decoder.cpp b/src/models/vibevoice_asr/text_decoder.cpp
-index b6353e6c..b2972cc7 100644
+index b6353e6..b2972cc 100644
 --- a/src/models/vibevoice_asr/text_decoder.cpp
 +++ b/src/models/vibevoice_asr/text_decoder.cpp
 @@ -1116,15 +1116,13 @@ VibeVoiceQwen2CachedState & VibeVoiceQwen2CachedState::operator=(VibeVoiceQwen2C
@@ -2406,7 +2388,7 @@ index b6353e6c..b2972cc7 100644
              weight_storage_type));
      engine::debug::timing_log_scalar(
 diff --git a/tests/qwen3_tts/test_speech_decoder_streaming.cpp b/tests/qwen3_tts/test_speech_decoder_streaming.cpp
-index d366e133..808a6701 100644
+index d366e13..808a670 100644
 --- a/tests/qwen3_tts/test_speech_decoder_streaming.cpp
 +++ b/tests/qwen3_tts/test_speech_decoder_streaming.cpp
 @@ -74,7 +74,7 @@ int main(int argc, char ** argv) {
@@ -2419,7 +2401,7 @@ index d366e133..808a6701 100644
              auto step = talker.create_step_runtime(weights, assets->config.talker.max_position_embeddings, 256);
              codes = step->generate(prompt_builder.build_prefill(request), request.generation).generated_codes;
 diff --git a/tests/unittests/test_backend_device_resolution.cpp b/tests/unittests/test_backend_device_resolution.cpp
-index 44af8797..7b6ab3a2 100644
+index 44af879..7b6ab3a 100644
 --- a/tests/unittests/test_backend_device_resolution.cpp
 +++ b/tests/unittests/test_backend_device_resolution.cpp
 @@ -361,6 +361,28 @@ void test_json_writer_exact_integers_and_nulls() {
@@ -2460,7 +2442,7 @@ index 44af8797..7b6ab3a2 100644
          test_json_listing_matches_selection();
          test_json_writer_exact_integers_and_nulls();
 diff --git a/tests/unittests/test_server_config.cpp b/tests/unittests/test_server_config.cpp
-index 3dee4eaf..e447677b 100644
+index 3dee4ea..e447677 100644
 --- a/tests/unittests/test_server_config.cpp
 +++ b/tests/unittests/test_server_config.cpp
 @@ -1110,6 +1110,14 @@ void test_per_model_devices() {
@@ -2479,7 +2461,7 @@ index 3dee4eaf..e447677b 100644
          test_model_slots();
          test_inline_default_and_named_presets();
 diff --git a/tests/zipvoice/zipvoice_parity_main.cpp b/tests/zipvoice/zipvoice_parity_main.cpp
-index aeaddacc..022110e7 100644
+index aeaddac..022110e 100644
 --- a/tests/zipvoice/zipvoice_parity_main.cpp
 +++ b/tests/zipvoice/zipvoice_parity_main.cpp
 @@ -201,8 +201,8 @@ int main(int argc, char ** argv) {
@@ -2493,65 +2475,3 @@ index aeaddacc..022110e7 100644
  
      // ---- stage 0: raw text encoder vs torch taps (when provided) ----
      if (argc > 3) {
-diff --git a/external/ggml/src/ggml-hip/halo/cpy.cu b/external/ggml/src/ggml-hip/halo/cpy.cu
-new file mode 100644
-index 00000000..0f66d1ba
---- /dev/null
-+++ b/external/ggml/src/ggml-hip/halo/cpy.cu
-@@ -0,0 +1,56 @@
-+#include "halo.cuh"
-+
-+#include <algorithm>
-+#include <cstdint>
-+
-+namespace {
-+
-+struct row_layout {
-+    int64_t rows, channels;
-+    size_t row_stride, channel_stride, sample_stride;
-+};
-+
-+__global__ void halo_copy_rows(const char * src, char * dst, int64_t width, int64_t rows,
-+                              row_layout a, row_layout b) {
-+    for (int64_t row = blockIdx.y; row < rows; row += gridDim.y) {
-+        const int64_t ar = row % a.rows;
-+        const int64_t ac = row / a.rows % a.channels;
-+        const int64_t as = row / (a.rows * a.channels);
-+        const int64_t br = row % b.rows;
-+        const int64_t bc = row / b.rows % b.channels;
-+        const int64_t bs = row / (b.rows * b.channels);
-+        const auto * x = reinterpret_cast<const int4 *>(src + ar * a.row_stride +
-+            ac * a.channel_stride + as * a.sample_stride);
-+        auto * y = reinterpret_cast<int4 *>(dst + br * b.row_stride +
-+            bc * b.channel_stride + bs * b.sample_stride);
-+        const int64_t col = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
-+        if (col < width) {
-+            y[col] = x[col];
-+        }
-+    }
-+}
-+
-+} // namespace
-+
-+bool ggml_hip_halo_cpy(const ggml_tensor * src, ggml_tensor * dst, hipStream_t stream) {
-+    if (src->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
-+        src->ne[0] != dst->ne[0] || src->ne[0] <= 0 || ggml_nelements(src) == 0 ||
-+        src->ne[0] % 4 != 0 ||
-+        src->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
-+        return false;
-+    }
-+    for (const auto * tensor : {src, static_cast<const ggml_tensor *>(dst)}) {
-+        if (reinterpret_cast<uintptr_t>(tensor->data) % 16 != 0 ||
-+            tensor->nb[1] % 16 != 0 || tensor->nb[2] % 16 != 0 || tensor->nb[3] % 16 != 0) {
-+            return false;
-+        }
-+    }
-+    const int64_t width = src->ne[0] / 4;
-+    const int64_t rows = ggml_nelements(src) / src->ne[0];
-+    const dim3 grid((width + 255) / 256, std::min<int64_t>(rows, 65535));
-+    const row_layout a{src->ne[1], src->ne[2], src->nb[1], src->nb[2], src->nb[3]};
-+    const row_layout b{dst->ne[1], dst->ne[2], dst->nb[1], dst->nb[2], dst->nb[3]};
-+    halo_copy_rows<<<grid, 256, 0, stream>>>(static_cast<const char *>(src->data),
-+        static_cast<char *>(dst->data), width, rows, a, b);
-+    return true;
-+}

@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final]
         default: complete
   push:
     branches: [experiment/rocm-v2-probes]
@@ -48,7 +48,7 @@ jobs:
             ccache-4.13.6-linux-x86_64-musl-static/ccache
           source/toolchain/ccache --version
           sha256sum source/toolchain/ccache > source/ccache-sha256.txt
-          if [[ "$VALIDATION_GROUP" == halo || "$VALIDATION_GROUP" == halo-ops ]]; then
+          if [[ "$VALIDATION_GROUP" == halo || "$VALIDATION_GROUP" == halo-ops || "$VALIDATION_GROUP" == halo-final ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             git -C source config core.autocrlf false
@@ -63,6 +63,21 @@ jobs:
             cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
             if [[ "$VALIDATION_GROUP" == halo-ops ]]; then
               python3 source/.github/tests/rocm_v2_halo.py --root source --operators
+            elif [[ "$VALIDATION_GROUP" == halo-final ]]; then
+              cp .github/tests/halo-model-files.json .github/tests/halo-baseline.patch .github/tests/halo-copy.patch .github/tests/halo-source.patch source/.github/tests/
+              cp -a source source-baseline
+              cp -a source source-copy
+              git -C source-copy apply --reverse ../.github/tests/halo-source.patch
+              git -C source-copy apply ../.github/tests/halo-copy.patch
+              git -C source-baseline apply --reverse ../.github/tests/halo-source.patch
+              git -C source-baseline apply ../.github/tests/halo-baseline.patch
+              sha256sum .github/tests/halo-source.patch .github/tests/halo-baseline.patch .github/tests/halo-copy.patch > source/patch-sha256.txt
+              cat >> source/CMakeLists.txt <<'CMAKE'
+          add_executable(halo_backend_ops external/ggml/tests/test-backend-ops.cpp)
+          target_link_libraries(halo_backend_ops PRIVATE ggml Threads::Threads)
+          CMAKE
+              python3 source/.github/tests/rocm_v2_halo.py --root source --prepare-models
+              python3 source/.github/tests/rocm_v2_halo.py --root source --followup
             else
             python3 .github/tests/rocm_v2_qwen.py --prepare source
             cat >> source/CMakeLists.txt <<'CMAKE'
@@ -134,7 +149,9 @@ jobs:
             source/build/debug/bin/backend_config_args_test --log
           fi
           fi
-          if [[ "$VALIDATION_GROUP" == halo || "$VALIDATION_GROUP" == halo-ops ]]; then
+          if [[ "$VALIDATION_GROUP" == halo-final ]]; then
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build --exclude=source-baseline/build --exclude=source-copy/build source source-baseline source-copy
+          elif [[ "$VALIDATION_GROUP" == halo || "$VALIDATION_GROUP" == halo-ops ]]; then
             tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
           else
             tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source source-vulkan
@@ -154,6 +171,7 @@ jobs:
       run:
         working-directory: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
     env:
+      VALIDATION_GROUP: ${{ inputs.focus || 'complete' }}
       OMP_NUM_THREADS: 8
       CCACHE_BASEDIR: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
       CCACHE_NOHASHDIR: true
@@ -174,7 +192,7 @@ jobs:
           if [[ -f source/inputs/input-sha256.txt ]]; then
             (cd source && sha256sum --check inputs/input-sha256.txt) > results/input-integrity.log
             cp source/inputs/model-provenance.json results/
-            cp source/inputs/qwen-requests.json results/
+            cp source/inputs/*requests.json results/
           fi
           echo "campaign_deadline=$(( $(date +%s) + 2400 ))" >> "$GITHUB_ENV"
           echo "$PWD/source/toolchain" >> "$GITHUB_PATH"
@@ -234,8 +252,13 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
+          set -euo pipefail
           ulimit -c 0
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --deadline-epoch "$campaign_deadline" --log
+          if [[ "$VALIDATION_GROUP" == halo-final ]]; then
+            python3 source/.github/tests/rocm_v2_halo.py --root results --source source --select-candidate
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/model-campaign.json --output-dir results/models --deadline-epoch "$campaign_deadline" --log
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
