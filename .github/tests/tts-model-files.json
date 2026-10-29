@@ -1,0 +1,38 @@
+[
+  {
+    "family": "breeze_tts",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "874fcb41ececda20bcbc0782d6b4ea7f7d069ea8",
+    "file": "Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf",
+    "size": 5079670336,
+    "sha256": "b17b89b1c21107c44e8d556ab0a856d7acd06bdd0c914e68e0e57f6e33f555a3",
+    "destination": "inputs/breeze_tts.gguf"
+  },
+  {
+    "family": "ming3_tts",
+    "repo": "audio-cpp/Ming-3.0-TTS-0.5B-GGUF",
+    "revision": "2eb8d37c7f10672e69c8aa33091baa04c461b66c",
+    "file": "ming-3.0-tts-0.5b-q8_0.gguf",
+    "size": 1742280896,
+    "sha256": "fcf2aa25e8e9cf2065a936e506581735c64d6255fb7869f09fbb61a2dde09aa1",
+    "destination": "inputs/ming3_tts.gguf"
+  },
+  {
+    "family": "omnivoice",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "874fcb41ececda20bcbc0782d6b4ea7f7d069ea8",
+    "file": "OmniVoice-GGUF/omnivoice-q8_0.gguf",
+    "size": 1350296096,
+    "sha256": "0e5a721edd1b08d9067ef66f40ded609a6b14f5a8445c703f9869736cabd350a",
+    "destination": "inputs/omnivoice.gguf"
+  },
+  {
+    "family": "qwen3_tts",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "874fcb41ececda20bcbc0782d6b4ea7f7d069ea8",
+    "file": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-GGUF/qwen3-tts-12hz-1.7b-voicedesign-q8_0.gguf",
+    "size": 2817000064,
+    "sha256": "b86e03d1d2077bbaed157ab7a7fc646c3e309e69afa52c5e1c86b622b4715057",
+    "destination": "inputs/qwen3_tts.gguf"
+  }
+]

@@ -12,6 +12,36 @@ from rocm_v2_halo import manifest, operator_manifest, model_manifest, model_requ
 
 
 class HaloCampaignTests(unittest.TestCase):
+    def test_tts_main_reuses_build_and_selects_only_candidate_impl(self):
+        plan = rocm_v2_halo.tts_main_manifest(Path('.'))
+        validate_manifest(plan)
+        existing = rocm_v2_halo.irodori_main_manifest(Path('.'))
+        self.assertEqual(plan['builds'][0], existing['builds'][0])
+        self.assertEqual(plan['builds'][1]['commands'][1], existing['builds'][1]['commands'][1])
+        families = list(rocm_v2_halo.tts_requests())
+        self.assertEqual(families, ['breeze_tts', 'ming3_tts', 'omnivoice', 'qwen3_tts'])
+        for family in families:
+            commands = []
+            for label in ['a1', 'b1', 'b2', 'a2']:
+                suite = next(s for s in plan['suites'] if s['id'] == family + '-' + label)
+                argv = suite['cases'][0]['argv'].copy()
+                if label.startswith('b'):
+                    index = argv.index('--backend-impl')
+                    self.assertEqual(argv[index + 1], 'gfx1151_v1')
+                    del argv[index:index + 2]
+                else:
+                    self.assertNotIn('--backend-impl', argv)
+                argv[argv.index('--out-dir') + 1] = '<out>'
+                commands.append(argv)
+            self.assertTrue(all(c == commands[0] for c in commands))
+            requests = rocm_v2_halo.tts_requests()[family]
+            self.assertEqual([r['id'] for r in requests], ['warmup', 'short', 'long', 'short_repeat'])
+            self.assertEqual(requests[1]['text'], requests[-1]['text'])
+            self.assertNotIn('voice_ref', json.dumps(requests))
+            self.assertNotIn('max_tokens', json.dumps(requests))
+        self.assertEqual(plan['suites'][-1]['id'], 'framework')
+        self.assertTrue(all('language' not in r for r in rocm_v2_halo.tts_requests()['breeze_tts']))
+
     def test_ggml_v1_uses_real_pr_tests_without_models(self):
         plan = rocm_v2_halo.ggml_v1_manifest(Path('.'))
         validate_manifest(plan)

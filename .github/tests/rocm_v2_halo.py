@@ -237,6 +237,46 @@ def irodori_main_manifest(root):
     return dict(version=1, builds=plan['builds'], health_check=plan['health_check'], suites=suites)
 
 
+def tts_requests():
+    requests = {}
+    for family in ['breeze_tts', 'ming3_tts', 'omnivoice', 'qwen3_tts']:
+        requests[family] = [dict(id=r['id'], text=r['text'], seed=r['seed'])
+                            for r in QWEN_REQUESTS if r['id'] != 'medium']
+        for request in requests[family]:
+            if family != 'breeze_tts':
+                request['language'] = 'English' if family == 'qwen3_tts' else 'en'
+            if family == 'qwen3_tts':
+                request['options'] = {'instruct': 'A calm adult narrator with a warm voice.'}
+    return requests
+
+
+def tts_main_manifest(root):
+    plan = irodori_main_manifest(root)
+    families = list(tts_requests())
+    plan['builds'][1]['commands'][0] = [
+        x.replace('-DAUDIOCPP_MODELS=irodori_tts', '-DAUDIOCPP_MODELS=' + ','.join(families))
+        for x in plan['builds'][1]['commands'][0]]
+    suites = [plan['suites'][0]]
+    for family in families:
+        for label in ['a1', 'b1', 'b2', 'a2']:
+            name = family + '-' + label
+            argv = ['build/debug/bin/audiocpp_cli', '--task', 'vdes' if family == 'qwen3_tts' else 'tts',
+                    '--family', family, '--backend', 'hip', '--threads', '8',
+                    '--model', 'inputs/' + family + '.gguf',
+                    '--request-sequence', 'inputs/' + family + '-requests.json',
+                    '--out-dir', '../results/wavs/' + name, '--log', '--metrics']
+            if label.startswith('b'):
+                argv += ['--backend-impl', 'gfx1151_v1']
+            suites.append(dict(id=name, build='model', gpu=True, timeout_s=600,
+                               cases=[dict(id='session', argv=argv)]))
+    suites.append(dict(id='framework', build='model', gpu=False, timeout_s=180, cases=[
+        dict(id=family, argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results',
+            '--summarize-models', '--families', family, '--baseline-implementation', 'default',
+            '--candidate-implementation', 'gfx1151_v1', '--request-set', 'tts-main']) for family in families]))
+    plan['suites'] = suites
+    return plan
+
+
 def ggml_v1_manifest(root):
     plan = operator_manifest(root)
     probe = ['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
@@ -278,9 +318,9 @@ def typed_manifest(root):
     return plan
 
 
-def summarize_models(root, baseline_implementation='halo', families=None, candidate_implementation='halo'):
+def summarize_models(root, baseline_implementation='halo', families=None, candidate_implementation='halo', request_sets=None):
     report = {}
-    for family, requests in model_requests().items():
+    for family, requests in (model_requests() if request_sets is None else request_sets).items():
         if families and family not in families:
             continue
         names = [r['id'] for r in requests]
@@ -342,7 +382,10 @@ def summarize_models(root, baseline_implementation='halo', families=None, candid
         repeats = {v: audio[v, original] == audio[v, repeated] for v in ['a1','b1','b2','a2']}
         report[family] = dict(rows=rows, aggregate=aggregate, parity=parity, repeat_pcm_identical=repeats)
     (root / 'comparison.json').write_text(json.dumps(dict(baseline_implementation=baseline_implementation, candidate_implementation=candidate_implementation),indent=2) + '\n')
-    (root / 'models-summary.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
+    summary_path = root / 'models-summary.json'
+    previous = json.loads(summary_path.read_text()) if request_sets is not None and summary_path.exists() else {}
+    previous.update(report)
+    summary_path.write_text(json.dumps(previous, indent=2, allow_nan=False) + '\n')
     print(json.dumps({k: dict(aggregate=v['aggregate'], repeat_pcm_identical=v['repeat_pcm_identical'])
                       for k,v in report.items()}, indent=2))
     return report
@@ -486,6 +529,7 @@ if __name__ == '__main__':
     parser.add_argument('--baseline-implementation',choices=['default','halo'],default='halo')
     parser.add_argument('--families', nargs='+')
     parser.add_argument('--candidate-implementation', default='halo')
+    parser.add_argument('--request-set', choices=['models', 'tts-main'], default='models')
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--operators', action='store_true')
     actions.add_argument('--followup', action='store_true')
@@ -495,6 +539,7 @@ if __name__ == '__main__':
     actions.add_argument('--typed', action='store_true')
     actions.add_argument('--ggml-v1', action='store_true')
     actions.add_argument('--irodori-main', action='store_true')
+    actions.add_argument('--tts-main', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -508,7 +553,8 @@ if __name__ == '__main__':
     elif args.summarize_operators:
         summarize_operators(args.root)
     elif args.summarize_models:
-        summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation)
+        summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
+                         tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')
