@@ -1,5 +1,5 @@
 f0023b7b87b9089115da5b0bfa0f9efed2de3b80f8e092a4e3798c78e55be8d6  external/ggml/src/ggml-hip/halo/sgemm.cu
-afc124dbf9e76cade7a85e7c9fbad523ab7efe3028d83d5a06a51e1dbe1f56a7  external/ggml/src/ggml-hip/halo/matmul.cu
+652ba15899e6c3246b72fc4b541969ac6faf4db75641d245376907ca5943bcc3  external/ggml/src/ggml-hip/halo/matmul.cu
 f55e717d416f08bccd92ad24dfbaa7f5474d494c06e5eb13f40edc7acb3993fd  external/ggml/src/ggml-hip/halo/halo.cuh
 fb4a4bad26140e63b30108bde986246c41596f364f82f6eca876ccde0bbf36ea  external/ggml/src/ggml-hip/CMakeLists.txt
 bfa65a0d6c6540a833cf1f19cb8d311b43ca6d7bf8c801cc30d3d4eb6f84ffe2  external/ggml/tests/test-backend-ops.cpp

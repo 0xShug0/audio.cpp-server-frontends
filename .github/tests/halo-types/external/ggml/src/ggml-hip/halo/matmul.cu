@@ -61,9 +61,9 @@ __global__ __launch_bounds__(128) void halo_matmul_tiled(
     constexpr int pitch = 20;
     __shared__ __align__(16) pair_type aa[64][pitch];
     __shared__ __align__(16) pair_type bb[64][pitch];
-    const int tid = threadIdx.x;
-    const int wave_row = (tid / 32 % 2) * 32;
-    const int wave_col = (tid / 64) * 32;
+    const int tid = threadIdx.x + 32 * threadIdx.y;
+    const int wave_row = (threadIdx.y % 2) * 32;
+    const int wave_col = (threadIdx.y / 2) * 32;
     const int64_t row0 = int64_t(blockIdx.x) * 64;
     const int64_t col0 = int64_t(blockIdx.y) * 64;
     tile_C acc[2][2];
@@ -134,7 +134,7 @@ void launch(const ggml_tensor * a, const ggml_tensor * b, ggml_tensor * out, hip
             static_cast<float *>(out->data), m, n, k, a->nb[1], b->nb[1] / sizeof(float));
     } else {
         using pair_type = std::conditional_t<type == GGML_TYPE_BF16, nv_bfloat162, half2>;
-        halo_matmul_tiled<type, pair_type><<<dim3((m + 63) / 64, (n + 63) / 64), 128, 0, stream>>>(
+        halo_matmul_tiled<type, pair_type><<<dim3((m + 63) / 64, (n + 63) / 64), dim3(32, 4), 0, stream>>>(
             static_cast<const char *>(a->data), static_cast<const float *>(b->data),
             static_cast<float *>(out->data), m, n, k, a->nb[1], b->nb[1] / sizeof(float));
     }
