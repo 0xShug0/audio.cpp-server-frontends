@@ -1109,7 +1109,7 @@ index 79f458e7..e6c88ee2 100644
  
  // Fill per-stack pad bias / conv gate leaves given the valid frame count in
 diff --git a/src/framework/codecs/s3gen_runtime.cpp b/src/framework/codecs/s3gen_runtime.cpp
-index 61321949..ad3a91df 100644
+index 61321949..2a08620a 100644
 --- a/src/framework/codecs/s3gen_runtime.cpp
 +++ b/src/framework/codecs/s3gen_runtime.cpp
 @@ -471,7 +471,8 @@ std::vector<float> flow_relative_positional_encoding(int64_t frames, int64_t cha
@@ -1118,7 +1118,7 @@ index 61321949..ad3a91df 100644
  bool same_backend(const engine::core::BackendConfig & lhs, const engine::core::BackendConfig & rhs) {
 -    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads;
 +    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads &&
-+        (lhs.type != engine::core::BackendType::Hip || lhs.implementation == rhs.implementation);
++        lhs.implementation == rhs.implementation;
  }
  
  using Clock = std::chrono::steady_clock;
