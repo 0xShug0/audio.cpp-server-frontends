@@ -50,7 +50,7 @@ def manifest(root):
         '-DGGML_HIP_NO_VMM=ON', '-DENGINE_ENABLE_OPENMP=ON', '-DENGINE_BUILD_EXAMPLES=OFF',
         '-DAUDIOCPP_MODEL_SET=custom', '-DAUDIOCPP_MODELS=qwen3_tts', '-DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF',
         '-DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF', '-DENGINE_BUILD_TESTS=OFF']
-    conda = str(root.resolve() / 'toolchain/conda/bin/conda')
+    conda = 'toolchain/conda/bin/conda'
     builds = [dict(id='device-health', build_type='Debug', timeout_s=120, commands=[['cmake', '-E', 'make_directory', 'build/debug'], ['/opt/rocm/bin/hipcc', '--offload-arch=gfx1151', '-g', '-O2', '-std=c++17', '.github/tests/hip_vmm_probe.cpp', '-o', 'build/debug/device-health']]), dict(id='model', build_type='Debug', timeout_s=1800, commands=[
         ['bash', '-c', 'set -euo pipefail; bash toolchain/miniforge.sh -b -p "$PWD/toolchain/conda"; toolchain/conda/bin/conda create --offline --name qwen3-tts --clone base --yes'],
         configure, ['cmake', '--build', 'build/debug', '--target', 'audiocpp_cli', '--parallel', '8']])]
