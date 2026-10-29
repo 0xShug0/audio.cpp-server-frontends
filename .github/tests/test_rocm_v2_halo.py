@@ -12,6 +12,22 @@ from rocm_v2_halo import manifest, operator_manifest, model_manifest, model_requ
 
 
 class HaloCampaignTests(unittest.TestCase):
+    def test_ggml_v1_uses_real_pr_tests_without_models(self):
+        plan = rocm_v2_halo.ggml_v1_manifest(Path('.'))
+        validate_manifest(plan)
+        build = next(b for b in plan['builds'] if b['id'] == 'operators')
+        self.assertEqual(build['commands'][0][2], 'external/ggml')
+        self.assertIn('-DCMAKE_BUILD_TYPE=Debug', build['commands'][0])
+        self.assertEqual(build['commands'][1][-2:], ['--parallel', '8'])
+        cases = plan['suites'][0]['cases']
+        self.assertEqual(len(cases), 10)
+        self.assertEqual({c['argv'][c['argv'].index('--backend-impl')+1] for c in cases},
+                         {'default', 'gfx1151_v1'})
+        self.assertTrue(all(c['argv'][c['argv'].index('--suite')+1] == 'gfx1151_v1' for c in cases))
+        self.assertNotIn('audiocpp_cli', json.dumps(plan))
+        self.assertNotIn('https://', json.dumps(plan))
+        self.assertNotIn('conda', json.dumps(plan))
+
     def test_native_and_portable(self):
         plan = manifest(Path('/hosted/source'))
         self.assertEqual(plan, manifest(Path('/runner/source')))

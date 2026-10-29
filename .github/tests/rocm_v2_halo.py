@@ -208,6 +208,25 @@ def hip_baseline_manifest(root):
     return plan
 
 
+
+def ggml_v1_manifest(root):
+    plan = operator_manifest(root)
+    probe = ['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
+             '--suite', 'gfx1151_v1']
+    groups = [('f32', ['-o', 'MUL_MAT', '-p', 'type_a=f32']),
+              ('typed', ['-o', 'MUL_MAT', '-p', 'type_a=(f16|bf16)']),
+              ('quant-fallback', ['-o', 'MUL_MAT', '-p', 'type_a=(q8_0|q4_0)']),
+              ('copy', ['-o', 'CPY,CONT']), ('im2col', ['-o', 'IM2COL'])]
+    checks = [dict(id=impl+'-'+name,
+                   argv=probe+['--backend-impl', impl]+extra)
+              for impl in ['default', 'gfx1151_v1'] for name, extra in groups]
+    plan['suites'] = [
+        dict(id='correctness', build='operators', gpu=True, timeout_s=180, cases=checks),
+        dict(id='framework', build='device-health', gpu=True, timeout_s=15,
+             cases=[dict(id='post-health', argv=['build/debug/device-health', 'health'])])]
+    return plan
+
+
 def typed_manifest(root):
     plan = operator_manifest(root)
     probe = ['build/debug/bin/test-backend-ops']
@@ -445,6 +464,7 @@ if __name__ == '__main__':
     actions.add_argument('--models', action='store_true')
     actions.add_argument('--hip-baseline', action='store_true')
     actions.add_argument('--typed', action='store_true')
+    actions.add_argument('--ggml-v1', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -460,5 +480,5 @@ if __name__ == '__main__':
     elif args.summarize_models:
         summarize_models(args.root,args.baseline_implementation,args.families)
     else:
-        plan = typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')
