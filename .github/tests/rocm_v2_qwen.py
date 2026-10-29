@@ -52,7 +52,7 @@ def manifest(root):
         '-DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF', '-DENGINE_BUILD_TESTS=OFF']
     conda = 'toolchain/conda/bin/python'
     builds = [dict(id='device-health', build_type='Debug', timeout_s=120, commands=[['cmake', '-E', 'make_directory', 'build/debug'], ['/opt/rocm/bin/hipcc', '--offload-arch=gfx1151', '-g', '-O2', '-std=c++17', '.github/tests/hip_vmm_probe.cpp', '-o', 'build/debug/device-health']]), dict(id='model', build_type='Debug', timeout_s=1800, commands=[
-        ['bash', '-c', 'set -euo pipefail; bash toolchain/miniforge.sh -b -p "$PWD/toolchain/conda"; toolchain/conda/bin/python -m conda create --offline --name qwen3-tts --clone base --yes'],
+        ['bash', '-c', 'set -euo pipefail; bash toolchain/miniforge.sh -b -p "$PWD/toolchain/conda"; toolchain/conda/bin/python -m conda create --offline --name qwen3-tts --no-default-packages --yes'],
         configure, ['cmake', '--build', 'build/debug', '--target', 'audiocpp_cli', '--parallel', '8']])]
     def command(backend, sequence, out):
         return [conda, '-m', 'conda', 'run', '--no-capture-output', '-n', 'qwen3-tts', 'build/debug/bin/audiocpp_cli',

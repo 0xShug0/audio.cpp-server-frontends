@@ -97,6 +97,18 @@ jobs:
           sha256sum .github/tests/rocm-v2-source.patch > source/patch-sha256.txt
           python3 source/.github/tests/rocm_v2_manifest.py --root source --focus "$VALIDATION_GROUP"
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+          if [[ "$VALIDATION_GROUP" == qwen ]]; then
+            python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          root = Path('source')
+          build = next(item for item in json.loads((root / 'campaign.json').read_text())['builds'] if item['id'] == 'model')
+          with (root / 'conda-setup-preflight.log').open('w') as log:
+              subprocess.run(build['commands'][0], cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
+              subprocess.run(['toolchain/conda/bin/python', '-m', 'conda', 'run', '--no-capture-output', '-n', 'qwen3-tts', '/bin/true'], cwd=root, stdout=log, stderr=subprocess.STDOUT, check=True)
+          PY
+            rm -rf source/toolchain/conda
+          fi
           if [[ "$VALIDATION_GROUP" == complete ]]; then
             cmake -S source/external/ggml -B source/build/debug -G Ninja \
               -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DGGML_HIP=OFF \
