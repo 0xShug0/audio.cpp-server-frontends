@@ -258,7 +258,7 @@ index f592d404..61447030 100644
      cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
      cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 539f5807..8ee791cd 100644
+index 539f5807..50dc0c6d 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -1,4 +1,7 @@
@@ -287,7 +287,7 @@ index 539f5807..8ee791cd 100644
  
      if (dst->type == GGML_TYPE_F16) {
          GGML_ASSERT(!split && src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16);
-@@ -5664,6 +5678,37 @@ static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t d
+@@ -5664,6 +5678,40 @@ static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t d
      return ggml_backend_cuda_init(ctx->device);
  }
  
@@ -307,10 +307,13 @@ index 539f5807..8ee791cd 100644
 +        GGML_LOG_ERROR("ROCm%d: implementation '%s' is unavailable on this device\n", device->device, implementation);
 +        return nullptr;
 +    }
++    static const ggml_hip_implementation halo = {
++        "halo", ggml_hip_halo_mul_mat, ggml_hip_halo_im2col,
++    };
 +    ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
 +    if (backend) {
 +        auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
-+        ctx->implementation = &ggml_hip_halo;
++        ctx->implementation = &halo;
 +        GGML_LOG_INFO("ROCm%d: implementation=%s\n", device->device, ctx->implementation->name);
 +    }
 +    return backend;
@@ -325,7 +328,7 @@ index 539f5807..8ee791cd 100644
  static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
      ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *)dev->context;
      return ggml_backend_cuda_buffer_type(ctx->device);
-@@ -6265,6 +6310,17 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+@@ -6265,6 +6313,17 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
  
  static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
      GGML_UNUSED(reg);
@@ -373,14 +376,14 @@ index 7226f790..42ed1761 100644
      const ggml_tensor * src1 = dst->src[1];
      const float * src1_d = (const float *)src1->data;
 diff --git a/external/ggml/src/ggml-hip/CMakeLists.txt b/external/ggml/src/ggml-hip/CMakeLists.txt
-index deb063b7..5497022c 100644
+index deb063b7..45d2737f 100644
 --- a/external/ggml/src/ggml-hip/CMakeLists.txt
 +++ b/external/ggml/src/ggml-hip/CMakeLists.txt
 @@ -95,6 +95,8 @@ else()
          ../ggml-cuda/template-instances/fattn-vec-instance-bf16-bf16.cu)
  endif()
  
-+list(APPEND GGML_SOURCES_ROCM halo/implementation.cu halo/sgemm.cu halo/im2col.cu)
++list(APPEND GGML_SOURCES_ROCM halo/sgemm.cu halo/im2col.cu)
 +
  if (CXX_IS_HIPCC)
      set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
@@ -1818,6 +1821,19 @@ index b6353e6c..b2972cc7 100644
              weight_context_bytes,
              weight_storage_type));
      engine::debug::timing_log_scalar(
+diff --git a/tests/qwen3_tts/test_speech_decoder_streaming.cpp b/tests/qwen3_tts/test_speech_decoder_streaming.cpp
+index d366e133..808a6701 100644
+--- a/tests/qwen3_tts/test_speech_decoder_streaming.cpp
++++ b/tests/qwen3_tts/test_speech_decoder_streaming.cpp
+@@ -74,7 +74,7 @@ int main(int argc, char ** argv) {
+             request.generation.max_new_tokens = 256;
+             qwen::Qwen3Talker talker(assets->config.talker);
+             auto weights = talker.create_weights_runtime(
+-                assets, backend.type, backend.device, backend.threads, arena, arena, arena,
++                assets, backend, arena, arena, arena,
+                 engine::assets::TensorStorageType::Native, qwen::Qwen3TTSPerfMode::Standard);
+             auto step = talker.create_step_runtime(weights, assets->config.talker.max_position_embeddings, 256);
+             codes = step->generate(prompt_builder.build_prefill(request), request.generation).generated_codes;
 diff --git a/tests/unittests/test_backend_device_resolution.cpp b/tests/unittests/test_backend_device_resolution.cpp
 index 44af8797..7b6ab3a2 100644
 --- a/tests/unittests/test_backend_device_resolution.cpp
@@ -1878,17 +1894,31 @@ index 3dee4eaf..e447677b 100644
          test_per_model_devices();
          test_model_slots();
          test_inline_default_and_named_presets();
+diff --git a/tests/zipvoice/zipvoice_parity_main.cpp b/tests/zipvoice/zipvoice_parity_main.cpp
+index aeaddacc..022110e7 100644
+--- a/tests/zipvoice/zipvoice_parity_main.cpp
++++ b/tests/zipvoice/zipvoice_parity_main.cpp
+@@ -201,8 +201,8 @@ int main(int argc, char ** argv) {
+     const auto * resources = bundle ? &*bundle : nullptr;
+     bool checks_ok = true;
+     engine::models::zipvoice::ZipVoiceComputeDevice device;
+-    device.backend_type = engine::core::BackendType::Cpu;  // parity: bit-stable reference path
+-    device.threads = 8;
++    device.config.type = engine::core::BackendType::Cpu;  // parity: bit-stable reference path
++    device.config.threads = 8;
+ 
+     // ---- stage 0: raw text encoder vs torch taps (when provided) ----
+     if (argc > 3) {
 diff --git a/external/ggml/src/ggml-hip/halo/halo.cuh b/external/ggml/src/ggml-hip/halo/halo.cuh
 new file mode 100644
-index 00000000..d9b2ca82
+index 00000000..51f68019
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/halo/halo.cuh
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,6 @@
 +#pragma once
 +
 +#include "../implementation.cuh"
 +
-+extern const ggml_hip_implementation ggml_hip_halo;
 +bool ggml_hip_halo_mul_mat(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t);
 +bool ggml_hip_halo_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t);
 diff --git a/external/ggml/src/ggml-hip/halo/im2col.cu b/external/ggml/src/ggml-hip/halo/im2col.cu
@@ -2000,17 +2030,6 @@ index 00000000..c97aba82
 +    }
 +    return true;
 +}
-diff --git a/external/ggml/src/ggml-hip/halo/implementation.cu b/external/ggml/src/ggml-hip/halo/implementation.cu
-new file mode 100644
-index 00000000..b6e2b2e0
---- /dev/null
-+++ b/external/ggml/src/ggml-hip/halo/implementation.cu
-@@ -0,0 +1,5 @@
-+#include "halo.cuh"
-+
-+const ggml_hip_implementation ggml_hip_halo = {
-+    "halo", ggml_hip_halo_mul_mat, ggml_hip_halo_im2col,
-+};
 diff --git a/external/ggml/src/ggml-hip/halo/sgemm.cu b/external/ggml/src/ggml-hip/halo/sgemm.cu
 new file mode 100644
 index 00000000..fb8b5d3a

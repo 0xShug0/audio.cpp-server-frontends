@@ -53,7 +53,7 @@ jobs:
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             git -C source config core.autocrlf false
             git -C source fetch --no-tags --depth=1 --filter=blob:none origin 2597b300f5961999387c84c65f2e8e79c088a571
-            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/unittests tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/unittests tests/perf tests/qwen3_tts tests/zipvoice webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source checkout --detach FETCH_HEAD
             git -C source rev-parse HEAD > source/source-commit.txt
             git -C source apply --check ../.github/tests/halo-source.patch
@@ -84,7 +84,7 @@ jobs:
           git -C source apply --check ../.github/tests/rocm-v2-framework.patch
           git -C source apply ../.github/tests/rocm-v2-framework.patch
           if [[ "$VALIDATION_GROUP" == qwen ]]; then
-            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/unittests tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/unittests tests/perf tests/qwen3_tts tests/zipvoice webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source apply --check ../.github/tests/rocm-v2-model.patch
             git -C source apply ../.github/tests/rocm-v2-model.patch
             python3 .github/tests/rocm_v2_qwen.py --prepare source
