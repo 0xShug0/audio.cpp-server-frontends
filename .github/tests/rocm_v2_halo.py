@@ -35,8 +35,42 @@ def manifest(root):
     return plan
 
 
+def operator_manifest(root):
+    plan = qwen_manifest(root)
+    health = plan['builds'][0]
+    health['commands'].insert(0, ['cmake', '-E', 'make_directory', 'build/debug'])
+    config = plan['builds'][1]['commands'][0]
+    config[config.index('-S') + 1] = 'external/ggml'
+    config = [x for x in config if not x.startswith(('-DENGINE_', '-DAUDIOCPP_'))]
+    config += ['-DGGML_HIP=ON', '-DGGML_CUDA=OFF', '-DGGML_VULKAN=OFF',
+               '-DGGML_BUILD_TESTS=ON', '-DGGML_BUILD_EXAMPLES=OFF']
+    build = dict(id='operators', build_type='Debug', timeout_s=1800, commands=[config,
+        ['cmake', '--build', 'build/debug', '--target', 'test-backend-ops', '--parallel', '8']])
+    probe = ['build/debug/bin/test-backend-ops']
+    groups = [('copy', ['-o', 'CPY']), ('rms', ['-o', 'RMS_NORM']),
+              ('rms-fused', ['-o', 'RMS_NORM_MUL']),
+              ('matvec', ['-o', 'MUL_MAT', '-p', 'type_a=q8_0']),
+              ('matvec-fused', ['-o', 'MUL_MAT_VEC_FUSION'])]
+    checks = [dict(id=impl + '-' + name,
+        argv=probe + ['test', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl] + extra)
+        for impl in ['default', 'halo'] for name, extra in groups]
+    timed = []
+    # Full-graph fusion cases are correctness-only: the generic perf harness repeats only the final node.
+    for repeat in range(2):
+        for slot, impl in enumerate(['default', 'halo', 'halo', 'default']):
+            for name, extra in groups:
+                if 'fused' in name:
+                    continue
+                timed.append(dict(id=f'r{repeat}-s{slot}-{impl}-{name}',
+                    argv=probe + ['perf', '-b', 'ROCm0', '--suite', 'halo', '--backend-impl', impl] + extra))
+    return dict(version=1, builds=[health, build], health_check=plan['health_check'], suites=[
+        dict(id='correctness', build='operators', gpu=True, timeout_s=300, cases=checks),
+        dict(id='framework', build='operators', gpu=True, timeout_s=150, cases=timed)])
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--operators', action='store_true')
     args = parser.parse_args()
-    (args.root / 'campaign.json').write_text(json.dumps(manifest(args.root), indent=2) + '\n')
+    (args.root / 'campaign.json').write_text(json.dumps(operator_manifest(args.root) if args.operators else manifest(args.root), indent=2) + '\n')

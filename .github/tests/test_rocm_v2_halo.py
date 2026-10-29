@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import unittest
 from rocm_v2_campaign import validate_manifest
-from rocm_v2_halo import manifest
+from rocm_v2_halo import manifest, operator_manifest
 
 
 class HaloCampaignTests(unittest.TestCase):
@@ -19,6 +19,17 @@ class HaloCampaignTests(unittest.TestCase):
         self.assertIn('-DCMAKE_BUILD_TYPE=Debug', build['commands'][0])
         self.assertIn('-DCMAKE_CXX_STANDARD=17', build['commands'][0])
         self.assertEqual(build['commands'][1][-2:], ['--parallel', '8'])
+
+    def test_operators_do_not_run_or_download_models(self):
+        plan = operator_manifest(Path('.'))
+        validate_manifest(plan)
+        text = json.dumps(plan)
+        self.assertNotIn('audiocpp_cli', text)
+        self.assertNotIn('inputs/', text)
+        self.assertNotIn('conda', text)
+        self.assertEqual(len(plan['suites'][0]['cases']), 10)
+        self.assertEqual(len(plan['suites'][1]['cases']), 24)
+        self.assertTrue(all('fused' not in x['id'] for x in plan['suites'][1]['cases']))
 
     def test_selection_changes_only_implementation(self):
         plan = manifest(Path('.'))

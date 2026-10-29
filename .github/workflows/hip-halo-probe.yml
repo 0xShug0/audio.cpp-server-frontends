@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops]
         default: complete
   push:
     branches: [experiment/rocm-v2-probes]
@@ -48,7 +48,7 @@ jobs:
             ccache-4.13.6-linux-x86_64-musl-static/ccache
           source/toolchain/ccache --version
           sha256sum source/toolchain/ccache > source/ccache-sha256.txt
-          if [[ "$VALIDATION_GROUP" == halo ]]; then
+          if [[ "$VALIDATION_GROUP" == halo || "$VALIDATION_GROUP" == halo-ops ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             git -C source config core.autocrlf false
@@ -61,6 +61,9 @@ jobs:
             sha256sum .github/tests/halo-source.patch > source/patch-sha256.txt
             mkdir -p source/.github/tests
             cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            if [[ "$VALIDATION_GROUP" == halo-ops ]]; then
+              python3 source/.github/tests/rocm_v2_halo.py --root source --operators
+            else
             python3 .github/tests/rocm_v2_qwen.py --prepare source
             cat >> source/CMakeLists.txt <<'CMAKE'
           add_executable(halo_backend_ops external/ggml/tests/test-backend-ops.cpp)
@@ -70,6 +73,7 @@ jobs:
           target_link_libraries(halo_backend_selection PRIVATE engine_runtime ggml)
           CMAKE
             python3 source/.github/tests/rocm_v2_halo.py --root source
+            fi
             python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
           else
           git init source
@@ -130,7 +134,7 @@ jobs:
             source/build/debug/bin/backend_config_args_test --log
           fi
           fi
-          if [[ "$VALIDATION_GROUP" == halo ]]; then
+          if [[ "$VALIDATION_GROUP" == halo || "$VALIDATION_GROUP" == halo-ops ]]; then
             tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
           else
             tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source source-vulkan
