@@ -1,0 +1,1312 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b6d5d09c..6ebaad12 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4166,6 +4166,16 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
+         add_engine_unittest(scaled_dot_product_attention_test tests/unittests/test_scaled_dot_product_attention.cpp)
+         add_test(NAME scaled_dot_product_attention_test COMMAND scaled_dot_product_attention_test)
+ 
++        # Backend spelling/config parsing has no runtime or model link dependencies.
++        add_executable(backend_config_args_test
++            tests/unittests/test_backend_config_args.cpp
++            app/cli/args.cpp
++        )
++        target_include_directories(backend_config_args_test PRIVATE
++            ${CMAKE_CURRENT_SOURCE_DIR}/include
++            ${CMAKE_CURRENT_SOURCE_DIR}/external/ggml/include)
++        add_test(NAME backend_config_args_test COMMAND backend_config_args_test)
++
+         add_executable(cli_request_options_test
+             tests/unittests/test_cli_request_options.cpp
+             app/cli/args.cpp
+diff --git a/app/cli/main.cpp b/app/cli/main.cpp
+index 2f35eb86..17018275 100644
+--- a/app/cli/main.cpp
++++ b/app/cli/main.cpp
+@@ -59,7 +59,7 @@ void print_task_list_help() {
+         << "    --task vad|asr|diar|sep|gen|tts|clon|vc|s2s|align|vdes|spk|svc|midi|wake|cls\n"
+         << "    --family <name>\n"
+         << "    --model <path>\n"
+-        << "    --backend cpu|cuda|hip|rocm|vulkan|metal|best  (rocm is an alias for hip)\n"
++        << "    --backend cpu|cuda|hip|rocm|rocm_v2|vulkan|metal|best  (rocm aliases hip; rocm_v2 opts into HIP v2)\n"
+         << "    --mode offline|streaming  default offline\n"
+         << "    --device <n>\n"
+         << "    --list-devices  List available backend devices and exit; --json adds PCI ids and memory\n"
+@@ -792,8 +792,7 @@ int audiocpp_cli_main(int argc, char ** argv) {
+ #ifdef _OPENMP
+             omp_set_num_threads(threads);
+ #endif
+-            engine::core::BackendConfig backend;
+-            backend.type = parse_backend(find_arg(argc, argv, "--backend").value_or("cpu"));
++            auto backend = parse_backend_config(find_arg(argc, argv, "--backend").value_or("cpu"));
+             backend.device = parse_int_arg(argc, argv, "--device", 0);
+             backend.threads = threads;
+             minitts::app::run_json_workflow(
+@@ -827,7 +826,7 @@ int audiocpp_cli_main(int argc, char ** argv) {
+             recipe_options.load_options = collect_key_value_args(argc, argv, "--load-option");
+             recipe_options.session_options = collect_key_value_args(argc, argv, "--session-option");
+             recipe_options.model_spec_override = optional_path_arg(argc, argv, "--model-spec-override");
+-            recipe_options.backend.type = parse_backend(find_arg(argc, argv, "--backend").value_or("cpu"));
++            recipe_options.backend = parse_backend_config(find_arg(argc, argv, "--backend").value_or("cpu"));
+             recipe_options.backend.device = parse_int_arg(argc, argv, "--device", 0);
+             recipe_options.backend.threads = threads;
+ 
+@@ -916,7 +915,7 @@ int audiocpp_cli_main(int argc, char ** argv) {
+         }
+ 
+         engine::runtime::SessionOptions session_options;
+-        session_options.backend.type = parse_backend(find_arg(argc, argv, "--backend").value_or("cpu"));
++        session_options.backend = parse_backend_config(find_arg(argc, argv, "--backend").value_or("cpu"));
+         session_options.backend.device = parse_int_arg(argc, argv, "--device", 0);
+         const int threads = parse_int_arg(argc, argv, "--threads", 4);
+         if (threads <= 0) {
+diff --git a/app/server/config.cpp b/app/server/config.cpp
+index 2d9fd4f5..23f057d4 100644
+--- a/app/server/config.cpp
++++ b/app/server/config.cpp
+@@ -222,8 +222,12 @@ LiveIngestLimits resolve_live_ingest_limits(
+ }
+ 
+ engine::core::BackendType parse_server_backend(const std::string & value) {
+-    auto backend = minitts::cli::parse_backend(value);
+-    if (backend == engine::core::BackendType::BestAvailable) {
++    return parse_server_backend_config(value).type;
++}
++
++engine::core::BackendConfig parse_server_backend_config(const std::string & value) {
++    auto backend = minitts::cli::parse_backend_config(value);
++    if (backend.type == engine::core::BackendType::BestAvailable) {
+         throw std::runtime_error("unsupported server backend: " + value);
+     }
+     return backend;
+@@ -243,7 +247,9 @@ ServerConfig load_server_config(const std::filesystem::path & path, bool paralle
+     config.ui_enabled = engine::io::json::optional_bool(root, "ui", config.ui_enabled);
+     config.ui_requested = engine::io::json::optional_bool(root, "ui", false);
+     config.ui_management = engine::io::json::optional_bool(root, "ui_management", config.ui_management);
+-    config.backend = parse_server_backend(engine::io::json::optional_string(root, "backend", "cuda"));
++    const auto backend = parse_server_backend_config(engine::io::json::optional_string(root, "backend", "cuda"));
++    config.backend = backend.type;
++    config.backend_implementation = backend.implementation;
+     config.device = engine::io::json::optional_i32(root, "device", config.device);
+     config.threads = engine::io::json::optional_i32(root, "threads", config.threads);
+     config.lazy_load = engine::io::json::optional_bool(root, "lazy_load", config.lazy_load);
+diff --git a/app/server/config.h b/app/server/config.h
+index 6ac50dbd..3460f5b8 100644
+--- a/app/server/config.h
++++ b/app/server/config.h
+@@ -80,6 +80,7 @@ struct ServerConfig {
+     bool ui_requested = false;
+     bool ui_management = false;
+     engine::core::BackendType backend = engine::core::BackendType::Cuda;
++    std::string backend_implementation;
+     int device = 0;
+     int threads = 1;
+     bool lazy_load = false;
+@@ -130,6 +131,7 @@ struct ServerConfig {
+ };
+ 
+ engine::core::BackendType parse_server_backend(const std::string & value);
++engine::core::BackendConfig parse_server_backend_config(const std::string & value);
+ ServerConfig load_server_config(const std::filesystem::path & path);
+ ServerConfig load_server_config(const std::filesystem::path & path, bool parallel_jobs);
+ // Adds the config.default_session_options entries for model.family that the model's
+diff --git a/app/server/main.cpp b/app/server/main.cpp
+index 77653541..43cbe123 100644
+--- a/app/server/main.cpp
++++ b/app/server/main.cpp
+@@ -101,7 +101,7 @@ void print_help() {
+         << "                                   AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON at build time\n"
+         << "  --host <ip>                      server bind address; default 127.0.0.1\n"
+         << "  --port <port>                    server listening port; default 8080\n"
+-        << "  --backend cpu|cuda|hip|rocm|vulkan|metal  default cuda (rocm is an alias for hip)\n"
++        << "  --backend cpu|cuda|hip|rocm|rocm_v2|vulkan|metal  default cuda (rocm aliases hip; rocm_v2 opts into HIP v2)\n"
+         << "  --list-devices                   list available backend devices and exit; add --json\n"
+         << "                                   for PCI ids and free/total memory as JSON\n"
+         << "  --busy-timeout-ms <ms>           fail a request with 503 when the model has been\n"
+@@ -249,7 +249,9 @@ int main(int argc, char ** argv) {
+             config.cors_origins = *cors_origins;
+         }
+         if (const auto backend = arg_value(argc, argv, "--backend")) {
+-            config.backend = minitts::server::parse_server_backend(*backend);
++            const auto selected = minitts::server::parse_server_backend_config(*backend);
++            config.backend = selected.type;
++            config.backend_implementation = selected.implementation;
+         }
+         if (const auto device = arg_value(argc, argv, "--device")) {
+             config.device = std::stoi(*device);
+diff --git a/app/server/parallel_runtime.cpp b/app/server/parallel_runtime.cpp
+index 97054498..a5eda69d 100644
+--- a/app/server/parallel_runtime.cpp
++++ b/app/server/parallel_runtime.cpp
+@@ -321,6 +321,7 @@ void ParallelServerState::validate_replacement_slots(
+         }
+         engine::runtime::SessionOptions options;
+         options.backend.type = config_.backend;
++        options.backend.implementation = config_.backend_implementation;
+         options.backend.device = candidate.config.device.value_or(config_.device);
+         options.backend.threads = config_.threads;
+         options.options = candidate.config.session_options;
+@@ -758,6 +759,7 @@ void ParallelServerState::ensure_model_loaded_locked(LoadedModel & model) {
+ 
+     engine::runtime::SessionOptions session_options;
+     session_options.backend.type = config_.backend;
++    session_options.backend.implementation = config_.backend_implementation;
+     session_options.backend.device = model.config.device.value_or(config_.device);
+     session_options.backend.threads = config_.threads;
+     session_options.options = model.config.session_options;
+@@ -2551,7 +2553,7 @@ void ParallelServerState::ensure_model_fits_memory(const ServerModelConfig & mod
+     engine::core::ensure_backends_loaded();
+     const engine::core::BackendMemorySnapshot device =
+         engine::core::query_backend_memory(engine::core::BackendConfig{
+-            config_.backend, model.device.value_or(config_.device), config_.threads});
++            config_.backend, model.device.value_or(config_.device), config_.threads, config_.backend_implementation});
+     if (device.available && *estimate + headroom > static_cast<size_t>(device.free_bytes)) {
+         throw InsufficientMemoryError(
+             "cannot load model '" + model.id + "': estimated " + format_bytes(*estimate) +
+diff --git a/app/server/runtime.cpp b/app/server/runtime.cpp
+index 91aca745..28748aa7 100644
+--- a/app/server/runtime.cpp
++++ b/app/server/runtime.cpp
+@@ -693,6 +693,7 @@ void ServerState::ensure_model_loaded_locked(LoadedModel & model) {
+ 
+     engine::runtime::SessionOptions session_options;
+     session_options.backend.type = config_.backend;
++    session_options.backend.implementation = config_.backend_implementation;
+     session_options.backend.device = model.config.device.value_or(config_.device);
+     session_options.backend.threads = config_.threads;
+     session_options.options = model.config.session_options;
+@@ -2530,7 +2531,7 @@ void ServerState::ensure_model_fits_memory(const ServerModelConfig & model) {
+     engine::core::ensure_backends_loaded();
+     const engine::core::BackendMemorySnapshot device =
+         engine::core::query_backend_memory(engine::core::BackendConfig{
+-            config_.backend, model.device.value_or(config_.device), config_.threads});
++            config_.backend, model.device.value_or(config_.device), config_.threads, config_.backend_implementation});
+     if (device.available && *estimate + headroom > static_cast<size_t>(device.free_bytes)) {
+         throw InsufficientMemoryError(
+             "cannot load model '" + model.id + "': estimated " + format_bytes(*estimate) +
+diff --git a/app/workflow/workflow.cpp b/app/workflow/workflow.cpp
+index ae73a0be..8f551a78 100644
+--- a/app/workflow/workflow.cpp
++++ b/app/workflow/workflow.cpp
+@@ -567,7 +567,9 @@ engine::core::BackendConfig parse_step_backend(
+     const engine::io::json::Value & step,
+     engine::core::BackendConfig fallback) {
+     if (const auto backend = workflow_optional_string(step, "backend")) {
+-        fallback.type = minitts::cli::parse_backend(*backend);
++        const auto selected = minitts::cli::parse_backend_config(*backend);
++        fallback.type = selected.type;
++        fallback.implementation = selected.implementation;
+     }
+     if (const auto device = workflow_optional_number(step, "device")) {
+         fallback.device = static_cast<int>(*device);
+diff --git a/include/engine/community_models/outetts/llama.h b/include/engine/community_models/outetts/llama.h
+index b312d060..df070108 100644
+--- a/include/engine/community_models/outetts/llama.h
++++ b/include/engine/community_models/outetts/llama.h
+@@ -53,9 +53,7 @@ class OuteTTSLlamaRuntime final {
+ public:
+     OuteTTSLlamaRuntime(
+         std::shared_ptr<const OuteTTSAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+ #if defined(INTPTR_MAX) && (INTPTR_MAX == INT32_MAX)
+         size_t weight_context_bytes = 1024ull * 1024ull * 1024ull,
+ #else
+diff --git a/include/engine/community_models/vieneu_v3_turbo/talker.h b/include/engine/community_models/vieneu_v3_turbo/talker.h
+index 05983c37..c6de5033 100644
+--- a/include/engine/community_models/vieneu_v3_turbo/talker.h
++++ b/include/engine/community_models/vieneu_v3_turbo/talker.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "engine/framework/assets/tensor_source.h"
++#include "engine/framework/core/backend.h"
+ #include "engine/community_models/vieneu_v3_turbo/assets.h"
+ #include "engine/community_models/vieneu_v3_turbo/types.h"
+ 
+@@ -64,9 +65,7 @@ public:
+ 
+     std::shared_ptr<const VieNeuTalkerWeightsRuntime> create_weights_runtime(
+         std::shared_ptr<const VieNeuTTSAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t graph_arena_bytes,
+         size_t talker_constant_context_bytes,
+         size_t code_predictor_constant_context_bytes,
+diff --git a/include/engine/community_models/zipvoice/synthesize.h b/include/engine/community_models/zipvoice/synthesize.h
+index 869f8276..8657b368 100644
+--- a/include/engine/community_models/zipvoice/synthesize.h
++++ b/include/engine/community_models/zipvoice/synthesize.h
+@@ -19,13 +19,11 @@ std::shared_ptr<ZipVoiceRuntimeState> make_zipvoice_runtime_state();
+ // Compute device for the whole zipvoice stack (text encoder, flow-matching
+ // decoder, Vocos backbone). GPU first: the default BestAvailable resolves to
+ // Metal/CUDA when a usable accelerator exists and falls back to CPU
+-// otherwise; `threads` applies to CPU compute. A runtime that already owns a
++// otherwise; `config.threads` applies to CPU compute. A runtime that already owns a
+ // backend may inject it via `backend`. Destroy/reset this device runtime before
+ // freeing a borrowed backend. Copies share runtime ownership and serialize use.
+ struct ZipVoiceComputeDevice {
+-    core::BackendType backend_type = core::BackendType::BestAvailable;
+-    int device_index = 0;
+-    int threads = 0;  // 0 = hardware concurrency
++    core::BackendConfig config = {core::BackendType::BestAvailable, 0, 0};  // threads 0 = hardware concurrency
+     ggml_backend_t backend = nullptr;
+     std::shared_ptr<ZipVoiceRuntimeState> runtime = make_zipvoice_runtime_state();
+ };
+diff --git a/include/engine/models/heartmula/mula.h b/include/engine/models/heartmula/mula.h
+index 77e43b6c..629f6b34 100644
+--- a/include/engine/models/heartmula/mula.h
++++ b/include/engine/models/heartmula/mula.h
+@@ -167,9 +167,7 @@ class HeartMuLaWeightsRuntime final {
+ public:
+     HeartMuLaWeightsRuntime(
+         std::shared_ptr<const HeartMuLaAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 32ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 256ull * 1024ull * 1024ull,
+         size_t backbone_prefill_graph_arena_bytes = 1536ull * 1024ull * 1024ull,
+diff --git a/include/engine/models/qwen3_tts/talker.h b/include/engine/models/qwen3_tts/talker.h
+index 22509d54..5b8ed502 100644
+--- a/include/engine/models/qwen3_tts/talker.h
++++ b/include/engine/models/qwen3_tts/talker.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "engine/framework/assets/tensor_source.h"
++#include "engine/framework/core/backend.h"
+ #include "engine/models/qwen3_tts/assets.h"
+ #include "engine/models/qwen3_tts/types.h"
+ 
+@@ -70,9 +71,7 @@ public:
+ 
+     std::shared_ptr<const Qwen3TalkerWeightsRuntime> create_weights_runtime(
+         std::shared_ptr<const Qwen3TTSAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t graph_arena_bytes,
+         size_t talker_constant_context_bytes,
+         size_t code_predictor_constant_context_bytes,
+diff --git a/include/engine/models/vibevoice/connector.h b/include/engine/models/vibevoice/connector.h
+index 899f6c6f..2723d6d4 100644
+--- a/include/engine/models/vibevoice/connector.h
++++ b/include/engine/models/vibevoice/connector.h
+@@ -50,9 +50,7 @@ class VibeVoiceConnectorWeightsRuntime final {
+ public:
+     VibeVoiceConnectorWeightsRuntime(
+         std::shared_ptr<const VibeVoiceAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 64ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 32ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
+diff --git a/include/engine/models/vibevoice/decoder.h b/include/engine/models/vibevoice/decoder.h
+index 151d43f2..5251eb1a 100644
+--- a/include/engine/models/vibevoice/decoder.h
++++ b/include/engine/models/vibevoice/decoder.h
+@@ -107,9 +107,7 @@ class VibeVoiceQwen2WeightsRuntime final {
+ public:
+     VibeVoiceQwen2WeightsRuntime(
+         std::shared_ptr<const VibeVoiceAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 256ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
+diff --git a/include/engine/models/vibevoice/diffusion_head.h b/include/engine/models/vibevoice/diffusion_head.h
+index 24f055cf..8961adcc 100644
+--- a/include/engine/models/vibevoice/diffusion_head.h
++++ b/include/engine/models/vibevoice/diffusion_head.h
+@@ -59,9 +59,7 @@ class VibeVoiceDiffusionHeadWeightsRuntime final {
+ public:
+     VibeVoiceDiffusionHeadWeightsRuntime(
+         std::shared_ptr<const VibeVoiceAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 64ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 64ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
+diff --git a/include/engine/models/vibevoice/tokenizer_audio.h b/include/engine/models/vibevoice/tokenizer_audio.h
+index 874fc2f8..b10a91c2 100644
+--- a/include/engine/models/vibevoice/tokenizer_audio.h
++++ b/include/engine/models/vibevoice/tokenizer_audio.h
+@@ -95,9 +95,7 @@ class VibeVoiceTokenizerWeightsRuntime final {
+ public:
+     VibeVoiceTokenizerWeightsRuntime(
+         std::shared_ptr<const VibeVoiceAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 256ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
+diff --git a/include/engine/models/vibevoice_asr/connector.h b/include/engine/models/vibevoice_asr/connector.h
+index 7f792579..dcec7084 100644
+--- a/include/engine/models/vibevoice_asr/connector.h
++++ b/include/engine/models/vibevoice_asr/connector.h
+@@ -50,9 +50,7 @@ class VibeVoiceConnectorWeightsRuntime final {
+ public:
+     VibeVoiceConnectorWeightsRuntime(
+         std::shared_ptr<const VibeVoiceASRAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 64ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 32ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
+diff --git a/include/engine/models/vibevoice_asr/speech_encoder.h b/include/engine/models/vibevoice_asr/speech_encoder.h
+index 1e4d6cde..f870e53a 100644
+--- a/include/engine/models/vibevoice_asr/speech_encoder.h
++++ b/include/engine/models/vibevoice_asr/speech_encoder.h
+@@ -15,9 +15,7 @@ class VibeVoiceASRSpeechEncoder {
+ public:
+     VibeVoiceASRSpeechEncoder(
+         std::shared_ptr<const VibeVoiceASRAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t tokenizer_weight_context_bytes,
+         size_t connector_weight_context_bytes,
+         assets::TensorStorageType tokenizer_weight_storage_type,
+diff --git a/include/engine/models/vibevoice_asr/speech_tokenizer.h b/include/engine/models/vibevoice_asr/speech_tokenizer.h
+index f566636a..434c43ef 100644
+--- a/include/engine/models/vibevoice_asr/speech_tokenizer.h
++++ b/include/engine/models/vibevoice_asr/speech_tokenizer.h
+@@ -95,9 +95,7 @@ class VibeVoiceTokenizerWeightsRuntime final {
+ public:
+     VibeVoiceTokenizerWeightsRuntime(
+         std::shared_ptr<const VibeVoiceASRAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 256ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native);
+diff --git a/include/engine/models/vibevoice_asr/text_decoder.h b/include/engine/models/vibevoice_asr/text_decoder.h
+index 60479c35..6af4ed3b 100644
+--- a/include/engine/models/vibevoice_asr/text_decoder.h
++++ b/include/engine/models/vibevoice_asr/text_decoder.h
+@@ -108,9 +108,7 @@ class VibeVoiceQwen2WeightsRuntime final {
+ public:
+     VibeVoiceQwen2WeightsRuntime(
+         std::shared_ptr<const VibeVoiceASRAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t weight_context_bytes = 256ull * 1024ull * 1024ull,
+         size_t constant_context_bytes = 128ull * 1024ull * 1024ull,
+         assets::TensorStorageType weight_storage_type = assets::TensorStorageType::Native,
+diff --git a/src/capi/audiocpp.cpp b/src/capi/audiocpp.cpp
+index 1e098315..aa641ec7 100644
+--- a/src/capi/audiocpp.cpp
++++ b/src/capi/audiocpp.cpp
+@@ -122,15 +122,16 @@ audiocpp_status fail(audiocpp_status status, const char * message) noexcept {
+     return status;
+ }
+ 
+-engine::core::BackendType parse_backend_type(const std::string & value) {
++engine::core::BackendConfig parse_backend_config(const std::string & value) {
+     /* Intentionally duplicated from app/cli/args.cpp rather than shared: the
+      * C API must not depend on the CLI app. The spellings are the CLI's. */
+-    if (value == "cpu") return engine::core::BackendType::Cpu;
+-    if (value == "cuda") return engine::core::BackendType::Cuda;
+-    if (value == "hip" || value == "rocm") return engine::core::BackendType::Hip;
+-    if (value == "vulkan") return engine::core::BackendType::Vulkan;
+-    if (value == "metal") return engine::core::BackendType::Metal;
+-    if (value == "best") return engine::core::BackendType::BestAvailable;
++    if (value == "cpu") return {engine::core::BackendType::Cpu};
++    if (value == "cuda") return {engine::core::BackendType::Cuda};
++    if (value == "hip" || value == "rocm") return {engine::core::BackendType::Hip};
++    if (value == "rocm_v2") return {engine::core::BackendType::Hip, 0, 1, value};
++    if (value == "vulkan") return {engine::core::BackendType::Vulkan};
++    if (value == "metal") return {engine::core::BackendType::Metal};
++    if (value == "best") return {engine::core::BackendType::BestAvailable};
+     throw std::invalid_argument("unsupported backend: " + value);
+ }
+ 
+@@ -558,7 +559,7 @@ audiocpp_status audiocpp_session_create(const audiocpp_model * model,
+         rt::SessionOptions session_options;
+         if (backend_config != nullptr) {
+             if (backend_config->backend != nullptr) {
+-                session_options.backend.type = parse_backend_type(backend_config->backend);
++                session_options.backend = parse_backend_config(backend_config->backend);
+             }
+             if (backend_config->threads <= 0) {
+                 throw std::invalid_argument("threads must be positive");
+diff --git a/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h b/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h
+index 27b26398..e5eb5d63 100644
+--- a/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h
++++ b/src/community_models/chatterbox_turbo/components/t3_turbo_runtime.h
+@@ -388,7 +388,8 @@ T3TurboLayerOutput build_t3_turbo_layer_cached(
+ }
+ 
+ inline bool same_backend(const engine::core::BackendConfig & lhs, const engine::core::BackendConfig & rhs) {
+-    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads;
++    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads &&
++        (lhs.type != engine::core::BackendType::Hip || lhs.implementation == rhs.implementation);
+ }
+ 
+ class T3TurboBackendOwner {
+diff --git a/src/community_models/outetts/llama.cpp b/src/community_models/outetts/llama.cpp
+index d63b904a..40c86581 100644
+--- a/src/community_models/outetts/llama.cpp
++++ b/src/community_models/outetts/llama.cpp
+@@ -532,19 +532,17 @@ private:
+ struct OuteTTSLlamaRuntime::Impl {
+     Impl(
+         std::shared_ptr<const OuteTTSAssets> assets_in,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads_in,
++        core::BackendConfig backend_config,
+         size_t weight_context_bytes,
+         size_t constant_context_bytes,
+         assets::TensorStorageType storage_type)
+         : assets(std::move(assets_in)),
+-          threads(std::max(1, threads_in)),
++          threads(std::max(1, backend_config.threads)),
+           sampling_policy(
+-              backend_type == core::BackendType::Cuda
++              backend_config.type == core::BackendType::Cuda
+                   ? sampling::resolve_torch_cuda_sampling_policy(
+-                        backend_type,
+-                        device,
++                        backend_config.type,
++                        backend_config.device,
+                         "outetts",
+                         "OuteTTS",
+                         sampling::TorchCudaSamplingPolicyFailureMode::StrictCuda)
+@@ -552,8 +550,9 @@ struct OuteTTSLlamaRuntime::Impl {
+         if (assets == nullptr) {
+             throw std::runtime_error("OuteTTS Llama runtime requires assets");
+         }
+-        backend = core::init_backend({backend_type, device, threads});
+-        weights = load_weights(*assets, backend, backend_type, weight_context_bytes, storage_type);
++        backend_config.threads = threads;
++        backend = core::init_backend(backend_config);
++        weights = load_weights(*assets, backend, backend_config.type, weight_context_bytes, storage_type);
+         constants = std::make_unique<core::ConstantTensorCache>(
+             backend, threads, "outetts.llama.constants", constant_context_bytes);
+     }
+@@ -744,14 +743,12 @@ struct OuteTTSLlamaRuntime::Impl {
+ 
+ OuteTTSLlamaRuntime::OuteTTSLlamaRuntime(
+     std::shared_ptr<const OuteTTSAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : impl_(std::make_unique<Impl>(
+-          std::move(assets), backend_type, device, threads,
++          std::move(assets), backend_config,
+           weight_context_bytes, constant_context_bytes, weight_storage_type)) {}
+ 
+ OuteTTSLlamaRuntime::~OuteTTSLlamaRuntime() = default;
+diff --git a/src/community_models/outetts/session.cpp b/src/community_models/outetts/session.cpp
+index 87feefba..838030bb 100644
+--- a/src/community_models/outetts/session.cpp
++++ b/src/community_models/outetts/session.cpp
+@@ -587,9 +587,10 @@ OuteTTSLlamaRuntime &OuteTTSSession::llama(bool voice_cloning) {
+     // an F32 runtime for quantized source weights, so switching routes replaces
+     // the previous runtime instead of retaining duplicate weights and graphs.
+     llama_.reset();
++    auto llama_backend = options().backend;
++    llama_backend.threads = std::max(1, llama_backend.threads);
+     llama_ = std::make_unique<OuteTTSLlamaRuntime>(
+-        assets_, options().backend.type, options().backend.device,
+-        std::max(1, options().backend.threads),
++        assets_, llama_backend,
+         runtime::parse_size_mb_option(options().options,
+                                       {"outetts.llama_weight_context_mb"},
+                                       kDefaultLlamaWeightContextBytes),
+diff --git a/src/community_models/vieneu_v3_turbo/session.cpp b/src/community_models/vieneu_v3_turbo/session.cpp
+index 2b69e374..05451122 100644
+--- a/src/community_models/vieneu_v3_turbo/session.cpp
++++ b/src/community_models/vieneu_v3_turbo/session.cpp
+@@ -472,11 +472,11 @@ VieNeuTTSSession::VieNeuTTSSession(
+             throw std::runtime_error("unknown VieNeu-TTS TTS session option: " + key);
+         }
+     }
++    auto talker_backend = options.backend;
++    talker_backend.threads = std::max(1, talker_backend.threads);
+     talker_weights_ = talker_.create_weights_runtime(
+         assets_,
+-        options.backend.type,
+-        options.backend.device,
+-        std::max(1, options.backend.threads),
++        talker_backend,
+         talker_graph_arena_bytes_,
+         talker_constant_context_bytes_,
+         code_predictor_constant_context_bytes_,
+diff --git a/src/community_models/vieneu_v3_turbo/talker.cpp b/src/community_models/vieneu_v3_turbo/talker.cpp
+index 0eb8f38f..a0d9bd6b 100644
+--- a/src/community_models/vieneu_v3_turbo/talker.cpp
++++ b/src/community_models/vieneu_v3_turbo/talker.cpp
+@@ -1070,15 +1070,13 @@ class VieNeuTalkerWeightsRuntime {
+ public:
+     VieNeuTalkerWeightsRuntime(
+         std::shared_ptr<const VieNeuTTSAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t graph_arena_bytes,
+         size_t talker_constant_context_bytes,
+         size_t code_predictor_constant_context_bytes,
+         engine::assets::TensorStorageType weight_storage_type)
+         : assets_(std::move(assets)),
+-          threads_(threads),
++          threads_(backend_config.threads),
+           graph_arena_bytes_(graph_arena_bytes) {
+         if (assets_ == nullptr) {
+             throw std::runtime_error("VieNeu-TTS talker weights runtime requires assets");
+@@ -1086,16 +1084,16 @@ public:
+         if (threads_ <= 0) {
+             throw std::runtime_error("VieNeu-TTS talker weights runtime requires positive thread count");
+         }
+-        backend_type_ = backend_type;
++        backend_type_ = backend_config.type;
+         sampling_policy_ = backend_type_ == core::BackendType::Cuda
+             ? engine::sampling::resolve_torch_cuda_sampling_policy(
+                   backend_type_,
+-                  device,
++                  backend_config.device,
+                   "vieneu_v3_turbo.talker.cuda_sampling_policy",
+                   "VieNeu-TTS TTS",
+                   engine::sampling::TorchCudaSamplingPolicyFailureMode::StrictCuda)
+             : engine::sampling::TorchCudaSamplingPolicy{};
+-        backend_ = core::init_backend({backend_type_, device, threads_});
++        backend_ = core::init_backend(backend_config);
+         weights_ = std::make_shared<VieNeuTalkerWeights>(
+             load_talker_weights(*assets_, backend_, backend_type_, kTalkerWeightContextBytes, weight_storage_type));
+         talker_constants_ = std::make_unique<core::ConstantTensorCache>(
+@@ -2296,18 +2294,14 @@ const VieNeuTTSTalkerConfig & VieNeuTalker::config() const noexcept {
+ 
+ std::shared_ptr<const VieNeuTalkerWeightsRuntime> VieNeuTalker::create_weights_runtime(
+     std::shared_ptr<const VieNeuTTSAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t graph_arena_bytes,
+     size_t talker_constant_context_bytes,
+     size_t code_predictor_constant_context_bytes,
+     engine::assets::TensorStorageType weight_storage_type) const {
+     return std::make_shared<VieNeuTalkerWeightsRuntime>(
+         std::move(assets),
+-        backend_type,
+-        device,
+-        threads,
++        backend_config,
+         graph_arena_bytes,
+         talker_constant_context_bytes,
+         code_predictor_constant_context_bytes,
+diff --git a/src/community_models/zipvoice/session.cpp b/src/community_models/zipvoice/session.cpp
+index 43f170f7..70ead06d 100644
+--- a/src/community_models/zipvoice/session.cpp
++++ b/src/community_models/zipvoice/session.cpp
+@@ -167,9 +167,7 @@ public:
+         if (const auto v = runtime::find_option(options.options, {"zipvoice.espeak_library_path", "espeak_library_path"})) {
+             espeak_library_path_ = *v;
+         }
+-        device_.backend_type = options.backend.type;
+-        device_.device_index = options.backend.device;
+-        device_.threads = options.backend.threads;
++        device_.config = options.backend;
+     }
+ 
+     std::string family() const noexcept override { return kFamily; }
+diff --git a/src/community_models/zipvoice/synthesize.cpp b/src/community_models/zipvoice/synthesize.cpp
+index 79f458e7..e6c88ee2 100644
+--- a/src/community_models/zipvoice/synthesize.cpp
++++ b/src/community_models/zipvoice/synthesize.cpp
+@@ -233,7 +233,7 @@ core::BackendType resolve_backend_type(const ZipVoiceComputeDevice & device) {
+     if (device.backend != nullptr) {
+         return core::backend_type(device.backend);
+     }
+-    return device.backend_type;
++    return device.config.type;
+ }
+ 
+ } // namespace
+@@ -258,10 +258,14 @@ std::shared_ptr<LoadedModel> load_model(
+     std::lock_guard<std::mutex> lock(state.mutex);
+     const auto cache_config_dir = std::filesystem::is_directory(path)
+         ? std::filesystem::path(path) : std::filesystem::path(path).parent_path();
+-    const std::string key = path + "::" + sidecars.path("model_config", cache_config_dir, "model.json").string() +
++    std::string key = path + "::" + sidecars.path("model_config", cache_config_dir, "model.json").string() +
+         "::" + sidecars.path("tokens", cache_config_dir, "tokens.txt").string() +
+         "::" + std::to_string(static_cast<int>(resolve_backend_type(device))) +
+-        "::" + std::to_string(device.device_index) + "::" + std::to_string(reinterpret_cast<uintptr_t>(device.backend));
++        "::" + std::to_string(device.config.device) + "::" + std::to_string(reinterpret_cast<uintptr_t>(device.backend));
++    if (device.backend == nullptr && device.config.type == core::BackendType::Hip &&
++        !device.config.implementation.empty()) {
++        key += "::" + device.config.implementation;
++    }
+     if (state.model && state.key == key) return state.model;
+     state.model.reset();
+     auto model = std::make_unique<LoadedModel>();
+@@ -313,11 +317,9 @@ std::shared_ptr<LoadedModel> load_model(
+         model->backend = device.backend;
+         model->owns_backend = false;
+     } else {
+-        core::BackendConfig cfg;
+-        cfg.type = device.backend_type;
+-        cfg.device = device.device_index;
+-        cfg.threads = device.threads > 0
+-            ? device.threads
++        core::BackendConfig cfg = device.config;
++        cfg.threads = cfg.threads > 0
++            ? cfg.threads
+             : static_cast<int>(std::thread::hardware_concurrency());
+         model->backend = core::init_backend(cfg);
+         model->owns_backend = true;
+@@ -356,8 +358,8 @@ void upload_leaf(ggml_backend_t backend, ggml_tensor * leaf, const void * data,
+ }
+ 
+ int compute_threads(const ZipVoiceComputeDevice & device) {
+-    return device.threads > 0 ? device.threads
+-                              : static_cast<int>(std::thread::hardware_concurrency());
++    return device.config.threads > 0 ? device.config.threads
++                                     : static_cast<int>(std::thread::hardware_concurrency());
+ }
+ 
+ // Fill per-stack pad bias / conv gate leaves given the valid frame count in
+diff --git a/src/framework/codecs/s3gen_runtime.cpp b/src/framework/codecs/s3gen_runtime.cpp
+index 61321949..ad3a91df 100644
+--- a/src/framework/codecs/s3gen_runtime.cpp
++++ b/src/framework/codecs/s3gen_runtime.cpp
+@@ -471,7 +471,8 @@ std::vector<float> flow_relative_positional_encoding(int64_t frames, int64_t cha
+ }
+ 
+ bool same_backend(const engine::core::BackendConfig & lhs, const engine::core::BackendConfig & rhs) {
+-    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads;
++    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads &&
++        (lhs.type != engine::core::BackendType::Hip || lhs.implementation == rhs.implementation);
+ }
+ 
+ using Clock = std::chrono::steady_clock;
+diff --git a/src/framework/modules/speaker_encoders/campplus_encoder.cpp b/src/framework/modules/speaker_encoders/campplus_encoder.cpp
+index 3fc8f419..e22be800 100644
+--- a/src/framework/modules/speaker_encoders/campplus_encoder.cpp
++++ b/src/framework/modules/speaker_encoders/campplus_encoder.cpp
+@@ -21,7 +21,8 @@ namespace engine::modules {
+ namespace {
+ 
+ bool same_backend(const core::BackendConfig & lhs, const core::BackendConfig & rhs) {
+-    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads;
++    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads &&
++        (lhs.type != core::BackendType::Hip || lhs.implementation == rhs.implementation);
+ }
+ 
+ int64_t tensor_elements(const std::vector<int64_t> & shape) {
+diff --git a/src/framework/modules/speech_encoders/s3_tokenizer.cpp b/src/framework/modules/speech_encoders/s3_tokenizer.cpp
+index a21bf321..508f4383 100644
+--- a/src/framework/modules/speech_encoders/s3_tokenizer.cpp
++++ b/src/framework/modules/speech_encoders/s3_tokenizer.cpp
+@@ -32,7 +32,8 @@ inline int torch_round_to_int(float value) {
+ }
+ 
+ bool same_backend(const engine::core::BackendConfig & lhs, const engine::core::BackendConfig & rhs) {
+-    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads;
++    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads &&
++        (lhs.type != engine::core::BackendType::Hip || lhs.implementation == rhs.implementation);
+ }
+ 
+ struct S3TokenizerLogMelOutputs {
+diff --git a/src/models/chatterbox/components/t3_runtime.h b/src/models/chatterbox/components/t3_runtime.h
+index 06d86003..4dd19e7b 100644
+--- a/src/models/chatterbox/components/t3_runtime.h
++++ b/src/models/chatterbox/components/t3_runtime.h
+@@ -691,7 +691,8 @@ T3LayerBackendOutputs build_t3_layer_backend_cached(
+ inline bool same_backend(const engine::core::BackendConfig & lhs, const engine::core::BackendConfig & rhs) {
+     return lhs.type == rhs.type &&
+         lhs.device == rhs.device &&
+-        lhs.threads == rhs.threads;
++        lhs.threads == rhs.threads &&
++        (lhs.type != engine::core::BackendType::Hip || lhs.implementation == rhs.implementation);
+ }
+ 
+ inline void fill_t3_decode_attention_mask(
+diff --git a/src/models/chatterbox/s3_tokenizer_impl.cpp b/src/models/chatterbox/s3_tokenizer_impl.cpp
+index 8637abbb..302717f3 100644
+--- a/src/models/chatterbox/s3_tokenizer_impl.cpp
++++ b/src/models/chatterbox/s3_tokenizer_impl.cpp
+@@ -18,7 +18,8 @@ inline int torch_round_to_int(float value) {
+ }
+ 
+ bool same_backend(const engine::core::BackendConfig & lhs, const engine::core::BackendConfig & rhs) {
+-    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads;
++    return lhs.type == rhs.type && lhs.device == rhs.device && lhs.threads == rhs.threads &&
++        (lhs.type != engine::core::BackendType::Hip || lhs.implementation == rhs.implementation);
+ }
+ 
+ S3TokenizerV2Weights::Conv1dWeights load_tokenizer_conv1d(
+diff --git a/src/models/heartmula/mula.cpp b/src/models/heartmula/mula.cpp
+index fed7d0b4..f688eebf 100644
+--- a/src/models/heartmula/mula.cpp
++++ b/src/models/heartmula/mula.cpp
+@@ -1771,9 +1771,7 @@ HeartMuLaDecoderCachedState & HeartMuLaDecoderCachedState::operator=(
+ 
+ HeartMuLaWeightsRuntime::HeartMuLaWeightsRuntime(
+     std::shared_ptr<const HeartMuLaAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     size_t backbone_prefill_graph_arena_bytes,
+@@ -1783,9 +1781,9 @@ HeartMuLaWeightsRuntime::HeartMuLaWeightsRuntime(
+     size_t frame_embedding_graph_arena_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+-      backend_type_(backend_type),
+-      device_(device),
+-      threads_(threads),
++      backend_type_(backend_config.type),
++      device_(backend_config.device),
++      threads_(backend_config.threads),
+       backbone_prefill_graph_arena_bytes_(backbone_prefill_graph_arena_bytes),
+       backbone_step_graph_arena_bytes_(backbone_step_graph_arena_bytes),
+       decoder_prefill_graph_arena_bytes_(decoder_prefill_graph_arena_bytes),
+@@ -1797,9 +1795,9 @@ HeartMuLaWeightsRuntime::HeartMuLaWeightsRuntime(
+     if (threads_ <= 0) {
+         throw std::runtime_error("HeartMuLa weights runtime requires positive thread count");
+     }
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     weights_ = std::make_shared<HeartMuLaWeights>(
+-        load_heartmula_weights(*assets_, backend_, backend_type, weight_context_bytes, weight_storage_type));
++        load_heartmula_weights(*assets_, backend_, backend_config.type, weight_context_bytes, weight_storage_type));
+     assets_->mula_weights->release_storage();
+     backbone_constants_ = std::make_unique<core::ConstantTensorCache>(
+         backend_,
+diff --git a/src/models/heartmula/session.cpp b/src/models/heartmula/session.cpp
+index 5cc8284f..f937cc5d 100644
+--- a/src/models/heartmula/session.cpp
++++ b/src/models/heartmula/session.cpp
+@@ -182,9 +182,7 @@ HeartMuLaSession::HeartMuLaSession(
+       text_tokenizer_(assets_),
+       mula_(
+           assets_,
+-          RuntimeSessionBase::options().backend.type,
+-          RuntimeSessionBase::options().backend.device,
+-          RuntimeSessionBase::options().backend.threads,
++          RuntimeSessionBase::options().backend,
+           runtime::parse_size_mb_option(
+               RuntimeSessionBase::options().options,
+               {"heartmula.generator_weight_context_mb"},
+diff --git a/src/models/qwen3_tts/session.cpp b/src/models/qwen3_tts/session.cpp
+index 29f52bc5..61421f51 100644
+--- a/src/models/qwen3_tts/session.cpp
++++ b/src/models/qwen3_tts/session.cpp
+@@ -447,11 +447,11 @@ Qwen3TTSSession::Qwen3TTSSession(
+             throw std::runtime_error("unknown Qwen3 TTS session option: " + key);
+         }
+     }
++    auto talker_backend = options.backend;
++    talker_backend.threads = std::max(1, talker_backend.threads);
+     talker_weights_ = talker_.create_weights_runtime(
+         assets_,
+-        options.backend.type,
+-        options.backend.device,
+-        std::max(1, options.backend.threads),
++        talker_backend,
+         talker_graph_arena_bytes_,
+         talker_constant_context_bytes_,
+         code_predictor_constant_context_bytes_,
+diff --git a/src/models/qwen3_tts/talker.cpp b/src/models/qwen3_tts/talker.cpp
+index 9a425221..8a0b24da 100644
+--- a/src/models/qwen3_tts/talker.cpp
++++ b/src/models/qwen3_tts/talker.cpp
+@@ -958,9 +958,7 @@ class Qwen3TalkerWeightsRuntime {
+ public:
+     Qwen3TalkerWeightsRuntime(
+         std::shared_ptr<const Qwen3TTSAssets> assets,
+-        core::BackendType backend_type,
+-        int device,
+-        int threads,
++        const core::BackendConfig & backend_config,
+         size_t graph_arena_bytes,
+         size_t talker_constant_context_bytes,
+         size_t code_predictor_constant_context_bytes,
+@@ -971,7 +969,7 @@ public:
+         ggml_type kv_cache_type,
+         bool optimized_kv_cache_write)
+         : assets_(std::move(assets)),
+-          threads_(threads),
++          threads_(backend_config.threads),
+           graph_arena_bytes_(graph_arena_bytes),
+           perf_mode_(perf_mode),
+           packed_projections_(packed_projections),
+@@ -990,16 +988,16 @@ public:
+         if (threads_ <= 0) {
+             throw std::runtime_error("Qwen3 talker weights runtime requires positive thread count");
+         }
+-        backend_type_ = backend_type;
++        backend_type_ = backend_config.type;
+         sampling_policy_ = backend_type_ == core::BackendType::Cuda
+             ? engine::sampling::resolve_torch_cuda_sampling_policy(
+                   backend_type_,
+-                  device,
++                  backend_config.device,
+                   "qwen3_tts.talker.cuda_sampling_policy",
+                   "Qwen3 TTS",
+                   engine::sampling::TorchCudaSamplingPolicyFailureMode::StrictCuda)
+             : engine::sampling::TorchCudaSamplingPolicy{};
+-        backend_ = core::init_backend({backend_type_, device, threads_});
++        backend_ = core::init_backend(backend_config);
+         weights_ = std::make_shared<Qwen3TalkerWeights>(
+             load_talker_weights(*assets_, backend_, backend_type_, kTalkerWeightContextBytes, weight_storage_type, packed_projections_));
+         talker_constants_ = std::make_unique<core::ConstantTensorCache>(
+@@ -2124,9 +2122,7 @@ const Qwen3TTSTalkerConfig & Qwen3Talker::config() const noexcept {
+ 
+ std::shared_ptr<const Qwen3TalkerWeightsRuntime> Qwen3Talker::create_weights_runtime(
+     std::shared_ptr<const Qwen3TTSAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t graph_arena_bytes,
+     size_t talker_constant_context_bytes,
+     size_t code_predictor_constant_context_bytes,
+@@ -2138,9 +2134,7 @@ std::shared_ptr<const Qwen3TalkerWeightsRuntime> Qwen3Talker::create_weights_run
+     bool optimized_kv_cache_write) const {
+     return std::make_shared<Qwen3TalkerWeightsRuntime>(
+         std::move(assets),
+-        backend_type,
+-        device,
+-        threads,
++        backend_config,
+         graph_arena_bytes,
+         talker_constant_context_bytes,
+         code_predictor_constant_context_bytes,
+diff --git a/src/models/vibevoice/connector.cpp b/src/models/vibevoice/connector.cpp
+index 51ce3429..43315fae 100644
+--- a/src/models/vibevoice/connector.cpp
++++ b/src/models/vibevoice/connector.cpp
+@@ -244,15 +244,13 @@ VibeVoiceConnectorWeightsBundle load_vibevoice_connector_weights(
+ 
+ VibeVoiceConnectorWeightsRuntime::VibeVoiceConnectorWeightsRuntime(
+     std::shared_ptr<const VibeVoiceAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+-      backend_type_(backend_type),
+-      threads_(threads) {
++      backend_type_(backend_config.type),
++      threads_(backend_config.threads) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice connector weights runtime requires assets");
+     }
+@@ -260,7 +258,7 @@ VibeVoiceConnectorWeightsRuntime::VibeVoiceConnectorWeightsRuntime(
+         throw std::runtime_error("VibeVoice connector weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.connector_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -269,7 +267,7 @@ VibeVoiceConnectorWeightsRuntime::VibeVoiceConnectorWeightsRuntime(
+         load_vibevoice_connector_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(
+diff --git a/src/models/vibevoice/decoder.cpp b/src/models/vibevoice/decoder.cpp
+index 8fed455b..14838016 100644
+--- a/src/models/vibevoice/decoder.cpp
++++ b/src/models/vibevoice/decoder.cpp
+@@ -1465,15 +1465,13 @@ VibeVoiceQwen2CachedState & VibeVoiceQwen2CachedState::operator=(VibeVoiceQwen2C
+ 
+ VibeVoiceQwen2WeightsRuntime::VibeVoiceQwen2WeightsRuntime(
+     std::shared_ptr<const VibeVoiceAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+       cache_type_(kDecoderCacheType),
+-      threads_(threads) {
++      threads_(backend_config.threads) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice decoder weights runtime requires assets");
+     }
+@@ -1481,7 +1479,7 @@ VibeVoiceQwen2WeightsRuntime::VibeVoiceQwen2WeightsRuntime(
+         throw std::runtime_error("VibeVoice decoder weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.decoder_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -1490,7 +1488,7 @@ VibeVoiceQwen2WeightsRuntime::VibeVoiceQwen2WeightsRuntime(
+         load_vibevoice_decoder_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(
+diff --git a/src/models/vibevoice/diffusion_head.cpp b/src/models/vibevoice/diffusion_head.cpp
+index b781e459..a43ecf7c 100644
+--- a/src/models/vibevoice/diffusion_head.cpp
++++ b/src/models/vibevoice/diffusion_head.cpp
+@@ -400,15 +400,13 @@ VibeVoiceDiffusionHeadWeights load_vibevoice_diffusion_head_weights(
+ 
+ VibeVoiceDiffusionHeadWeightsRuntime::VibeVoiceDiffusionHeadWeightsRuntime(
+     std::shared_ptr<const VibeVoiceAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+-      backend_type_(backend_type),
+-      threads_(threads) {
++      backend_type_(backend_config.type),
++      threads_(backend_config.threads) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice diffusion head weights runtime requires assets");
+     }
+@@ -416,7 +414,7 @@ VibeVoiceDiffusionHeadWeightsRuntime::VibeVoiceDiffusionHeadWeightsRuntime(
+         throw std::runtime_error("VibeVoice diffusion head weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.diffusion_head_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -425,7 +423,7 @@ VibeVoiceDiffusionHeadWeightsRuntime::VibeVoiceDiffusionHeadWeightsRuntime(
+         load_vibevoice_diffusion_head_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(
+diff --git a/src/models/vibevoice/session.cpp b/src/models/vibevoice/session.cpp
+index 9c218ca5..c13e2da5 100644
+--- a/src/models/vibevoice/session.cpp
++++ b/src/models/vibevoice/session.cpp
+@@ -208,9 +208,7 @@ VibeVoiceSession::VibeVoiceSession(
+       text_tokenizer_(assets_),
+       audio_tokenizer_(
+           assets_,
+-          options.backend.type,
+-          options.backend.device,
+-          options.backend.threads,
++          options.backend,
+           256ull * 1024ull * 1024ull,
+           128ull * 1024ull * 1024ull,
+           options.options.find("vibevoice.tokenizer_weight_type") != options.options.end()
+@@ -220,9 +218,7 @@ VibeVoiceSession::VibeVoiceSession(
+                       : engine::assets::TensorStorageType::Native)),
+       connector_(
+           assets_,
+-          options.backend.type,
+-          options.backend.device,
+-          options.backend.threads,
++          options.backend,
+           64ull * 1024ull * 1024ull,
+           32ull * 1024ull * 1024ull,
+           options.options.find("vibevoice.connector_weight_type") != options.options.end()
+@@ -232,9 +228,7 @@ VibeVoiceSession::VibeVoiceSession(
+                       : engine::assets::TensorStorageType::Native)),
+       decoder_(
+           assets_,
+-          options.backend.type,
+-          options.backend.device,
+-          options.backend.threads,
++          options.backend,
+           256ull * 1024ull * 1024ull,
+           128ull * 1024ull * 1024ull,
+           options.options.find("vibevoice.decoder_weight_type") != options.options.end()
+@@ -244,9 +238,7 @@ VibeVoiceSession::VibeVoiceSession(
+                       : engine::assets::TensorStorageType::Native)),
+       diffusion_head_(
+           assets_,
+-          options.backend.type,
+-          options.backend.device,
+-          options.backend.threads,
++          options.backend,
+           64ull * 1024ull * 1024ull,
+           64ull * 1024ull * 1024ull,
+           options.options.find("vibevoice.diffusion_head_weight_type") != options.options.end()
+diff --git a/src/models/vibevoice/tokenizer_audio.cpp b/src/models/vibevoice/tokenizer_audio.cpp
+index 809aa3d6..84eecdb8 100644
+--- a/src/models/vibevoice/tokenizer_audio.cpp
++++ b/src/models/vibevoice/tokenizer_audio.cpp
+@@ -1658,15 +1658,13 @@ VibeVoiceTokenizerLatents unscale_vibevoice_acoustic_latents_for_decoder(
+ 
+ VibeVoiceTokenizerWeightsRuntime::VibeVoiceTokenizerWeightsRuntime(
+     std::shared_ptr<const VibeVoiceAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+-      backend_type_(backend_type),
+-      threads_(threads) {
++      backend_type_(backend_config.type),
++      threads_(backend_config.threads) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice tokenizer weights runtime requires assets");
+     }
+@@ -1674,7 +1672,7 @@ VibeVoiceTokenizerWeightsRuntime::VibeVoiceTokenizerWeightsRuntime(
+         throw std::runtime_error("VibeVoice tokenizer weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.tokenizer_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -1683,7 +1681,7 @@ VibeVoiceTokenizerWeightsRuntime::VibeVoiceTokenizerWeightsRuntime(
+         load_vibevoice_tokenizer_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(
+diff --git a/src/models/vibevoice_asr/connector.cpp b/src/models/vibevoice_asr/connector.cpp
+index 7620735a..72fa04ec 100644
+--- a/src/models/vibevoice_asr/connector.cpp
++++ b/src/models/vibevoice_asr/connector.cpp
+@@ -247,15 +247,13 @@ VibeVoiceConnectorWeightsBundle load_vibevoice_connector_weights(
+ 
+ VibeVoiceConnectorWeightsRuntime::VibeVoiceConnectorWeightsRuntime(
+     std::shared_ptr<const VibeVoiceASRAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+-      backend_type_(backend_type),
+-      threads_(threads) {
++      backend_type_(backend_config.type),
++      threads_(backend_config.threads) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice connector weights runtime requires assets");
+     }
+@@ -263,7 +261,7 @@ VibeVoiceConnectorWeightsRuntime::VibeVoiceConnectorWeightsRuntime(
+         throw std::runtime_error("VibeVoice connector weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.connector_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -272,7 +270,7 @@ VibeVoiceConnectorWeightsRuntime::VibeVoiceConnectorWeightsRuntime(
+         load_vibevoice_connector_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(
+diff --git a/src/models/vibevoice_asr/session.cpp b/src/models/vibevoice_asr/session.cpp
+index a2438e62..b4273977 100644
+--- a/src/models/vibevoice_asr/session.cpp
++++ b/src/models/vibevoice_asr/session.cpp
+@@ -571,18 +571,14 @@ VibeVoiceASRSession::VibeVoiceASRSession(
+       frontend_(assets_),
+       speech_encoder_(
+           assets_,
+-          options.backend.type,
+-          options.backend.device,
+-          options.backend.threads,
++          options.backend,
+           tokenizer_weight_context_bytes_,
+           connector_weight_context_bytes_,
+           tokenizer_weight_storage_type_,
+           connector_weight_storage_type_),
+       text_decoder_(
+           assets_,
+-          options.backend.type,
+-          options.backend.device,
+-          options.backend.threads,
++          options.backend,
+           decoder_weight_context_bytes_,
+           128ull * 1024ull * 1024ull,
+           decoder_weight_storage_type_,
+diff --git a/src/models/vibevoice_asr/speech_encoder.cpp b/src/models/vibevoice_asr/speech_encoder.cpp
+index 2883b5c7..8fc7820a 100644
+--- a/src/models/vibevoice_asr/speech_encoder.cpp
++++ b/src/models/vibevoice_asr/speech_encoder.cpp
+@@ -42,37 +42,31 @@ void append_latents(VibeVoiceTokenizerLatents & dst, const VibeVoiceTokenizerLat
+ 
+ VibeVoiceASRSpeechEncoder::VibeVoiceASRSpeechEncoder(
+     std::shared_ptr<const VibeVoiceASRAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t tokenizer_weight_context_bytes,
+     size_t connector_weight_context_bytes,
+     assets::TensorStorageType tokenizer_weight_storage_type,
+     assets::TensorStorageType connector_weight_storage_type)
+     : assets_(std::move(assets)),
+       sampling_policy_(
+-          backend_type == core::BackendType::Cuda
++          backend_config.type == core::BackendType::Cuda
+               ? std::optional<sampling::TorchCudaSamplingPolicy>(
+                     sampling::resolve_torch_cuda_sampling_policy(
+-                        backend_type,
+-                        device,
++                        backend_config.type,
++                        backend_config.device,
+                         "vibevoice_asr",
+                         "VibeVoice-ASR",
+                         sampling::TorchCudaSamplingPolicyFailureMode::StrictCuda))
+               : std::nullopt),
+       tokenizer_(
+           assets_,
+-          backend_type,
+-          device,
+-          threads,
++          backend_config,
+           tokenizer_weight_context_bytes,
+           128ull * 1024ull * 1024ull,
+           tokenizer_weight_storage_type),
+       connector_(
+           assets_,
+-          backend_type,
+-          device,
+-          threads,
++          backend_config,
+           connector_weight_context_bytes,
+           64ull * 1024ull * 1024ull,
+           connector_weight_storage_type) {
+diff --git a/src/models/vibevoice_asr/speech_tokenizer.cpp b/src/models/vibevoice_asr/speech_tokenizer.cpp
+index 1f4cd233..b73bc758 100644
+--- a/src/models/vibevoice_asr/speech_tokenizer.cpp
++++ b/src/models/vibevoice_asr/speech_tokenizer.cpp
+@@ -1704,15 +1704,13 @@ VibeVoiceTokenizerLatents unscale_vibevoice_acoustic_latents_for_decoder(
+ 
+ VibeVoiceTokenizerWeightsRuntime::VibeVoiceTokenizerWeightsRuntime(
+     std::shared_ptr<const VibeVoiceASRAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type)
+     : assets_(std::move(assets)),
+-      backend_type_(backend_type),
+-      threads_(threads) {
++      backend_type_(backend_config.type),
++      threads_(backend_config.threads) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice tokenizer weights runtime requires assets");
+     }
+@@ -1720,7 +1718,7 @@ VibeVoiceTokenizerWeightsRuntime::VibeVoiceTokenizerWeightsRuntime(
+         throw std::runtime_error("VibeVoice tokenizer weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.tokenizer_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -1729,7 +1727,7 @@ VibeVoiceTokenizerWeightsRuntime::VibeVoiceTokenizerWeightsRuntime(
+         load_vibevoice_tokenizer_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(
+diff --git a/src/models/vibevoice_asr/text_decoder.cpp b/src/models/vibevoice_asr/text_decoder.cpp
+index b6353e6c..b2972cc7 100644
+--- a/src/models/vibevoice_asr/text_decoder.cpp
++++ b/src/models/vibevoice_asr/text_decoder.cpp
+@@ -1116,15 +1116,13 @@ VibeVoiceQwen2CachedState & VibeVoiceQwen2CachedState::operator=(VibeVoiceQwen2C
+ 
+ VibeVoiceQwen2WeightsRuntime::VibeVoiceQwen2WeightsRuntime(
+     std::shared_ptr<const VibeVoiceASRAssets> assets,
+-    core::BackendType backend_type,
+-    int device,
+-    int threads,
++    const core::BackendConfig & backend_config,
+     size_t weight_context_bytes,
+     size_t constant_context_bytes,
+     assets::TensorStorageType weight_storage_type,
+     int64_t max_history_steps)
+     : assets_(std::move(assets)),
+-      threads_(threads),
++      threads_(backend_config.threads),
+       max_history_steps_(max_history_steps) {
+     if (assets_ == nullptr) {
+         throw std::runtime_error("VibeVoice decoder weights runtime requires assets");
+@@ -1136,7 +1134,7 @@ VibeVoiceQwen2WeightsRuntime::VibeVoiceQwen2WeightsRuntime(
+         throw std::runtime_error("VibeVoice decoder weights runtime requires positive thread count");
+     }
+     const auto backend_started = std::chrono::steady_clock::now();
+-    backend_ = core::init_backend({backend_type, device, threads_});
++    backend_ = core::init_backend(backend_config);
+     engine::debug::timing_log_scalar(
+         "vibevoice.runtime.decoder_backend_init_ms",
+         engine::debug::elapsed_ms(backend_started));
+@@ -1145,7 +1143,7 @@ VibeVoiceQwen2WeightsRuntime::VibeVoiceQwen2WeightsRuntime(
+         load_vibevoice_decoder_weights(
+             *assets_,
+             backend_,
+-            backend_type,
++            backend_config.type,
+             weight_context_bytes,
+             weight_storage_type));
+     engine::debug::timing_log_scalar(

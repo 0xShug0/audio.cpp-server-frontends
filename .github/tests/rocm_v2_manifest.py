@@ -5,9 +5,14 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--root', type=Path, required=True)
-parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads','integrated','refine'], default='complete')
+parser.add_argument('--focus', choices=['complete','sgemm','precision','submission','matrix','fused','dispatch','split','loads','integrated','refine','qwen'], default='complete')
 args = parser.parse_args()
 root = args.root
+if args.focus == 'qwen':
+    from rocm_v2_qwen import manifest
+    (root / 'campaign.json').write_text(json.dumps(manifest(root), indent=2) + '\n')
+    print('Campaign (qwen): one model build, four serial sessions and two optional route traces')
+    raise SystemExit(0)
 entries = []
 for line in (root / '.github/tests/rocm-v2-cases.tsv').read_text().splitlines():
     number, op, params = line.split('\t', 2)

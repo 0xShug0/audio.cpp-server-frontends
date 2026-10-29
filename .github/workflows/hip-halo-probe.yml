@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen]
         default: complete
   push:
     branches: [experiment/rocm-v2-probes]
@@ -59,6 +59,14 @@ jobs:
           git -C source apply ../.github/tests/rocm-v2-source.patch
           git -C source apply --check ../.github/tests/rocm-v2-framework.patch
           git -C source apply ../.github/tests/rocm-v2-framework.patch
+          if [[ "$VALIDATION_GROUP" == qwen ]]; then
+            git -C source sparse-checkout set include src app model_specs tools/cmake tests/unittests webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source apply --check ../.github/tests/rocm-v2-model.patch
+            git -C source apply ../.github/tests/rocm-v2-model.patch
+            python3 .github/tests/rocm_v2_qwen.py --prepare source
+            curl --fail --location --max-time 180 --retry 2 -o source/toolchain/miniforge.sh https://github.com/conda-forge/miniforge/releases/download/25.3.1-0/Miniforge3-Linux-x86_64.sh
+            sha256sum source/toolchain/miniforge.sh > source/miniforge-sha256.txt
+          fi
           cp -a source/external/ggml source-vulkan
           cat >> source/external/ggml/CMakeLists.txt <<'CMAKE'
           set(PROBE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
