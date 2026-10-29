@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo]
         default: complete
   push:
     branches: [experiment/rocm-v2-probes]
@@ -48,6 +48,30 @@ jobs:
             ccache-4.13.6-linux-x86_64-musl-static/ccache
           source/toolchain/ccache --version
           sha256sum source/toolchain/ccache > source/ccache-sha256.txt
+          if [[ "$VALIDATION_GROUP" == halo ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config core.autocrlf false
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin 2597b300f5961999387c84c65f2e8e79c088a571
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/unittests tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source checkout --detach FETCH_HEAD
+            git -C source rev-parse HEAD > source/source-commit.txt
+            git -C source apply --check ../.github/tests/halo-source.patch
+            git -C source apply ../.github/tests/halo-source.patch
+            sha256sum .github/tests/halo-source.patch > source/patch-sha256.txt
+            mkdir -p source/.github/tests
+            cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            python3 .github/tests/rocm_v2_qwen.py --prepare source
+            cat >> source/CMakeLists.txt <<'CMAKE'
+          add_executable(halo_backend_ops external/ggml/tests/test-backend-ops.cpp)
+          target_link_libraries(halo_backend_ops PRIVATE ggml Threads::Threads)
+          add_executable(halo_backend_selection tests/unittests/test_backend_device_resolution.cpp)
+          target_include_directories(halo_backend_selection PRIVATE tests/unittests)
+          target_link_libraries(halo_backend_selection PRIVATE engine_runtime ggml)
+          CMAKE
+            python3 source/.github/tests/rocm_v2_halo.py --root source
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+          else
           git init source
           git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
           git -C source config core.autocrlf false
@@ -60,7 +84,7 @@ jobs:
           git -C source apply --check ../.github/tests/rocm-v2-framework.patch
           git -C source apply ../.github/tests/rocm-v2-framework.patch
           if [[ "$VALIDATION_GROUP" == qwen ]]; then
-            git -C source sparse-checkout set include src app model_specs tools/cmake tests/unittests tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/unittests tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source apply --check ../.github/tests/rocm-v2-model.patch
             git -C source apply ../.github/tests/rocm-v2-model.patch
             python3 .github/tests/rocm_v2_qwen.py --prepare source
@@ -105,7 +129,12 @@ jobs:
             source/build/debug/bin/framework_backend_probe --log
             source/build/debug/bin/backend_config_args_test --log
           fi
-          tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source source-vulkan
+          fi
+          if [[ "$VALIDATION_GROUP" == halo ]]; then
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+          else
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source source-vulkan
+          fi
           du -h probe-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:

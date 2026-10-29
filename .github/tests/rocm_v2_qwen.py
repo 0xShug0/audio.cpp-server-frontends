@@ -83,13 +83,13 @@ def manifest(root):
             argv=['python3', '.github/tests/rocm_v2_qwen.py', '--summarize', '../results'])])])
 
 
-def summarize(root):
+def summarize(root, implementation="rocm_v2"):
     variants = ['hip-a1', 'v2-b1', 'v2-b2', 'hip-a2']
     names = [item['id'] for item in REQUESTS]
     rows, audio = [], {}
     for variant in variants:
         text = (root / 'case/correctness' / (variant + '.log')).read_text()
-        selected = 'implementation=rocm_v2' in text
+        selected = ('implementation=' + implementation) in text
         assert selected == variant.startswith('v2'), (variant, 'incorrect backend selection')
         metrics, stages, pending = {}, {}, {}
         for line in text.splitlines():
@@ -115,19 +115,19 @@ def summarize(root):
             assert math.isfinite(wall) and wall > 0
             assert abs(float(metrics[name]['audio_duration_ms']) - seconds * 1000) <= 1
             if name != 'warmup':
-                rows.append(dict(variant=variant, backend='hip' if variant.startswith('hip') else 'rocm_v2',
+                rows.append(dict(variant=variant, backend='hip' if variant.startswith('hip') else implementation,
                     request=name, wall_ms=wall, audio_seconds=seconds, rtf=wall / (1000 * seconds),
                     talker_ms=stages[name]['qwen3_tts.talker_ms'],
                     decoder_ms=stages[name]['qwen3_tts.speech_decoder_ms']))
     per_request, aggregate = {}, {}
     for name in names[1:]:
         per_request[name] = {}
-        for backend in ['hip', 'rocm_v2']:
+        for backend in ['hip', implementation]:
             group = [row for row in rows if row['request'] == name and row['backend'] == backend]
             assert len(group) == 2
             per_request[name][backend] = {key: statistics.mean(row[key] for row in group)
                 for key in ['wall_ms', 'audio_seconds', 'rtf', 'talker_ms', 'decoder_ms']}
-    for backend in ['hip', 'rocm_v2']:
+    for backend in ['hip', implementation]:
         group = [row for row in rows if row['backend'] == backend]
         aggregate[backend] = dict(wall_ms=sum(row['wall_ms'] for row in group),
             audio_seconds=sum(row['audio_seconds'] for row in group))
@@ -147,11 +147,11 @@ def summarize(root):
             parity.append(result)
     repeat = {variant: audio[variant, 'short'] == audio[variant, 'short_repeat'] for variant in variants}
     kernels = set()
-    for path in (root / 'profile/rocm_v2').rglob('*kernel_trace.csv'):
+    for path in (root / 'profile' / implementation).rglob('*kernel_trace.csv'):
         with path.open() as stream:
             for row in csv.DictReader(stream):
                 name = row['Kernel_Name']
-                if 'rocm_v2_sgemm' in name or 'rocm_v2_im2col' in name:
+                if any(key in name for key in ['rocm_v2_sgemm', 'rocm_v2_im2col', 'hip_halo_sgemm', 'hip_halo_im2col']):
                     kernels.add(name)
     result = dict(rows=rows, per_request=per_request, aggregate=aggregate, parity=parity,
         repeat_byte_identical=repeat, rocm_v2_kernel_names=sorted(kernels))
@@ -166,8 +166,9 @@ if __name__ == '__main__':
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument('--prepare', type=Path)
     actions.add_argument('--summarize', type=Path)
+    parser.add_argument('--implementation', default='rocm_v2')
     args = parser.parse_args()
     if args.prepare is not None:
         prepare(args.prepare)
     else:
-        summarize(args.summarize)
+        summarize(args.summarize, args.implementation)
