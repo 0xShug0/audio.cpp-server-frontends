@@ -95,6 +95,8 @@ jobs:
                       continue
                   if os.environ['VALIDATION_GROUP'] == 'breeze-ar' and family != 'breeze_tts':
                       continue
+                  if os.environ['VALIDATION_GROUP'] == 'tts-kernels' and family == 'ming3_tts':
+                      sequence[0]['text'] = next(r['text'] for r in sequence if r['id'] == 'long')
                   request = root / ('inputs/' + family + '-requests.json')
                   request.write_text(json.dumps(sequence, ensure_ascii=False, indent=2) + '\n')
                   hashes.append(hashlib.sha256(request.read_bytes()).hexdigest() + '  ' + request.relative_to(root).as_posix())

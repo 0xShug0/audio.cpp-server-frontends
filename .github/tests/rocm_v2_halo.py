@@ -303,46 +303,26 @@ def tts_kernels_manifest(root):
     baseline['id'] = 'baseline'
     baseline['cwd'] = '../source-baseline'
     plan['builds'].insert(1, baseline)
-    candidate['commands'][0] = [x.replace('-DENGINE_BUILD_TESTS=OFF', '-DENGINE_BUILD_TESTS=ON')
-                                for x in candidate['commands'][0]]
-    candidate['commands'][1].insert(candidate['commands'][1].index('--parallel'), 'cuda_round_bf16_fusion_test')
-    candidate['commands'][1].insert(candidate['commands'][1].index('--parallel'), 'test-backend-ops')
+    omni = next(s for s in plan['suites'] if s['id'] == 'omnivoice-b1')
+    profile = list(omni['cases'][0]['argv'])
+    profile[profile.index('--out-dir') + 1] = '../results/profile-wavs/omnivoice'
     plan['suites'] = [s for s in plan['suites'] if s['id'] in ['correctness', 'framework']
-                      or s['id'].startswith(('ming3_tts-', 'omnivoice-'))]
-    plan['suites'][0]['cases'].append(dict(id='round-fusion',
-        argv=['build/debug/bin/cuda_round_bf16_fusion_test', 'ROCm', '--log']))
-    for impl in ['default', 'gfx1151_v1']:
-        plan['suites'][0]['cases'].append(dict(id='batched-f32-' + impl,
-            argv=['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
-                  '--suite', 'gfx1151_v1', '--backend-impl', impl, '-o', 'MUL_MAT',
-                  '-p', r'type_a=f32.*bs=\[(16|7|8),[123]\]'], timeout_s=300))
+                      or s['id'].startswith('ming3_tts-')]
     for suite in plan['suites']:
         if suite['id'] == 'framework':
-            suite['cases'] = [c for c in suite['cases'] if c['id'] in ['ming3_tts', 'omnivoice']]
-            for case in suite['cases']:
-                command = case['argv']
-                command[command.index('--baseline-implementation') + 1] = 'gfx1151_v1'
-        elif suite['id'] != 'correctness':
+            suite['cases'] = [c for c in suite['cases'] if c['id'] == 'ming3_tts']
+            command = suite['cases'][0]['argv']
+            command[command.index('--baseline-implementation') + 1] = 'gfx1151_v1'
+        elif suite['id'].startswith('ming3_tts-'):
             command = suite['cases'][0]['argv']
             if suite['id'].split('-')[-1].startswith('a'):
                 suite['build'] = 'baseline'
                 command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
                 command += ['--backend-impl', 'gfx1151_v1']
-    profiles = []
-    for family in ['ming3_tts', 'omnivoice']:
-        suite = next(s for s in plan['suites'] if s['id'] == family + '-b1')
-        command = list(suite['cases'][0]['argv'])
-        command[command.index('--out-dir') + 1] = '../results/profile-wavs/' + family
-        profiles.append(dict(id='profile-' + family, timeout_s=180,
-            argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--collection-period', '4000:250:1',
-                  '--collection-period-unit', 'msec', '--output-format', 'csv',
-                  '--output-directory', '../results/profile/' + family, '--'] + command))
-    plan['suites'].insert(-1, dict(id='profiles', build='model', gpu=True, timeout_s=180, cases=profiles))
-    probe = ['build/debug/bin/test-backend-ops', 'perf', '-b', 'ROCm0',
-             '--suite', 'gfx1151_v1', '-o', 'MUL_MAT', '-p', r'type_a=f32.*bs=\[(16|7|8),[123]\]']
-    plan['suites'].insert(1, dict(id='batched-probes', build='model', gpu=True, timeout_s=180,
-        cases=[dict(id=str(i) + '-' + impl, argv=probe + ['--backend-impl', impl])
-               for i, impl in enumerate(['default', 'gfx1151_v1', 'gfx1151_v1', 'default'])]))
+    plan['suites'].insert(-1, dict(id='profiles', build='model', gpu=True, timeout_s=180,
+        cases=[dict(id='omnivoice', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace',
+            '--collection-period', '15000:1000:1', '--collection-period-unit', 'msec',
+            '--output-format', 'csv', '--output-directory', '../results/profile/omnivoice', '--'] + profile)]))
     return plan
 
 

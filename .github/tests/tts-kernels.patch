@@ -30,7 +30,7 @@ index f80c8931..186d67f3 100644
          add_test(NAME cuda_rope_rows_test COMMAND cuda_rope_rows_test)
          set_tests_properties(cuda_rope_rows_test PROPERTIES SKIP_RETURN_CODE 77)
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2f4fe797..25827381 100644
+index 2f4fe797..f23dad3d 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -4259,7 +4259,7 @@ static bool ggml_cuda_safe_bias_fusion(const ggml_cgraph * graph, int i) {
@@ -42,7 +42,23 @@ index 2f4fe797..25827381 100644
  // bf16-reference graphs (see ggml_round_bf16) insert a ROUND_BF16 after most
  // activations, which breaks the usual fusion patterns. These helpers match the
  // rounding that directly follows a fusable op so it can run in that op's kernel.
-@@ -4369,8 +4369,12 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4284,6 +4284,7 @@ static bool ggml_cuda_ranges_overlap(const ggml_tensor * a, const ggml_tensor *
+     return a0 < b0 + ggml_nbytes(b) && b0 < a0 + ggml_nbytes(a);
+ }
+ 
++#if !defined(GGML_USE_HIP)
+ // ROUND(gate) -> SILU -> ROUND, [VIEW up], ROUND(up) -> MUL -> ROUND starting at node i.
+ static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int i) {
+     if (i + 6 >= cgraph->n_nodes) {
+@@ -4321,6 +4322,7 @@ static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int
+     return !ggml_cuda_ranges_overlap(dst, gate) && !ggml_cuda_ranges_overlap(dst, up);
+ }
+ #endif
++#endif
+ 
+ // try and fuse nodes and return the number of nodes to skip
+ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
+@@ -4369,8 +4371,12 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
          }
      }
  
@@ -55,7 +71,7 @@ index 2f4fe797..25827381 100644
      if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_RMS_NORM && ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {}) &&
          ggml_cuda_is_elidable(cgraph, i + 1) && ggml_cuda_is_round_bf16_of(cgraph, i + 2, cgraph->nodes[i + 1])) {
          const int outputs[] = { i + 2 };
-@@ -4379,6 +4383,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4379,6 +4385,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
              return 2;
          }
      }
@@ -63,7 +79,21 @@ index 2f4fe797..25827381 100644
      if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_ADD && ggml_cuda_is_elidable(cgraph, i) &&
          ggml_cuda_is_round_bf16_of(cgraph, i + 1, node) &&
          node->type == GGML_TYPE_F32 && node->src[0]->type == GGML_TYPE_F32 && node->src[1]->type == GGML_TYPE_F32 &&
-@@ -5701,6 +5706,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
+@@ -4395,11 +4402,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+             return 1;
+         }
+     }
++#if !defined(GGML_USE_HIP)
+     if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_UNARY &&
+         ggml_get_unary_op(node) == GGML_UNARY_OP_ROUND_BF16 && ggml_cuda_can_fuse_swiglu_round_bf16(cgraph, i)) {
+         ggml_cuda_op_swiglu_round_bf16(*cuda_ctx, node->src[0], cgraph->nodes[i + 3], cgraph->nodes[i + 6]);
+         return 6;
+     }
++#endif
+ 
+ #endif
+ 
+@@ -5701,6 +5710,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
      if (backend) {
          auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
          ctx->impl = &gfx1151_v1;
@@ -197,7 +227,7 @@ index 48e523e9..24484c50 100644
          for (const auto & shape : std::vector<std::array<int64_t, 3>>{
                  {63, 127, 255}, {128, 768, 256}, {128, 768, 5461}, {128, 768, 5462},
 diff --git a/tests/unittests/test_cuda_round_bf16_fusion.cpp b/tests/unittests/test_cuda_round_bf16_fusion.cpp
-index d16c4b57..a3ecbafa 100644
+index d16c4b57..08311229 100644
 --- a/tests/unittests/test_cuda_round_bf16_fusion.cpp
 +++ b/tests/unittests/test_cuda_round_bf16_fusion.cpp
 @@ -102,9 +102,9 @@ std::vector<float> run(ggml_backend_t backend, Pattern pattern, int width, int r
@@ -223,3 +253,12 @@ index d16c4b57..a3ecbafa 100644
                      const auto reference = run(backend, pattern, width, rows, true);
                      const auto fused = run(backend, pattern, width, rows, false);
                      for (size_t i = 0; i < reference.size(); ++i) {
+@@ -136,7 +136,7 @@ int main() {
+                 }
+             }
+         }
+-        std::cout << "PASS: bf16 rounding fused into rms_norm*w, add and swiglu; odd widths, multiple rows, "
++        std::cout << "PASS: bf16 rounding chains match the unfused results; odd widths, multiple rows, "
+                      "strided gate/up views, exceptional values\n";
+     } catch (const std::exception & error) {
+         std::cerr << error.what() << '\n';
