@@ -279,17 +279,16 @@ def tts_profile_manifest(root):
     build = plan['builds'][1]
     build['commands'][0] = [x.replace('breeze_tts,ming3_tts,omnivoice,qwen3_tts',
                                       'ming3_tts,omnivoice') for x in build['commands'][0]]
-    suites = [plan['suites'][0]]
+    cases = []
     for family in ['ming3_tts', 'omnivoice']:
         for label in ['a1', 'b1']:
-            suite = next(s for s in plan['suites'] if s['id'] == family + '-' + label)
-            command = suite['cases'][0]['argv']
+            name = family + '-' + label
+            suite = next(s for s in plan['suites'] if s['id'] == name)
             command = ['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
-                       '--output-directory', '../results/profile/' + suite['id'], '--'] + command
-            suite['cases'][0]['argv'] = command
-            suite['timeout_s'] = 600
-            suites.append(suite)
-    plan['suites'] = suites
+                       '--output-directory', '../results/profile/' + name, '--'] + suite['cases'][0]['argv']
+            cases.append(dict(id=name, argv=command))
+    plan['suites'] = [plan['suites'][0], dict(id='framework', build='model', gpu=True,
+                                           timeout_s=600, cases=cases)]
     return plan
 
 
