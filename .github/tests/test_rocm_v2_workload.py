@@ -86,6 +86,61 @@ class WorkloadTests(unittest.TestCase):
             log(root/'case/operators'/'r0-full2-perf.log',dict(q8=0))
             with self.assertRaises(ValueError):workload.select(root,source)
 
+    def test_refinement_keeps_q8_coverage_and_uses_warmed_bounded_graphs(self):
+        original=json.loads((ROOT/'workload-probes/cases.json').read_text())
+        refined=json.loads((ROOT/'workload-refine/cases.json').read_text())
+        q8=lambda cases:{r['id'] for r in cases if r['op']=='MUL_MAT' and r['sources'][0]['type']==8 and r['sources'][1]['type']==0 and r['sources'][1]['ne'][1]<=8}
+        self.assertEqual(q8(original),q8(refined));self.assertEqual(len(q8(refined)),642)
+        grids={r['ne'][1]//32 for r in refined if r['id'].startswith('grid-')}
+        self.assertEqual(grids,set(range(1,129)))
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'.github/tests').mkdir(parents=True)
+            (root/'.github/tests/workload-probes').symlink_to(ROOT/'workload-refine',target_is_directory=True)
+            plan=workload.refine_manifest(root)
+        self.assertEqual(len(plan['builds']),5)
+        self.assertEqual([s['id'] for s in plan['suites']],['correctness','operators','dispatch','framework'])
+        checks=plan['suites'][0]['cases']
+        self.assertFalse(any(c['id'].startswith('native-') for c in checks))
+        self.assertLess(len(checks),100)
+        for c in plan['suites'][1]['cases']:
+            self.assertEqual(c['argv'][c['argv'].index('--max-repeats')+1],'64')
+        for start in range(0,len(plan['suites'][1]['cases']),8):
+            group=plan['suites'][1]['cases'][start:start+8]
+            self.assertEqual([r['id'].split('-')[1] for r in group],['native','candidate','wide','fixed','fixed','wide','candidate','native'])
+        self.assertNotIn('source-rows2',json.dumps(plan))
+        self.assertNotIn('source-vector',json.dumps(plan))
+
+    def test_refinement_selection_checks_traces_and_reports_regressions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'source';fixtures=source/'.github/tests/workload-probes';fixtures.mkdir(parents=True)
+            catalog=[dict(id='q8',op='MUL_MAT',sources=[dict(type=8)],group='q8',models=['ming3_tts']),dict(id='copy',op='CPY',sources=[dict(type=0)],group='copy',models=['qwen3_tts'])]
+            (fixtures/'cases.json').write_text(json.dumps(catalog));(fixtures/'both.ops').write_text('fixture q8\nfixture copy\n')
+            (root/'case/operators').mkdir(parents=True)
+            plan=dict(suites=[dict(id='operators',cases=[])])
+            def write(variant,slot,values):
+                name=f's{slot}-{variant}-perf'
+                with (root/'case/operators'/(name+'.log')).open('w') as f:
+                    w=csv.DictWriter(f,['op_params','supported','passed','time_us','n_runs'],quoting=csv.QUOTE_ALL);w.writeheader()
+                    for key,value in values.items():w.writerow(dict(op_params='name='+key,supported=1,passed=1,time_us=value,n_runs=10))
+                return name
+            for variant in ['native','candidate','wide','fixed']:
+                values=dict(q8=2 if variant=='wide' else 10,copy=1 if variant=='fixed' else 10)
+                for slot in range(2):
+                    name=write(variant,slot,values)
+                    plan['suites'][0]['cases'].append(dict(id=name,argv=['--test-file','.github/tests/workload-probes/both.ops']))
+                profile=root/'profile'/variant;profile.mkdir(parents=True)
+                names=['ar_q8'] if variant=='wide' else ['mul_mat_vec_q']
+                if variant=='fixed':names+=['hip_gfx1151_v1_gemv']
+                with (profile/'kernel_trace.csv').open('w') as f:
+                    w=csv.writer(f);w.writerow(['Kernel_Name']);w.writerows([[name] for name in names])
+            (source/'campaign.json').write_text(json.dumps(plan));workload.refine_select(root,source)
+            self.assertEqual(json.loads((root/'selected-variant.json').read_text())['candidate'],'fixed')
+            for variant in ['candidate','wide','fixed']:
+                for slot in range(2):write(variant,slot,dict(q8=10,copy=20))
+            with self.assertRaises(ValueError):workload.refine_select(root,source)
+            report=json.loads((root/'selected-variant.json').read_text())
+            self.assertFalse(report['accepted']);self.assertTrue(report['correctness_verified'])
+
     def test_model_abba_keeps_requests_and_natural_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);source=root/'source';(source/'inputs').mkdir(parents=True)

@@ -1,0 +1,113 @@
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
+@@ -69,6 +69,26 @@
+             }
+         }
+     }
++}
++
++template<int lanes, bool batched>
++__global__ __launch_bounds__(128) void hip_gfx1151_v1_gemv(
++        const float * a, const float * b, float * out, int64_t m, int64_t k, int64_t lda,
++        int64_t sa2, int64_t sb2, int64_t sa3, int64_t sb3, uint3 ne2, uint3 r2, uint3 r3) {
++    const int lane = threadIdx.x % lanes;
++    const int64_t row = int64_t(blockIdx.x) * (128 / lanes) + threadIdx.x / lanes;
++    if (row >= m) return;
++    if constexpr (batched) {
++        const uint32_t i3 = fastdiv(blockIdx.z, ne2);
++        const uint32_t i2 = blockIdx.z - i3 * ne2.z;
++        a += int64_t(fastdiv(i2, r2)) * sa2 + int64_t(fastdiv(i3, r3)) * sa3;
++        b += int64_t(i2) * sb2 + int64_t(i3) * sb3;
++        out += int64_t(blockIdx.z) * m;
++    }
++    float sum = 0;
++    for (int64_t col = lane; col < k; col += lanes) sum = fmaf(a[row * lda + col], b[col], sum);
++    if constexpr (lanes == 32) sum = warp_reduce_sum<32>(sum);
++    if (lane == 0) out[row] = sum;
+ }
+ 
+ // Default precision only: round F32 operands to BF16 in LDS, accumulate in F32.
+@@ -240,6 +260,24 @@
+         else launch(std::false_type{});
+         return true;
+     }
++    if (n == 1) {
++        const auto launch = [&](auto lane_tag, auto batch_tag) {
++            constexpr int lanes = decltype(lane_tag)::value;
++            constexpr bool batched = decltype(batch_tag)::value;
++            hip_gfx1151_v1_gemv<lanes, batched><<<dim3((m + 128 / lanes - 1) / (128 / lanes), 1, batch), 128, 0, stream>>>(
++                static_cast<const float *>(a->data), static_cast<const float *>(b->data),
++                static_cast<float *>(out->data), m, k, a->nb[1] / sizeof(float),
++                a->nb[2] / sizeof(float), b->nb[2] / sizeof(float),
++                a->nb[3] / sizeof(float), b->nb[3] / sizeof(float), init_fastdiv_values(b->ne[2]), r2, r3);
++        };
++        const auto select = [&](auto lane_tag) {
++            if (batch > 1) launch(lane_tag, std::true_type{});
++            else launch(lane_tag, std::false_type{});
++        };
++        if (k < 32) select(std::integral_constant<int, 1>{});
++        else select(std::integral_constant<int, 32>{});
++        return true;
++    }
+     if (batch > 1) {
+         hip_gfx1151_v1_sgemm<true><<<dim3((m + 63) / 64, (n + 63) / 64, batch), 256, 0, stream>>>(
+             static_cast<const float *>(a->data), static_cast<const float *>(b->data),
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/cpy.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/cpy.cu
+@@ -8,21 +8,28 @@
+ struct row_layout {
+     int64_t rows, channels;
+     size_t row_stride, channel_stride, sample_stride;
++    bool flat;
+ };
+ 
+ __global__ void gfx1151_v1_copy_rows(const char * src, char * dst, int64_t width, int64_t rows,
+                               row_layout a, row_layout b) {
+     for (int64_t row = blockIdx.y; row < rows; row += gridDim.y) {
+-        const int64_t ar = row % a.rows;
+-        const int64_t ac = row / a.rows % a.channels;
+-        const int64_t as = row / (a.rows * a.channels);
+-        const int64_t br = row % b.rows;
+-        const int64_t bc = row / b.rows % b.channels;
+-        const int64_t bs = row / (b.rows * b.channels);
+-        const auto * x = reinterpret_cast<const int4 *>(src + ar * a.row_stride +
+-            ac * a.channel_stride + as * a.sample_stride);
+-        auto * y = reinterpret_cast<int4 *>(dst + br * b.row_stride +
+-            bc * b.channel_stride + bs * b.sample_stride);
++        const char * sx = src + row * a.row_stride;
++        char * dy = dst + row * b.row_stride;
++        if (!a.flat) {
++            const int64_t ar = row % a.rows;
++            const int64_t ac = row / a.rows % a.channels;
++            const int64_t as = row / (a.rows * a.channels);
++            sx = src + ar * a.row_stride + ac * a.channel_stride + as * a.sample_stride;
++        }
++        if (!b.flat) {
++            const int64_t br = row % b.rows;
++            const int64_t bc = row / b.rows % b.channels;
++            const int64_t bs = row / (b.rows * b.channels);
++            dy = dst + br * b.row_stride + bc * b.channel_stride + bs * b.sample_stride;
++        }
++        const auto * x = reinterpret_cast<const int4 *>(sx);
++        auto * y = reinterpret_cast<int4 *>(dy);
+         const int64_t col = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+         if (col < width) {
+             y[col] = x[col];
+@@ -49,10 +56,14 @@
+     }
+     const int64_t width = src->ne[0] / 4;
+     const int64_t rows = ggml_nelements(src) / src->ne[0];
+-    const int threads = width <= 32 ? 32 : 256;
++    const int threads = static_cast<int>(std::min<int64_t>(256, ((width + 31) / 32) * 32));
+     const dim3 grid((width + threads - 1) / threads, std::min<int64_t>(rows, 65535));
+-    const row_layout a{src->ne[1], src->ne[2], src->nb[1], src->nb[2], src->nb[3]};
+-    const row_layout b{dst->ne[1], dst->ne[2], dst->nb[1], dst->nb[2], dst->nb[3]};
++    const row_layout a{src->ne[1], src->ne[2], src->nb[1], src->nb[2], src->nb[3],
++        (src->ne[2] == 1 || src->nb[2] == src->ne[1] * src->nb[1]) &&
++        (src->ne[3] == 1 || src->nb[3] == src->ne[1] * src->ne[2] * src->nb[1])};
++    const row_layout b{dst->ne[1], dst->ne[2], dst->nb[1], dst->nb[2], dst->nb[3],
++        (dst->ne[2] == 1 || dst->nb[2] == dst->ne[1] * dst->nb[1]) &&
++        (dst->ne[3] == 1 || dst->nb[3] == dst->ne[1] * dst->ne[2] * dst->nb[1])};
+     gfx1151_v1_copy_rows<<<grid, threads, 0, stream>>>(static_cast<const char *>(src->data),
+         static_cast<char *>(dst->data), width, rows, a, b);
+     return true;

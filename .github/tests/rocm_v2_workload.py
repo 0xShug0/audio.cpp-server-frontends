@@ -11,7 +11,7 @@ VARIANTS={'native':('../source-baseline','baseline',False),'before':('../source-
 def fixture_ids(path):
     return [line.rsplit(' ',1)[1] for line in path.read_text().splitlines() if line]
 
-def prepare(root):
+def prepare(root,refine=False):
     import shutil
     helpers=Path(__file__).resolve().parent
     root.mkdir()
@@ -26,11 +26,12 @@ def prepare(root):
         subprocess.run(['git','-C',str(root),'apply','--check',str(helpers/patch)],check=True)
         subprocess.run(['git','-C',str(root),'apply',str(helpers/patch)],check=True)
     baseline=root.parent/'source-baseline';shutil.copytree(root,baseline)
-    subprocess.run(['git','-C',str(root),'apply','--check',str(helpers/'workload-kernels.patch')],check=True)
-    subprocess.run(['git','-C',str(root),'apply',str(helpers/'workload-kernels.patch')],check=True)
+    patch='workload-refine.patch' if refine else 'workload-kernels.patch'
+    subprocess.run(['git','-C',str(root),'apply','--check',str(helpers/patch)],check=True)
+    subprocess.run(['git','-C',str(root),'apply',str(helpers/patch)],check=True)
     shutil.copy2(root/'external/ggml/tests/test-backend-ops.cpp',baseline/'external/ggml/tests/test-backend-ops.cpp')
     variants=[root,baseline]
-    for name,patch in [('source-rows2','workload-rows2.patch'),('source-vector','workload-vector.patch')]:
+    for name,patch in ([('source-wide','workload-wide.patch'),('source-fixed','workload-fixed.patch')] if refine else [('source-rows2','workload-rows2.patch'),('source-vector','workload-vector.patch')]):
         dest=root.parent/name;shutil.copytree(root,dest)
         subprocess.run(['git','-C',str(dest),'apply','--check',str(helpers/patch)],check=True)
         subprocess.run(['git','-C',str(dest),'apply',str(helpers/patch)],check=True)
@@ -41,8 +42,9 @@ def prepare(root):
     (root/'.github/tests').mkdir(parents=True)
     for path in helpers.glob('rocm_v2_*.py'):shutil.copy2(path,root/'.github/tests'/path.name)
     shutil.copy2(helpers/'hip_vmm_probe.cpp',root/'.github/tests/hip_vmm_probe.cpp')
-    shutil.copytree(helpers/'workload-probes',root/'.github/tests/workload-probes')
-    for name in ['generic-gates.patch','workload-kernels.patch','workload-rows2.patch','workload-vector.patch']:
+    shutil.copytree(helpers/('workload-refine' if refine else 'workload-probes'),root/'.github/tests/workload-probes')
+    patches=['generic-gates.patch','workload-refine.patch','workload-wide.patch','workload-fixed.patch'] if refine else ['generic-gates.patch','workload-kernels.patch','workload-rows2.patch','workload-vector.patch']
+    for name in patches:
         shutil.copy2(helpers/name,root/name)
     (root/'toolchain').mkdir()
     subprocess.run(['curl','--fail','--location','--max-time','120','--retry','2','-o','ccache.tar.xz','https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz'],check=True)
@@ -64,13 +66,17 @@ def prepare(root):
         subprocess.run([str(root/'build/debug/bin/test-backend-ops'),'test','-b','CPU','--output','csv','--test-file',str(root/'.github/tests/workload-probes/cpu-preflight.ops')],stdout=log,stderr=subprocess.STDOUT,check=True)
     actual=read_rows(root/'cpu-preflight.log')
     if set(actual)!=set(fixture_ids(root/'.github/tests/workload-probes/cpu-preflight.ops')):raise ValueError('CPU preflight skipped fixtures')
+    if refine:
+        with (root/'cpu-perf-preflight.log').open('w') as log:
+            subprocess.run([str(root/'build/debug/bin/test-backend-ops'),'perf','-b','CPU','--output','csv','--duration-ms','1','--max-repeats','3','--test-file',str(root/'.github/tests/workload-probes/cpu-preflight.ops')],stdout=log,stderr=subprocess.STDOUT,check=True)
+        if any(float(r['time_us'])<=0 or int(r['n_runs'])<=0 for r in read_rows(root/'cpu-perf-preflight.log').values()):raise ValueError('Invalid CPU perf preflight')
     for directory in variants:
         paths=[p for p in directory.rglob('*') if p.is_file() and not set(p.relative_to(directory).parts)&{'.git','build','inputs','toolchain'}]
         lines=[hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.relative_to(directory).as_posix() for p in sorted(paths)]
         (directory/'workload-source-sha256.txt').write_text('\n'.join(lines)+'\n')
-    patch_lines=[hashlib.sha256((helpers/n).read_bytes()).hexdigest()+'  '+n for n in ['generic-gates.patch','workload-kernels.patch','workload-rows2.patch','workload-vector.patch']]
+    patch_lines=[hashlib.sha256((helpers/n).read_bytes()).hexdigest()+'  '+n for n in patches]
     (root/'patch-sha256.txt').write_text('\n'.join(patch_lines)+'\n')
-    (root/'campaign.json').write_text(json.dumps(manifest(root),indent=2)+'\n')
+    (root/'campaign.json').write_text(json.dumps(refine_manifest(root) if refine else manifest(root),indent=2)+'\n')
     validate_manifest(json.loads((root/'campaign.json').read_text()))
     subprocess.run(['tar','-czf','probe-source.tar.gz','--exclude=.git','--exclude=*/build',*[str(p) for p in variants]],check=True)
 
@@ -193,10 +199,98 @@ def select(root,source):
     if not accepted:raise ValueError('No candidate passes the complete operator performance gate')
 
 
+def refine_manifest(root):
+    base=qwen_manifest(root)
+    builds=[base['builds'][0]]
+    for name,cwd in [('baseline','../source-baseline'),('candidate','.'),('wide','../source-wide'),('fixed','../source-fixed')]:
+        build=copy.deepcopy(base['builds'][1]);build.update(id=name,cwd=cwd)
+        build['commands'][0]=['-DAUDIOCPP_MODELS=breeze_tts,ming3_tts,omnivoice,qwen3_tts,irodori_tts,yue2' if x.startswith('-DAUDIOCPP_MODELS=') else x for x in build['commands'][0]]
+        build['commands'][0]+=['-DBUILD_SHARED_LIBS=OFF']
+        build['commands'][1].insert(build['commands'][1].index('--parallel'),'test-backend-ops');builds.append(build)
+    variants={'native':('../source-baseline',False),'candidate':('.',True),'wide':('../source-wide',True),'fixed':('../source-fixed',True)}
+    fixtures=root/'.github/tests/workload-probes';checks=[dict(id='health',argv=['build/debug/device-health','health'])];dependencies={}
+    for variant in ['candidate','wide','fixed']:
+        cwd,selected=variants[variant]
+        for path in sorted(fixtures.glob('fixed-check-*.ops' if variant=='fixed' else 'check-*.ops')):
+            name=variant+'-'+path.stem
+            checks.append(dict(id=name,timeout_s=120,argv=[cwd+'/build/debug/bin/test-backend-ops','test','-b','ROCm0','--output','csv','--test-file','.github/tests/workload-probes/'+path.name,'--backend-impl','gfx1151_v1']))
+            for key in fixture_ids(path):dependencies[variant,key]='correctness/'+name
+    timed=[]
+    for path in sorted(fixtures.glob('perf-*.ops')):
+        for slot,variant in enumerate(['native','candidate','wide','fixed','fixed','wide','candidate','native']):
+            cwd,selected=variants[variant]
+            argv=[cwd+'/build/debug/bin/test-backend-ops','perf','-b','ROCm0','--duration-ms','25','--max-repeats','64','--output','csv','--test-file','.github/tests/workload-probes/'+path.name]
+            if selected:argv+=['--backend-impl','gfx1151_v1']
+            timed.append(dict(id=f's{slot}-{variant}-'+path.stem,argv=argv,timeout_s=120,
+                depends_on=sorted({dependencies[variant,key] for key in fixture_ids(path) if (variant,key) in dependencies})))
+    traces=[]
+    for variant,(cwd,selected) in variants.items():
+        argv=['/opt/rocm/bin/rocprofv3','--kernel-trace','--output-format','csv','--output-directory','../results/profile/'+variant,'--',cwd+'/build/debug/bin/test-backend-ops','test','-b','ROCm0','--output','csv','--test-file','.github/tests/workload-probes/dispatch.ops']
+        if selected:argv+=['--backend-impl','gfx1151_v1']
+        traces.append(dict(id=variant,argv=argv,timeout_s=180))
+    suites=[dict(id='correctness',gpu=True,cases=checks),dict(id='operators',gpu=True,cases=timed),
+            dict(id='dispatch',gpu=True,cases=traces),
+            dict(id='framework',gpu=False,cases=[dict(id='select',timeout_s=180,argv=['python3','.github/tests/rocm_v2_workload.py','--root','../results','--source','.','--select','--refine'])])]
+    return validate_manifest(dict(version=1,builds=builds,suites=suites,health_check=base['health_check']))
+
+
+def refine_select(root,source):
+    plan=json.loads((source/'campaign.json').read_text());catalog={r['id']:r for r in json.loads((source/'.github/tests/workload-probes/cases.json').read_text())}
+    timing={};counts={}
+    for suite in plan['suites']:
+        if suite['id'] not in ['correctness','operators']:continue
+        for case in suite['cases']:
+            argv=case['argv']
+            if '--test-file' not in argv:continue
+            expected=set(fixture_ids(source/argv[argv.index('--test-file')+1]))
+            data=read_rows(root/'case'/suite['id']/(case['id']+'.log'))
+            if set(data)!=expected:raise ValueError('Missing fixture rows: '+case['id'])
+            if suite['id']=='correctness':counts[case['id']]=len(data);continue
+            variant=re.match(r's\d+-(native|candidate|wide|fixed)-',case['id'])[1]
+            for key,row in data.items():
+                value=float(row['time_us'])
+                if not math.isfinite(value) or value<=0 or int(row['n_runs'])<=0:raise ValueError('Invalid timing: '+case['id'])
+                timing.setdefault(variant,{}).setdefault(key,[]).append(value)
+    if set(timing)!={'native','candidate','wide','fixed'}:raise ValueError('Missing timed variant')
+    for variant,data in timing.items():
+        if set(data)!=set(catalog) or any(len(v)!=2 for v in data.values()):raise ValueError('Incomplete paired timings: '+variant)
+    kernels={}
+    for variant in ['native','candidate','wide','fixed']:
+        files=list((root/'profile'/variant).rglob('*kernel_trace.csv'))
+        if not files:raise ValueError('Missing dispatch trace: '+variant)
+        names=set()
+        for path in files:
+            with path.open() as f:names.update(row['Kernel_Name'] for row in csv.DictReader(f))
+        if variant=='wide' and not any('ar_q8' in name for name in names):raise ValueError('Wide Q8 kernel was not exercised')
+        if variant!='wide' and any('ar_q8' in name for name in names):raise ValueError('Native Q8 path was not preserved: '+variant)
+        if variant=='fixed' and not any('hip_gfx1151_v1_gemv' in name for name in names):raise ValueError('Proposed GEMV kernel was not exercised')
+        kernels[variant]=sorted(names)
+    q8=[k for k,r in catalog.items() if r['op']=='MUL_MAT' and r['sources'][0]['type']==8]
+    losses={};ratios={};details=[]
+    for variant in ['candidate','wide','fixed']:
+        losses[variant]=[];ratios[variant]=[]
+        for key in catalog:
+            n=timing['native'][key];v=timing[variant][key];ratio=statistics.median(n)/statistics.median(v)
+            loss=min(v)>1.05*max(n)
+            if loss:losses[variant].append(key)
+            if key in q8:ratios[variant].append(ratio)
+            details.append(dict(id=key,variant=variant,native_us=statistics.median(n),candidate_us=statistics.median(v),speedup=ratio,clear_regression=loss,group=catalog[key]['group'],models=catalog[key]['models']))
+    q8_gain={v:math.exp(statistics.mean(map(math.log,r))) for v,r in ratios.items()}
+    choose_wide=q8_gain['wide']>q8_gain['candidate']*1.05 and not any(k in q8 for k in losses['wide'])
+    clean=[v for v in ['candidate','wide','fixed'] if not losses[v]]
+    eligible=[v for v in clean if v!='wide' or choose_wide]
+    means={v:math.exp(statistics.mean(math.log(r['speedup']) for r in details if r['variant']==v)) for v in ['candidate','wide','fixed']}
+    candidate=max(eligible or ['candidate','fixed'],key=lambda v:means[v])
+    report=dict(candidate=candidate,correctness_verified=True,accepted=not losses[candidate],q8_geomean_speedup=q8_gain,regressions=losses,correctness_counts=counts,samples_per_shape=2,prior_correctness_run=41125312313,prior_correctness_pass_rows=7756,dispatch_kernels=kernels)
+    (root/'selected-variant.json').write_text(json.dumps(report,indent=2)+'\n');(root/'operator-comparison.json').write_text(json.dumps(details,indent=2)+'\n')
+    print(json.dumps(report,indent=2))
+    if not report['accepted']:raise ValueError('Measured operator regressions remain; model results are diagnostic')
+
+
 def model_manifest(root,source):
     selected=json.loads((root/'selected-variant.json').read_text())
     if not selected.get('correctness_verified'):raise ValueError('Operator correctness gate did not pass')
-    variant=selected['candidate'];cwd=VARIANTS[variant][0]
+    variant=selected['candidate'];cwd={**VARIANTS,'candidate':('.',None,True),'wide':('../source-wide',None,True),'fixed':('../source-fixed',None,True)}[variant][0]
     requests=json.loads((source/'inputs/workload-requests.json').read_text());suites=[]
     for family in requests:
         for label in ['a1','b1','b2','a2']:
@@ -213,12 +307,13 @@ def model_manifest(root,source):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);p.add_argument('--source',type=Path,default=Path('.'))
+    p.add_argument('--refine',action='store_true')
     action=p.add_mutually_exclusive_group(required=True)
     for name in ['prepare','manifest','select','model-manifest','summarize']:action.add_argument('--'+name,action='store_true')
     args=p.parse_args()
-    if args.prepare:prepare(args.root)
-    elif args.manifest:(args.root/'campaign.json').write_text(json.dumps(manifest(args.root),indent=2)+'\n')
-    elif args.select:select(args.root,args.source)
+    if args.prepare:prepare(args.root,args.refine)
+    elif args.manifest:(args.root/'campaign.json').write_text(json.dumps(refine_manifest(args.root) if args.refine else manifest(args.root),indent=2)+'\n')
+    elif args.select:(refine_select if args.refine else select)(args.root,args.source)
     elif args.model_manifest:(args.source/'workload-model-campaign.json').write_text(json.dumps(model_manifest(args.root,args.source),indent=2)+'\n')
     else:summarize_models(args.root,baseline_implementation='default',candidate_implementation='gfx1151_v1',request_sets=json.loads((args.source/'inputs/workload-requests.json').read_text()))
 

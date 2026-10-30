@@ -1,0 +1,6 @@
+{
+  "prior_run": 41125312313,
+  "prior_correctness_pass_rows": 7756,
+  "reused": "Unchanged kernel math; new checks cover implementation routing/cache and grid boundaries. All Q8 column counts and real K/M pairs remain timed.",
+  "omitted": "Repeated large float/copy/IM2COL correctness cases; rejected two-row and vector-only variants."
+}
