@@ -333,6 +333,65 @@ def tts_kernels_manifest(root):
     return plan
 
 
+def generic_gates_manifest(root):
+    plan = operator_manifest(root)
+    build = plan['builds'][1]
+    build['id'] = 'candidate'
+    build['commands'][0] += ['-DBUILD_SHARED_LIBS=OFF']
+    baseline = json.loads(json.dumps(build))
+    baseline.update(id='baseline', cwd='../source-baseline')
+    plan['builds'] = [plan['builds'][0], baseline, build]
+    records = json.loads((root / '.github/tests/generic-gates/cases.json').read_text())
+    base = ['build/debug/bin/test-backend-ops', '-b', 'ROCm0']
+    checks, candidate, timing = [], [], []
+    for variant in ['native', 'before', 'after', 'after-native']:
+        for row in records:
+            command = base + ['test', '--test-file', '.github/tests/generic-gates/' + row['id'] + '.ops']
+            if variant in ['before', 'after']:
+                command += ['--backend-impl', 'gfx1151_v1']
+            case = dict(id=variant + '-' + row['id'], argv=command)
+            if variant in ['native', 'before']:
+                case['cwd'] = '../source-baseline'
+                checks.append(case)
+            else:
+                candidate.append(case)
+    for variant in ['native', 'before', 'after', 'after-native']:
+        command = base + ['test', '--suite', 'gfx1151_v1', '-o', 'MUL_MAT',
+            '-p', r'type_a=f32.*m=128,n=(192|768),.*prec=f32']
+        if variant in ['before', 'after']:
+            command += ['--backend-impl', 'gfx1151_v1']
+        case = dict(id=variant + '-strict-f32', argv=command)
+        if variant in ['native', 'before']:
+            case['cwd'] = '../source-baseline'
+            checks.append(case)
+        else:
+            candidate.append(case)
+    for repeat in range(2):
+        for slot, variant in enumerate(['native', 'before', 'after', 'after', 'before', 'native']):
+            for row in records:
+                if not row['timed']:
+                    continue
+                suite = 'candidate-checks' if variant == 'after' else 'correctness'
+                case = dict(id=f'r{repeat}-s{slot}-{variant}-' + row['id'],
+                    depends_on=[suite + '/' + variant + '-' + row['id']],
+                    argv=base + ['perf', '--test-file', '.github/tests/generic-gates/' + row['id'] + '.ops'])
+                if variant != 'native':
+                    case['argv'] += ['--backend-impl', 'gfx1151_v1']
+                if variant != 'after':
+                    case['cwd'] = '../source-baseline'
+                timing.append(case)
+    for name in ['copy-w32-inactive1', 'im-varied-1-t0', 'mat-inactive-t1', 'mat-t1-m1024-n1', 'q8-broadcast']:
+        timing.append(dict(id='trace-' + name, depends_on=['candidate-checks/after-' + name], timeout_s=60,
+            argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+                  '--output-directory', '../results/profile/' + name, '--'] + base +
+                 ['test', '--backend-impl', 'gfx1151_v1', '--test-file', '.github/tests/generic-gates/' + name + '.ops']))
+    plan['suites'] = [
+        dict(id='correctness', build='baseline', gpu=True, timeout_s=45, cases=checks),
+        dict(id='candidate-checks', build='candidate', gpu=True, timeout_s=45, cases=candidate),
+        dict(id='framework', gpu=True, timeout_s=45, cases=timing)]
+    return plan
+
+
 def rms_probes_manifest(root):
     plan = operator_manifest(root)
     build = plan['builds'][1]['commands'][1]
@@ -712,6 +771,7 @@ if __name__ == '__main__':
     actions.add_argument('--tts-profile', action='store_true')
     actions.add_argument('--tts-kernels', action='store_true')
     actions.add_argument('--rms-probes', action='store_true')
+    actions.add_argument('--generic-gates', action='store_true')
     actions.add_argument('--breeze-ar', action='store_true')
     actions.add_argument('--rdna-depth', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
@@ -730,5 +790,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = rms_probes_manifest(args.root) if args.rms_probes else tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = generic_gates_manifest(args.root) if args.generic_gates else rms_probes_manifest(args.root) if args.rms_probes else tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

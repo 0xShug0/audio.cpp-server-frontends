@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes, generic-gates]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -42,6 +42,45 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
+          if [[ "$VALIDATION_GROUP" == generic-gates ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin f7a0982a3b70da5217535ff909eb9ec3a51dc8df
+            git -C source sparse-checkout set external/ggml
+            git -C source checkout --detach FETCH_HEAD
+            git -C source rev-parse HEAD > source/source-commit.txt
+            cp -a source source-baseline
+            git -C source apply --check ../.github/tests/generic-gates.patch
+            git -C source apply ../.github/tests/generic-gates.patch
+            cp source/external/ggml/tests/test-backend-ops.cpp source-baseline/external/ggml/tests/test-backend-ops.cpp
+            mkdir -p source/.github/tests source-baseline/.github/tests source/toolchain
+            cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            cp -a .github/tests/generic-gates source/.github/tests/
+            cp -a .github/tests/generic-gates source-baseline/.github/tests/
+            cp .github/tests/generic-gates.patch source/
+            curl --fail --location --max-time 120 --retry 2 -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+            tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain ccache-4.13.6-linux-x86_64-musl-static/ccache
+            python3 - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+          for directory in ['source', 'source-baseline']:
+              root = Path(directory)
+              files = sorted((root / 'external/ggml').rglob('*'))
+              files += sorted((root / '.github/tests/generic-gates').rglob('*'))
+              lines = [hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.relative_to(root).as_posix() for p in files if p.is_file()]
+              (root / 'gates-source-sha256.txt').write_text('\n'.join(lines) + '\n')
+          PYTHON
+            cp source/gates-source-sha256.txt source/patch-sha256.txt
+            cmake -S source/external/ggml -B source/build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DGGML_HIP=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BLAS=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
+            cmake --build source/build/debug --target test-backend-ops --parallel 8
+            source/build/debug/bin/test-backend-ops test -b CPU --test-file source/.github/tests/generic-gates/all.ops > source/cpu-preflight.log 2>&1
+            tail -5 source/cpu-preflight.log
+            python3 source/.github/tests/rocm_v2_halo.py --root source --generic-gates
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build --exclude=source-baseline/build source source-baseline
+            du -h probe-source.tar.gz
+            exit 0
+          fi
           if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
@@ -392,7 +431,7 @@ jobs:
           name: validation-inputs
           path: probe-source.tar.gz
           compression-level: 0
-          retention-days: 3
+          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 3 }}
   probe:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
@@ -469,6 +508,12 @@ jobs:
               assert target.stat().st_size == record['size'], 'model size mismatch: ' + record['family']
           PYTHON
           fi
+          if [[ "$VALIDATION_GROUP" == generic-gates ]]; then
+            (cd source && sha256sum --check gates-source-sha256.txt) > results/candidate-source-integrity.log
+            (cd source-baseline && sha256sum --check gates-source-sha256.txt) > results/baseline-source-integrity.log
+            cp source/cpu-preflight.log source/source-commit.txt source/generic-gates.patch results/
+            cp source/.github/tests/generic-gates/cases.json results/
+          fi
           if [[ -f source/inputs/input-sha256.txt ]]; then
             (cd source && sha256sum --check inputs/input-sha256.txt) > results/input-integrity.log
             cp source/inputs/model-provenance.json results/
@@ -503,7 +548,7 @@ jobs:
         with:
           name: validation-builds
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: 7
+          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 7 }}
       - name: Run checks
         continue-on-error: true
         shell: bash
@@ -515,7 +560,7 @@ jobs:
         with:
           name: validation-progress
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: 7
+          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 7 }}
       - name: Run additional checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -527,7 +572,7 @@ jobs:
         with:
           name: validation-additional
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: 14
+          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 14 }}
       - name: Finish checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -544,9 +589,9 @@ jobs:
         with:
           name: validation-results
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: 14
+          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 14 }}
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' && env.VALIDATION_GROUP != 'generic-gates' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}

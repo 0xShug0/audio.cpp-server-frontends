@@ -12,6 +12,26 @@ from rocm_v2_halo import manifest, operator_manifest, model_manifest, model_requ
 
 
 class HaloCampaignTests(unittest.TestCase):
+    def test_generic_gates_isolated_probes_and_matched_builds(self):
+        plan = rocm_v2_halo.generic_gates_manifest(Path('.'))
+        validate_manifest(plan)
+        native, candidate = plan['builds'][1:]
+        self.assertEqual(native['commands'], candidate['commands'])
+        self.assertEqual(native['cwd'], '../source-baseline')
+        self.assertIn('-DCMAKE_BUILD_TYPE=Debug', candidate['commands'][0])
+        text = json.dumps(plan)
+        for forbidden in ['audiocpp_cli', '.gguf', 'conda', 'pip install']:
+            self.assertNotIn(forbidden, text)
+        self.assertEqual([s['id'] for s in plan['suites']],
+                         ['correctness', 'candidate-checks', 'framework'])
+        timing = [c for c in plan['suites'][-1]['cases'] if not c['id'].startswith('trace-')]
+        self.assertEqual(len(timing), 78 * 12)
+        self.assertTrue(all(len(c['depends_on']) == 1 for c in timing))
+        for suite in plan['suites'][:2]:
+            self.assertEqual(len(suite['cases']), 216)
+            self.assertTrue(all('--test-file' in c['argv'] or 'strict-f32' in c['id']
+                                for c in suite['cases']))
+
     def test_tts_main_reuses_build_and_selects_only_candidate_impl(self):
         plan = rocm_v2_halo.tts_main_manifest(Path('.'))
         validate_manifest(plan)
