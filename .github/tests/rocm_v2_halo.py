@@ -281,14 +281,15 @@ def tts_profile_manifest(root):
                                       'ming3_tts,omnivoice') for x in build['commands'][0]]
     cases = []
     for family in ['ming3_tts', 'omnivoice']:
-        for label in ['a1', 'b1']:
+        for label in ['a1']:
             name = family + '-' + label
             suite = next(s for s in plan['suites'] if s['id'] == name)
-            command = ['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+            command = ['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--hip-runtime-trace',
+                       '--collection-period', '4:1:1', '4:1:1', '--output-format', 'csv',
                        '--output-directory', '../results/profile/' + name, '--'] + suite['cases'][0]['argv']
             cases.append(dict(id=name, argv=command))
     plan['suites'] = [plan['suites'][0], dict(id='framework', build='model', gpu=True,
-                                           timeout_s=600, cases=cases)]
+                                           timeout_s=300, cases=cases)]
     return plan
 
 

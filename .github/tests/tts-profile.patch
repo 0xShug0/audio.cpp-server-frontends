@@ -1,0 +1,20 @@
+--- a/src/framework/modules/speech_decoders/ming_flow_runtime.cpp
++++ b/src/framework/modules/speech_decoders/ming_flow_runtime.cpp
+@@ -234,6 +234,7 @@
+         ggml_set_output(graph->output.tensor);
+         graph->graph = ggml_new_graph_custom(graph->context, 8192, false);
+         ggml_build_forward_expand(graph->graph, graph->output.tensor);
++        ggml_graph_print(graph->graph);
+         graph->allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(execution_.backend()));
+         if (!ggml_gallocr_reserve(graph->allocator, graph->graph) || !ggml_gallocr_alloc_graph(graph->allocator, graph->graph)) {
+             throw std::runtime_error("Ming patch graph allocation failed");
+--- a/src/models/omnivoice/generator.cpp
++++ b/src/models/omnivoice/generator.cpp
+@@ -593,6 +593,7 @@
+         graph_ = ggml_new_graph_custom(ctx_.get(), 65536, false);
+         ggml_set_output(logits_);
+         ggml_build_forward_expand(graph_, logits_);
++        ggml_graph_print(graph_);
+         const auto build_end = Clock::now();
+         rebuild_build_ms_ = engine::debug::elapsed_ms(build_start, build_end);
+ 

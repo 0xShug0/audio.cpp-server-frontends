@@ -56,6 +56,10 @@ jobs:
             git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source checkout --detach FETCH_HEAD
             git -C source rev-parse HEAD > source/source-commit.txt
+            if [[ "$VALIDATION_GROUP" == tts-profile ]]; then
+              git -C source apply --check ../.github/tests/tts-profile.patch
+              git -C source apply ../.github/tests/tts-profile.patch
+            fi
             mkdir -p source/.github/tests source/toolchain source/inputs
             cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
             cp .github/tests/halo-model-files.json source/.github/tests/
