@@ -277,6 +277,33 @@ def tts_main_manifest(root):
     return plan
 
 
+def breeze_ar_manifest(root):
+    from copy import deepcopy
+    plan = tts_main_manifest(root)
+    candidate = plan['builds'][1]
+    candidate['commands'][0] = [
+        '-DAUDIOCPP_MODELS=breeze_tts' if x.startswith('-DAUDIOCPP_MODELS=') else x
+        for x in candidate['commands'][0]]
+    baseline = deepcopy(candidate)
+    baseline['id'] = 'baseline'
+    baseline['cwd'] = '../source-baseline'
+    plan['builds'].insert(1, baseline)
+    plan['suites'] = [s for s in plan['suites']
+                      if s['id'] in ['correctness', 'framework'] or s['id'].startswith('breeze_tts-')]
+    for suite in plan['suites']:
+        if suite['id'].startswith('breeze_tts-'):
+            command = suite['cases'][0]['argv']
+            if suite['id'].split('-')[-1].startswith('a'):
+                suite['build'] = 'baseline'
+                command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
+                command += ['--backend-impl', 'gfx1151_v1']
+        elif suite['id'] == 'framework':
+            suite['cases'] = [c for c in suite['cases'] if c['id'] == 'breeze_tts']
+            command = suite['cases'][0]['argv']
+            command[command.index('--baseline-implementation') + 1] = 'gfx1151_v1'
+    return plan
+
+
 def ggml_v1_manifest(root):
     plan = operator_manifest(root)
     probe = ['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
@@ -567,6 +594,7 @@ if __name__ == '__main__':
     actions.add_argument('--ar-gemv', action='store_true')
     actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--tts-main', action='store_true')
+    actions.add_argument('--breeze-ar', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -583,5 +611,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

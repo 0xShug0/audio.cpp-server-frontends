@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -42,12 +42,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
-          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main ]]; then
+          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             source_revision=46e3893bec3be00f24e8db742ec4a03283a53746
             if [[ "$VALIDATION_GROUP" == tts-main ]]; then
               source_revision=67c7c4dff00d4d5355f93fd1713eac6f5c02aaa5
+            fi
+            if [[ "$VALIDATION_GROUP" == breeze-ar ]]; then
+              source_revision=56baca3d6b2ef7bd22cde27fcad08e1d6610d16a
             fi
             git -C source fetch --no-tags --depth=1 --filter=blob:none origin "$source_revision"
             git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
@@ -65,11 +68,15 @@ jobs:
           sys.path.insert(0, '.github/tests')
           from rocm_v2_halo import model_requests
           root = Path('source')
-          if os.environ['VALIDATION_GROUP'] == 'tts-main':
+          if os.environ['VALIDATION_GROUP'] in ['tts-main', 'breeze-ar']:
               from rocm_v2_halo import tts_requests
               records = json.loads(Path('.github/tests/tts-model-files.json').read_text())
+              if os.environ['VALIDATION_GROUP'] == 'breeze-ar':
+                  records = [r for r in records if r['family'] == 'breeze_tts']
               hashes = [r['sha256'] + '  ' + r['destination'] for r in records]
               for family, sequence in tts_requests().items():
+                  if os.environ['VALIDATION_GROUP'] == 'breeze-ar' and family != 'breeze_tts':
+                      continue
                   request = root / ('inputs/' + family + '-requests.json')
                   request.write_text(json.dumps(sequence, ensure_ascii=False, indent=2) + '\n')
                   hashes.append(hashlib.sha256(request.read_bytes()).hexdigest() + '  ' + request.relative_to(root).as_posix())
@@ -99,9 +106,18 @@ jobs:
           (root / 'main-source-sha256.txt').write_text(manifest)
           (root / 'patch-sha256.txt').write_text(manifest)
           PYTHON
+            archive_roots=(source)
+            if [[ "$VALIDATION_GROUP" == breeze-ar ]]; then
+              git -C source fetch --no-tags --depth=1 --filter=blob:none origin f64cfb5f2e0c9132f8d85281a4ec55d080313698
+              cp -a source source-baseline
+              git -C source-baseline checkout --detach f64cfb5f2e0c9132f8d85281a4ec55d080313698
+              git -C source-baseline rev-parse HEAD > source-baseline/source-commit.txt
+              python3 -c 'import hashlib, subprocess; from pathlib import Path; r=Path("source-baseline"); names=subprocess.check_output(["git", "ls-files", "-z"], cwd=r).decode().split("\0"); lines=[hashlib.sha256((r/n).read_bytes()).hexdigest()+"  "+n for n in names if n and (r/n).is_file()]; (r/"baseline-source-sha256.txt").write_text("\n".join(lines)+"\n")'
+              archive_roots+=(source-baseline)
+            fi
             python3 source/.github/tests/rocm_v2_halo.py --root source --"$VALIDATION_GROUP"
             python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
-            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build "${archive_roots[@]}"
             du -h probe-source.tar.gz
             exit 0
           fi
@@ -355,9 +371,13 @@ jobs:
             (cd source && sha256sum --check .github/tests/halo-hip-baseline-sha256.txt) > results/source-integrity.log
             cp source/.github/tests/halo-hip-baseline-sha256.txt results/
           fi
-          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main ]]; then
+          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar ]]; then
             (cd source && sha256sum --check main-source-sha256.txt) > results/source-integrity.log
             cp source/main-source-sha256.txt results/
+          fi
+          if [[ "$VALIDATION_GROUP" == breeze-ar ]]; then
+            (cd source-baseline && sha256sum --check baseline-source-sha256.txt) > results/baseline-source-integrity.log
+            cp source-baseline/source-commit.txt results/baseline-commit.txt
           fi
           if [[ "$VALIDATION_GROUP" == ar-gemv ]]; then
             (cd source && sha256sum --check ar-source-sha256.txt) > results/source-integrity.log
@@ -371,7 +391,7 @@ jobs:
             (cd source && sha256sum --check typed-source-sha256.txt) > results/typed-source-integrity.log
             cp source/typed-source-sha256.txt source/cpu-preflight.log results/
           fi
-          if [[ "$VALIDATION_GROUP" == tts-main ]]; then
+          if [[ "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar ]]; then
             python3 - <<'PYTHON'
           import json, subprocess
           from pathlib import Path
@@ -460,7 +480,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}
