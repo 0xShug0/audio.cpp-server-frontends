@@ -295,6 +295,46 @@ def ggml_v1_manifest(root):
     return plan
 
 
+def ar_gemv_manifest(root):
+    plan = operator_manifest(root)
+    build = plan['builds'][1]
+    build['commands'][0] += ['-DBUILD_SHARED_LIBS=OFF']
+    commands = build['commands'][:1]
+    path = 'external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu'
+    previous = 2
+    for rows in [2, 1, 4]:
+        if rows != previous:
+            code = ("from pathlib import Path; p=Path(%r); s=p.read_text(); "
+                    "assert s.count(%r)==1; p.write_text(s.replace(%r,%r))") % (
+                        path, f'constexpr int rows = {previous};',
+                        f'constexpr int rows = {previous};', f'constexpr int rows = {rows};')
+            commands.append(['python3', '-c', code])
+        commands += [
+            ['cmake', '--build', 'build/debug', '--target', 'test-backend-ops', '--parallel', '8'],
+            ['cmake', '-E', 'copy', 'build/debug/bin/test-backend-ops', f'build/debug/bin/ar-rows{rows}']]
+        previous = rows
+    build['commands'] = commands
+    variants = [('stock', 2, 'default'), ('r1', 1, 'gfx1151_v1'),
+                ('r2', 2, 'gfx1151_v1'), ('r4', 4, 'gfx1151_v1')]
+    def argv(mode, rows, impl):
+        return [f'build/debug/bin/ar-rows{rows}', mode, '-b', 'ROCm0',
+                '--suite', 'gfx1151_v1', '--backend-impl', impl,
+                '-o', 'MUL_MAT', '-p', r'type_a=q8_0,type_b=f32,m=[0-9]+,n=1,']
+    checks = [dict(id=name, argv=argv('test', rows, impl)) for name, rows, impl in variants]
+    timed = []
+    for repeat in range(2):
+        for slot, (name, rows, impl) in enumerate(variants + list(reversed(variants))):
+            timed.append(dict(id=f'r{repeat}-s{slot}-{name}', argv=argv('perf', rows, impl)))
+    trace = ['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+             '--output-directory', '../results/profile/ar', '--'] + argv('test', 2, 'gfx1151_v1')
+    plan['suites'] = [
+        dict(id='correctness', build='operators', gpu=True, timeout_s=120, cases=checks),
+        dict(id='framework', build='operators', gpu=True, timeout_s=180, cases=timed),
+        dict(id='dispatch', build='operators', gpu=True, timeout_s=120,
+             cases=[dict(id='q8-native-f32', argv=trace)])]
+    return plan
+
+
 def typed_manifest(root):
     plan = operator_manifest(root)
     probe = ['build/debug/bin/test-backend-ops']
@@ -538,6 +578,7 @@ if __name__ == '__main__':
     actions.add_argument('--hip-baseline', action='store_true')
     actions.add_argument('--typed', action='store_true')
     actions.add_argument('--ggml-v1', action='store_true')
+    actions.add_argument('--ar-gemv', action='store_true')
     actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--tts-main', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
@@ -556,5 +597,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

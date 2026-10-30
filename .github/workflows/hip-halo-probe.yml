@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -100,6 +100,32 @@ jobs:
           (root / 'patch-sha256.txt').write_text(manifest)
           PYTHON
             python3 source/.github/tests/rocm_v2_halo.py --root source --"$VALIDATION_GROUP"
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
+            du -h probe-source.tar.gz
+            exit 0
+          fi
+          if [[ "$VALIDATION_GROUP" == ar-gemv ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin f64cfb5f2e0c9132f8d85281a4ec55d080313698
+            git -C source sparse-checkout set external/ggml
+            git -C source checkout --detach FETCH_HEAD
+            git -C source apply --check ../.github/tests/ar-gemv.patch
+            git -C source apply ../.github/tests/ar-gemv.patch
+            git -C source rev-parse HEAD > source/source-commit.txt
+            mkdir -p source/.github/tests source/toolchain
+            cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            (cd source && git ls-files -z external/ggml | xargs -0 sha256sum) > source/ar-source-sha256.txt
+            cp source/ar-source-sha256.txt source/patch-sha256.txt
+            curl --fail --location --max-time 120 --retry 2 -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+            tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain ccache-4.13.6-linux-x86_64-musl-static/ccache
+            cmake -S source/external/ggml -B source/build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DGGML_HIP=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BLAS=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
+            cmake --build source/build/debug --target test-backend-ops --parallel 8
+            source/build/debug/bin/test-backend-ops test -b CPU --suite gfx1151_v1 -o MUL_MAT -p 'type_a=q8_0,type_b=f32,m=[0-9]+,n=1,' > cpu-preflight.log 2>&1
+            tail -5 cpu-preflight.log
+            cp cpu-preflight.log source/
+            python3 source/.github/tests/rocm_v2_halo.py --root source --ar-gemv
             python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
             tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
             du -h probe-source.tar.gz
@@ -333,6 +359,10 @@ jobs:
             (cd source && sha256sum --check main-source-sha256.txt) > results/source-integrity.log
             cp source/main-source-sha256.txt results/
           fi
+          if [[ "$VALIDATION_GROUP" == ar-gemv ]]; then
+            (cd source && sha256sum --check ar-source-sha256.txt) > results/source-integrity.log
+            cp source/ar-source-sha256.txt source/cpu-preflight.log results/
+          fi
           if [[ "$VALIDATION_GROUP" == ggml-v1 ]]; then
             (cd source && sha256sum --check ggml-source-sha256.txt) > results/source-integrity.log
             cp source/ggml-source-sha256.txt source/cpu-preflight.log results/
@@ -430,7 +460,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}
