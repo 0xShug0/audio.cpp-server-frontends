@@ -299,23 +299,9 @@ def ar_gemv_manifest(root):
     plan = operator_manifest(root)
     build = plan['builds'][1]
     build['commands'][0] += ['-DBUILD_SHARED_LIBS=OFF']
-    commands = build['commands'][:1]
-    path = 'external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu'
-    previous = 2
-    for rows in [2, 1, 4]:
-        if rows != previous:
-            code = ("from pathlib import Path; p=Path(%r); s=p.read_text(); "
-                    "assert s.count(%r)==1; p.write_text(s.replace(%r,%r))") % (
-                        path, f'constexpr int rows = {previous};',
-                        f'constexpr int rows = {previous};', f'constexpr int rows = {rows};')
-            commands.append(['python3', '-c', code])
-        commands += [
-            ['cmake', '--build', 'build/debug', '--target', 'test-backend-ops', '--parallel', '8'],
-            ['cmake', '-E', 'copy', 'build/debug/bin/test-backend-ops', f'build/debug/bin/ar-rows{rows}']]
-        previous = rows
-    build['commands'] = commands
-    variants = [('stock', 2, 'default'), ('r1', 1, 'gfx1151_v1'),
-                ('r2', 2, 'gfx1151_v1'), ('r4', 4, 'gfx1151_v1')]
+    build['commands'] += [
+        ['cmake', '-E', 'copy', 'build/debug/bin/test-backend-ops', 'build/debug/bin/ar-rows1']]
+    variants = [('stock', 1, 'default'), ('r1', 1, 'gfx1151_v1')]
     def argv(mode, rows, impl):
         return [f'build/debug/bin/ar-rows{rows}', mode, '-b', 'ROCm0',
                 '--suite', 'gfx1151_v1', '--backend-impl', impl,
@@ -326,7 +312,7 @@ def ar_gemv_manifest(root):
         for slot, (name, rows, impl) in enumerate(variants + list(reversed(variants))):
             timed.append(dict(id=f'r{repeat}-s{slot}-{name}', argv=argv('perf', rows, impl)))
     trace = ['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
-             '--output-directory', '../results/profile/ar', '--'] + argv('test', 2, 'gfx1151_v1')
+             '--output-directory', '../results/profile/ar', '--'] + argv('test', 1, 'gfx1151_v1')
     plan['suites'] = [
         dict(id='correctness', build='operators', gpu=True, timeout_s=120, cases=checks),
         dict(id='framework', build='operators', gpu=True, timeout_s=180, cases=timed),
