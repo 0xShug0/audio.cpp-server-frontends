@@ -304,9 +304,13 @@ def tts_kernels_manifest(root):
     baseline['cwd'] = '../source-baseline'
     plan['builds'].insert(1, baseline)
     build = candidate['commands'][1]
-    build.insert(build.index('--parallel'), 'rounding_chain_test')
+    build[build.index('--parallel'):build.index('--parallel')] = ['rounding_chain_test', 'test-backend-ops']
     plan['suites'][0]['cases'].append(dict(id='rounding-chains',
-        argv=['build/debug/rounding_chain_test', 'ROCm', '--log']))
+        argv=['build/debug/bin/rounding_chain_test', 'ROCm', '--log']))
+    probe = ['build/debug/bin/test-backend-ops', '-b', 'ROCm0', '--suite', 'gfx1151_v1',
+             '-o', 'RMS_NORM_ROUND_MUL', 'test', '--backend-impl']
+    plan['suites'][0]['cases'] += [dict(id='norm-' + impl, argv=probe + [impl])
+                                    for impl in ['default', 'gfx1151_v1']]
     plan['suites'] = [s for s in plan['suites'] if s['id'] in ['correctness', 'framework']
                       or s['id'].startswith('ming3_tts-')]
     for suite in plan['suites']:
@@ -320,6 +324,12 @@ def tts_kernels_manifest(root):
                 suite['build'] = 'baseline'
                 command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
                 command += ['--backend-impl', 'gfx1151_v1']
+    profile = list(next(s for s in plan['suites'] if s['id'] == 'ming3_tts-b1')['cases'][0]['argv'])
+    profile[profile.index('--out-dir') + 1] = '../results/profile-wavs/ming3_tts'
+    plan['suites'].insert(-1, dict(id='profiles', build='model', gpu=True, timeout_s=180,
+        cases=[dict(id='ming3_tts', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace',
+            '--collection-period', '15000:1000:1', '--collection-period-unit', 'msec',
+            '--output-format', 'csv', '--output-directory', '../results/profile/ming3_tts', '--'] + profile)]))
     return plan
 
 

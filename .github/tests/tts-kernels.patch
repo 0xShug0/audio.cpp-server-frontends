@@ -1,5 +1,5 @@
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2f4fe797..6734c25a 100644
+index 2f4fe797..8d5e21f8 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -4259,6 +4259,14 @@ static bool ggml_cuda_safe_bias_fusion(const ggml_cgraph * graph, int i) {
@@ -29,7 +29,7 @@ index 2f4fe797..6734c25a 100644
  
  // ROUND(gate) -> SILU -> ROUND, [VIEW up], ROUND(up) -> MUL -> ROUND starting at node i.
  static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int i) {
-@@ -4403,6 +4406,37 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4403,6 +4406,38 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
  
  #endif
  
@@ -53,7 +53,8 @@ index 2f4fe797..6734c25a 100644
 +                node->type == GGML_TYPE_F32 && rounded->type == GGML_TYPE_F32 &&
 +                mul->type == GGML_TYPE_F32 && output->type == GGML_TYPE_F32 &&
 +                input->nb[0] == sizeof(float) && weight->nb[0] == sizeof(float) &&
-+                ggml_is_contiguous(output) && !ggml_cuda_ranges_overlap(output, weight) &&
++                ggml_is_contiguous(output) && ggml_are_same_shape(input, output) &&
++                !ggml_cuda_ranges_overlap(output, weight) &&
 +                (!input_overlap || (output->data == input->data && ggml_is_contiguous(input) &&
 +                                    ggml_are_same_shape(input, output))) &&
 +                ggml_cuda_check_fusion_memory_ranges(cgraph, i, 4, outputs, 1)) {
@@ -67,7 +68,7 @@ index 2f4fe797..6734c25a 100644
      //topk-moe
      if (cgraph->nodes[i]->op == GGML_OP_UNARY || cgraph->nodes[i]->op == GGML_OP_SOFT_MAX ||
              cgraph->nodes[i]->op == GGML_OP_ARGSORT) {
-@@ -5701,6 +5735,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
+@@ -5701,6 +5736,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
      if (backend) {
          auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
          ctx->impl = &gfx1151_v1;
@@ -367,7 +368,7 @@ index 48e523e9..301eea99 100644
          for (const auto & shape : std::vector<std::array<int64_t, 3>>{
                  {63, 127, 255}, {128, 768, 256}, {128, 768, 5461}, {128, 768, 5462},
 diff --git a/tests/unittests/test_cuda_round_bf16_fusion.cpp b/tests/unittests/test_cuda_round_bf16_fusion.cpp
-index d16c4b57..101f0230 100644
+index d16c4b57..4a8d45cc 100644
 --- a/tests/unittests/test_cuda_round_bf16_fusion.cpp
 +++ b/tests/unittests/test_cuda_round_bf16_fusion.cpp
 @@ -1,7 +1,6 @@
@@ -383,17 +384,18 @@ index d16c4b57..101f0230 100644
  
  namespace {
 -enum class Pattern { RmsNormMul, Add, SwiGlu };
-+enum class Pattern { RmsNormMul, Add, SwiGlu, RmsNormRoundMul, RmsNormRoundSquare, RmsNormRoundProduct };
++enum class Pattern { RmsNormMul, Add, SwiGlu, RmsNormRoundMul, RmsNormRoundSquare, RmsNormRoundProduct, RmsNormRoundBroadcast };
  
  std::vector<float> values(size_t count, float scale, float phase, bool exceptional) {
      std::vector<float> out(count);
-@@ -50,11 +49,16 @@ std::vector<float> run(ggml_backend_t backend, Pattern pattern, int width, int r
+@@ -50,11 +49,19 @@ std::vector<float> run(ggml_backend_t backend, Pattern pattern, int width, int r
          data.push_back(values(static_cast<size_t>(ggml_nelements(t)), scale, phase, exceptional));
          return t;
      };
 -    if (pattern == Pattern::RmsNormMul) {
 +    if (pattern == Pattern::RmsNormMul || pattern == Pattern::RmsNormRoundMul ||
-+        pattern == Pattern::RmsNormRoundSquare || pattern == Pattern::RmsNormRoundProduct) {
++        pattern == Pattern::RmsNormRoundSquare || pattern == Pattern::RmsNormRoundProduct ||
++        pattern == Pattern::RmsNormRoundBroadcast) {
          // Keep the normalized rows finite so the row scale itself is meaningful.
          auto * x = input(ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, rows), 4.0f, 0.1f, false);
 -        auto * w = input(ggml_new_tensor_1d(ctx, GGML_TYPE_F32, width), 1.5f, 0.7f);
@@ -402,12 +404,14 @@ index d16c4b57..101f0230 100644
 +        auto * rounded = pattern == Pattern::RmsNormMul ? norm : ggml_round_bf16(ctx, norm);
 +        auto * w = pattern == Pattern::RmsNormRoundSquare ? rounded :
 +                   pattern == Pattern::RmsNormRoundProduct ? norm :
-+                   input(ggml_new_tensor_1d(ctx, GGML_TYPE_F32, width), 1.5f, 0.7f);
-+        auto * mul = ggml_mul(ctx, rounded, w);
++                   input(ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width,
++                         pattern == Pattern::RmsNormRoundBroadcast ? 2 * rows : 1), 1.5f, 0.7f);
++        auto * mul = pattern == Pattern::RmsNormRoundBroadcast ? ggml_mul(ctx, w, rounded) :
++                                                               ggml_mul(ctx, rounded, w);
          if (reference) ggml_set_output(mul);
          output = ggml_round_bf16(ctx, mul);
      } else if (pattern == Pattern::Add) {
-@@ -102,9 +106,9 @@ std::vector<float> run(ggml_backend_t backend, Pattern pattern, int width, int r
+@@ -102,9 +109,9 @@ std::vector<float> run(ggml_backend_t backend, Pattern pattern, int width, int r
  }
  }
  
@@ -420,25 +424,25 @@ index d16c4b57..101f0230 100644
      if (!reg || ggml_backend_reg_dev_count(reg) == 0) return 77;
      auto backend = ggml_backend_dev_init(ggml_backend_reg_dev_get(reg, 0), nullptr);
      if (!backend) return 1;
-@@ -117,11 +121,13 @@ int main() {
+@@ -117,11 +124,13 @@ int main() {
          return 1;
      }
      set_fusion(backend, true);
 -    const char * names[] = {"rms_norm*w", "add", "swiglu"};
 +    const char * names[] = {"rms_norm*w", "add", "swiglu", "rms_norm-round*w-round",
-+                           "rms_norm-round-square", "rms_norm-round-product"};
++                           "rms_norm-round-square", "rms_norm-round-product", "rms_norm-round-broadcast"};
      try {
 -        for (Pattern pattern : {Pattern::RmsNormMul, Pattern::Add, Pattern::SwiGlu}) {
 -            for (int width : {1, 17, 1024, 2048, 8192}) {
 -                for (int rows : {1, 4}) {
 +        for (Pattern pattern : {Pattern::RmsNormMul, Pattern::Add, Pattern::SwiGlu, Pattern::RmsNormRoundMul,
-+                                Pattern::RmsNormRoundSquare, Pattern::RmsNormRoundProduct}) {
++                                Pattern::RmsNormRoundSquare, Pattern::RmsNormRoundProduct, Pattern::RmsNormRoundBroadcast}) {
 +            for (int width : {1, 17, 33, 96, 256, 896, 1024, 2048, 4096, 8192}) {
 +                for (int rows : {1, 2, 3, 4, 6, 17}) {
                      const auto reference = run(backend, pattern, width, rows, true);
                      const auto fused = run(backend, pattern, width, rows, false);
                      for (size_t i = 0; i < reference.size(); ++i) {
-@@ -136,7 +142,7 @@ int main() {
+@@ -136,7 +145,7 @@ int main() {
                  }
              }
          }
