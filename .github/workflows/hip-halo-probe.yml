@@ -57,10 +57,14 @@ jobs:
             git -C source checkout --detach FETCH_HEAD
             git -C source rev-parse HEAD > source/source-commit.txt
             if [[ "$VALIDATION_GROUP" == tts-kernels ]]; then
-              git -C source sparse-checkout add tests/unittests
+              git -C source sparse-checkout add tests/unittests tests/yue2 tests/parakeet_tdt tests/moss_tts_v15
               cp -a source source-baseline
               git -C source apply --check ../.github/tests/tts-kernels.patch
               git -C source apply ../.github/tests/tts-kernels.patch
+              cat >> source/CMakeLists.txt <<'CMAKE'
+          add_executable(test-backend-ops external/ggml/tests/test-backend-ops.cpp)
+          target_link_libraries(test-backend-ops PRIVATE ggml Threads::Threads)
+          CMAKE
             fi
             if [[ "$VALIDATION_GROUP" == tts-profile ]]; then
               git -C source apply --check ../.github/tests/tts-profile.patch

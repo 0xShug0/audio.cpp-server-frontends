@@ -306,10 +306,16 @@ def tts_kernels_manifest(root):
     candidate['commands'][0] = [x.replace('-DENGINE_BUILD_TESTS=OFF', '-DENGINE_BUILD_TESTS=ON')
                                 for x in candidate['commands'][0]]
     candidate['commands'][1].insert(candidate['commands'][1].index('--parallel'), 'cuda_round_bf16_fusion_test')
+    candidate['commands'][1].insert(candidate['commands'][1].index('--parallel'), 'test-backend-ops')
     plan['suites'] = [s for s in plan['suites'] if s['id'] in ['correctness', 'framework']
                       or s['id'].startswith(('ming3_tts-', 'omnivoice-'))]
     plan['suites'][0]['cases'].append(dict(id='round-fusion',
         argv=['build/debug/bin/cuda_round_bf16_fusion_test', 'ROCm', '--log']))
+    for impl in ['default', 'gfx1151_v1']:
+        plan['suites'][0]['cases'].append(dict(id='batched-f32-' + impl,
+            argv=['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
+                  '--suite', 'gfx1151_v1', '--backend-impl', impl, '-o', 'MUL_MAT',
+                  '-p', r'type_a=f32.*bs=\[(16|7|8),[123]\]'], timeout_s=300))
     for suite in plan['suites']:
         if suite['id'] == 'framework':
             suite['cases'] = [c for c in suite['cases'] if c['id'] in ['ming3_tts', 'omnivoice']]
@@ -322,6 +328,11 @@ def tts_kernels_manifest(root):
                 suite['build'] = 'baseline'
                 command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
                 command += ['--backend-impl', 'gfx1151_v1']
+    probe = ['build/debug/bin/test-backend-ops', 'perf', '-b', 'ROCm0',
+             '--suite', 'gfx1151_v1', '-o', 'MUL_MAT', '-p', r'type_a=f32.*bs=\[(16|7|8),[123]\]']
+    plan['suites'].insert(1, dict(id='batched-probes', build='model', gpu=True, timeout_s=180,
+        cases=[dict(id=str(i) + '-' + impl, argv=probe + ['--backend-impl', impl])
+               for i, impl in enumerate(['default', 'gfx1151_v1', 'gfx1151_v1', 'default'])]))
     return plan
 
 
