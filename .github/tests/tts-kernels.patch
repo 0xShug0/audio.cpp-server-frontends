@@ -30,7 +30,7 @@ index f80c8931..186d67f3 100644
          add_test(NAME cuda_rope_rows_test COMMAND cuda_rope_rows_test)
          set_tests_properties(cuda_rope_rows_test PROPERTIES SKIP_RETURN_CODE 77)
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2f4fe797..563fbc31 100644
+index 2f4fe797..25827381 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -4259,7 +4259,7 @@ static bool ggml_cuda_safe_bias_fusion(const ggml_cgraph * graph, int i) {
@@ -42,7 +42,7 @@ index 2f4fe797..563fbc31 100644
  // bf16-reference graphs (see ggml_round_bf16) insert a ROUND_BF16 after most
  // activations, which breaks the usual fusion patterns. These helpers match the
  // rounding that directly follows a fusable op so it can run in that op's kernel.
-@@ -4369,6 +4369,9 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4369,8 +4369,12 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
          }
      }
  
@@ -51,8 +51,19 @@ index 2f4fe797..563fbc31 100644
 +#if !defined(GGML_USE_MUSA)
      // bf16-reference rounding folded into the producing kernel; opt-in per backend
      // through ggml_backend_cuda_set_round_bf16_fusion().
++#if !defined(GGML_USE_HIP)
      if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_RMS_NORM && ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {}) &&
-@@ -5701,6 +5704,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
+         ggml_cuda_is_elidable(cgraph, i + 1) && ggml_cuda_is_round_bf16_of(cgraph, i + 2, cgraph->nodes[i + 1])) {
+         const int outputs[] = { i + 2 };
+@@ -4379,6 +4383,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+             return 2;
+         }
+     }
++#endif
+     if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_ADD && ggml_cuda_is_elidable(cgraph, i) &&
+         ggml_cuda_is_round_bf16_of(cgraph, i + 1, node) &&
+         node->type == GGML_TYPE_F32 && node->src[0]->type == GGML_TYPE_F32 && node->src[1]->type == GGML_TYPE_F32 &&
+@@ -5701,6 +5706,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
      if (backend) {
          auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
          ctx->impl = &gfx1151_v1;
@@ -61,7 +72,7 @@ index 2f4fe797..563fbc31 100644
      }
      return backend;
 diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu b/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
-index f61bc0e6..36ab2dcb 100644
+index f61bc0e6..39628471 100644
 --- a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
 +++ b/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
 @@ -7,10 +7,11 @@ namespace {
@@ -106,8 +117,8 @@ index f61bc0e6..36ab2dcb 100644
      }
      const int64_t m = a->ne[1], n = b->ne[1], k = a->ne[0];
 +    if (b->ne[2] > 65535 || b->ne[3] > 65535 / b->ne[2] ||
-+        a->nb[2] % sizeof(float) || a->nb[3] % sizeof(float) ||
-+        b->nb[2] % sizeof(float) || b->nb[3] % sizeof(float)) {
++        (b->ne[2] > 1 && (a->nb[2] % sizeof(float) || b->nb[2] % sizeof(float))) ||
++        (b->ne[3] > 1 && (a->nb[3] % sizeof(float) || b->nb[3] % sizeof(float)))) {
 +        return false;
 +    }
 +    const int64_t batch = b->ne[2] * b->ne[3];
