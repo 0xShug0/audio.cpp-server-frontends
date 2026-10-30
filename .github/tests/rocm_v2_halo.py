@@ -274,6 +274,25 @@ def tts_main_manifest(root):
     return plan
 
 
+def tts_profile_manifest(root):
+    plan = tts_main_manifest(root)
+    build = plan['builds'][1]
+    build['commands'][0] = [x.replace('breeze_tts,ming3_tts,omnivoice,qwen3_tts',
+                                      'ming3_tts,omnivoice') for x in build['commands'][0]]
+    suites = [plan['suites'][0]]
+    for family in ['ming3_tts', 'omnivoice']:
+        for label in ['a1', 'b1']:
+            suite = next(s for s in plan['suites'] if s['id'] == family + '-' + label)
+            command = suite['cases'][0]['argv']
+            command = ['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+                       '--output-directory', '../results/profile/' + suite['id'], '--'] + command
+            suite['cases'][0]['argv'] = command
+            suite['timeout_s'] = 600
+            suites.append(suite)
+    plan['suites'] = suites
+    return plan
+
+
 def breeze_ar_manifest(root):
     from copy import deepcopy
     plan = tts_main_manifest(root)
@@ -630,6 +649,7 @@ if __name__ == '__main__':
     actions.add_argument('--ar-gemv', action='store_true')
     actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--tts-main', action='store_true')
+    actions.add_argument('--tts-profile', action='store_true')
     actions.add_argument('--breeze-ar', action='store_true')
     actions.add_argument('--rdna-depth', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
@@ -648,5 +668,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')
