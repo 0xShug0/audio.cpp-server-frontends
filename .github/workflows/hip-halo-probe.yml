@@ -64,6 +64,8 @@ jobs:
               cat >> source/CMakeLists.txt <<'CMAKE'
           add_executable(test-backend-ops external/ggml/tests/test-backend-ops.cpp)
           target_link_libraries(test-backend-ops PRIVATE ggml Threads::Threads)
+          add_executable(rounding_chain_test tests/unittests/test_cuda_round_bf16_fusion.cpp)
+          target_link_libraries(rounding_chain_test PRIVATE ggml Threads::Threads)
           CMAKE
             fi
             if [[ "$VALIDATION_GROUP" == rms-probes ]]; then

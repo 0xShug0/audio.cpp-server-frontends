@@ -303,9 +303,10 @@ def tts_kernels_manifest(root):
     baseline['id'] = 'baseline'
     baseline['cwd'] = '../source-baseline'
     plan['builds'].insert(1, baseline)
-    omni = next(s for s in plan['suites'] if s['id'] == 'omnivoice-b1')
-    profile = list(omni['cases'][0]['argv'])
-    profile[profile.index('--out-dir') + 1] = '../results/profile-wavs/omnivoice'
+    build = candidate['commands'][1]
+    build.insert(build.index('--parallel'), 'rounding_chain_test')
+    plan['suites'][0]['cases'].append(dict(id='rounding-chains',
+        argv=['build/debug/rounding_chain_test', 'ROCm', '--log']))
     plan['suites'] = [s for s in plan['suites'] if s['id'] in ['correctness', 'framework']
                       or s['id'].startswith('ming3_tts-')]
     for suite in plan['suites']:
@@ -319,10 +320,6 @@ def tts_kernels_manifest(root):
                 suite['build'] = 'baseline'
                 command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
                 command += ['--backend-impl', 'gfx1151_v1']
-    plan['suites'].insert(-1, dict(id='profiles', build='model', gpu=True, timeout_s=180,
-        cases=[dict(id='omnivoice', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace',
-            '--collection-period', '15000:1000:1', '--collection-period-unit', 'msec',
-            '--output-format', 'csv', '--output-directory', '../results/profile/omnivoice', '--'] + profile)]))
     return plan
 
 
