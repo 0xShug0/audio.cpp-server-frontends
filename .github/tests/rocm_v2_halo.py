@@ -312,7 +312,7 @@ def rdna_depth_manifest(root):
     build['commands'][1] = ['cmake', '--build', 'build/debug', '--target',
                             'decoder_packed_projection_test', 'test-backend-ops', '--parallel', '8']
     build['commands'].append(['cmake', '-E', 'make_directory', '../results/hidden', '../results/isa'])
-    implementations = ['gfx1151_v1', 'ar_native', 'ar_wide', 'ar_wide2', 'ar_nt']
+    implementations = ['gfx1151_v1', 'ar_nt', 'ar_stream', 'ar_stream2', 'ar_stream4']
     math = [dict(id=impl, argv=['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
             '--suite', 'gfx1151_v1', '--backend-impl', impl, '-o', 'MUL_MAT',
             '-p', r'type_a=q8_0,type_b=f32,m=[0-9]+,n=(1|2),']) for impl in implementations]
@@ -328,10 +328,13 @@ def rdna_depth_manifest(root):
         dict(id='correctness', build='model', gpu=True, timeout_s=90, cases=math),
         dict(id='framework', build='model', gpu=True, timeout_s=180, cases=timed)]
     plan['builds'].append(dict(id='isa', build_type='Debug', required=False, timeout_s=120, commands=[
-        ['cmake', '-E', 'make_directory', '../results/isa'],
+        ['cmake', '-E', 'make_directory', 'build/debug/isa', '../results/isa'],
         ['/opt/rocm/bin/hipcc', '--genco', '--offload-arch=gfx1151', '-g1', '-O2', '-std=c++17',
          '-DGGML_USE_HIP', '-Iexternal/ggml/include', '-Iexternal/ggml/src', '-Iexternal/ggml/src/ggml-cuda',
-         'external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu', '-o', '../results/isa/ar.hsaco']]))
+         'external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu', '-o', 'build/debug/isa/ar.bundle'],
+        ['/opt/rocm/llvm/bin/clang-offload-bundler', '--unbundle', '--type=o',
+         '--targets=hipv4-amdgcn-amd-amdhsa--gfx1151', '--input=build/debug/isa/ar.bundle',
+         '--output=../results/isa/ar.hsaco']]))
     plan['suites'].append(dict(id='isa', build='isa', gpu=False, required=False, timeout_s=30,
         cases=[dict(id='disassembly', argv=['/opt/rocm/llvm/bin/llvm-objdump', '--disassemble', '--demangle', '../results/isa/ar.hsaco'])]))
     return plan

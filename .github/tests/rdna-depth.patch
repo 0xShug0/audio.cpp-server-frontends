@@ -1,27 +1,27 @@
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2f4fe797..7df07fda 100644
+index 2f4fe797..5ab509aa 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -3,0 +4 @@
 +#include "ggml-hip/gfx1151_v1/mmvq.cuh"
 @@ -5685 +5686 @@ static const char * const * ggml_backend_hip_get_impls(ggml_backend_dev_t dev) {
 -    static const char * const gfx1151_v1[] = { "default", "gfx1151_v1", nullptr };
-+    static const char * const gfx1151_v1[] = { "default", "gfx1151_v1", "ar_native", "ar_wide", "ar_wide2", "ar_nt", nullptr };
++    static const char * const gfx1151_v1[] = { "default", "gfx1151_v1", "ar_nt", "ar_stream", "ar_stream2", "ar_stream4", nullptr };
 @@ -5692 +5693,2 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
 -    if (strcmp(impl, "gfx1151_v1") != 0 ||
-+    if ((strcmp(impl, "gfx1151_v1") != 0 && strcmp(impl, "ar_native") != 0 &&
-+         strcmp(impl, "ar_wide") != 0 && strcmp(impl, "ar_wide2") != 0 && strcmp(impl, "ar_nt") != 0) ||
++    if ((strcmp(impl, "gfx1151_v1") != 0 && strcmp(impl, "ar_nt") != 0 &&
++         strcmp(impl, "ar_stream") != 0 && strcmp(impl, "ar_stream2") != 0 && strcmp(impl, "ar_stream4") != 0) ||
 @@ -5699,0 +5702,12 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
-+    static const ggml_hip_impl ar_native = {"ar_native", ggml_hip_gfx1151_v1_mul_mat,
-+        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<0, 1>};
-+    static const ggml_hip_impl ar_wide = {"ar_wide", ggml_hip_gfx1151_v1_mul_mat,
-+        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<1, 1>};
-+    static const ggml_hip_impl ar_wide2 = {"ar_wide2", ggml_hip_gfx1151_v1_mul_mat,
-+        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<1, 2>};
 +    static const ggml_hip_impl ar_nt = {"ar_nt", ggml_hip_gfx1151_v1_mul_mat,
 +        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<2, 1>};
++    static const ggml_hip_impl ar_stream = {"ar_stream", ggml_hip_gfx1151_v1_mul_mat,
++        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<2, 1, 1>};
++    static const ggml_hip_impl ar_stream2 = {"ar_stream2", ggml_hip_gfx1151_v1_mul_mat,
++        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<2, 1, 2>};
++    static const ggml_hip_impl ar_stream4 = {"ar_stream4", ggml_hip_gfx1151_v1_mul_mat,
++        ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy, ggml_hip_ar_mmvq<2, 1, 4>};
 +    const ggml_hip_impl * selected = &gfx1151_v1;
-+    for (const auto * candidate : {&ar_native, &ar_wide, &ar_wide2, &ar_nt}) {
++    for (const auto * candidate : {&ar_nt, &ar_stream, &ar_stream2, &ar_stream4}) {
 +        if (strcmp(impl, candidate->name) == 0) selected = candidate;
 +    }
 @@ -5703 +5717 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
@@ -237,10 +237,10 @@ index 66b4f111..9226247b 100644
 +        }
 diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
 new file mode 100644
-index 00000000..5053f4aa
+index 00000000..ea639a9e
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,100 @@
 +#include "mmvq.cuh"
 +#include "ggml-cuda/vecdotq.cuh"
 +#include <type_traits>
@@ -248,7 +248,7 @@ index 00000000..5053f4aa
 +namespace {
 +using q8_pair = int __attribute__((vector_size(8), aligned(2), may_alias));
 +
-+template<int mode, int rows, int cols>
++template<int mode, int rows, int cols, int unroll>
 +#ifdef __HIP_DEVICE_COMPILE__
 +__attribute__((target("unaligned-access-mode")))
 +#endif
@@ -258,8 +258,16 @@ index 00000000..5053f4aa
 +    const int lane = threadIdx.x;
 +    const int row = (blockIdx.x * 4 + threadIdx.y) * rows;
 +    const int quant = 2 * (lane % 4);
++    if constexpr (unroll > 0) {
++        if (row >= m) return;
++    }
 +    float sum[cols][rows] = {};
-+    for (int block = lane / 4; block < k / QK8_0; block += 8) {
++    const int first = unroll > 0 ? 0 : lane / 4;
++    const int end = unroll > 0 ? k / (QK8_0 * 8) : k / QK8_0;
++    const int step = unroll > 0 ? 1 : 8;
++#pragma clang loop unroll_count(unroll > 0 ? unroll : 1)
++    for (int index = first; index < end; index += step) {
++        const int block = unroll > 0 ? index * 8 + lane / 4 : index;
 +        int u[cols][2];
 +        float scale_b[cols];
 +#pragma unroll
@@ -271,7 +279,9 @@ index 00000000..5053f4aa
 +        }
 +#pragma unroll
 +        for (int r = 0; r < rows; ++r) {
-+            if (row + r >= m) continue;
++            if constexpr (unroll == 0 || rows > 1) {
++                if (row + r >= m) continue;
++            }
 +            const auto & w = a[(row + r) * stride_a + block];
 +            int v[2];
 +            if constexpr (mode == 0) {
@@ -301,17 +311,20 @@ index 00000000..5053f4aa
 +}
 +} // namespace
 +
-+template<int mode, int rows>
++template<int mode, int rows, int unroll>
 +bool ggml_hip_ar_mmvq(const ggml_tensor * a, const ggml_tensor * b, const ggml_tensor * ids,
 +                     const void * q8, const ggml_cuda_mm_fusion_args_device & fusion,
 +                     ggml_tensor * dst, hipStream_t stream) {
 +    if (a->type != GGML_TYPE_Q8_0 || ids || a->ne[2] != 1 || a->ne[3] != 1 ||
 +        b->ne[2] != 1 || b->ne[3] != 1 || b->ne[1] < 1 || b->ne[1] > 2 ||
 +        !ggml_is_contiguous(dst) || fusion.gate || fusion.x_bias || fusion.gate_bias || fusion.residual_only) return false;
++    if constexpr (unroll > 0) {
++        if (a->ne[0] % (QK8_0 * 8) != 0) return false;
++    }
 +    const dim3 grid((a->ne[1] + 4 * rows - 1) / (4 * rows));
 +    const auto launch = [&](auto cols_tag) {
 +        constexpr int cols = decltype(cols_tag)::value;
-+        ar_q8<mode, rows, cols><<<grid, dim3(32, 4), 0, stream>>>(
++        ar_q8<mode, rows, cols, unroll><<<grid, dim3(32, 4), 0, stream>>>(
 +            static_cast<const block_q8_0 *>(a->data), static_cast<const block_q8_1 *>(q8),
 +            static_cast<float *>(dst->data), a->ne[1], a->ne[0],
 +            a->nb[1] / sizeof(block_q8_0), GGML_PAD(b->ne[0], MATRIX_ROW_PADDING) / QK8_1);
@@ -325,15 +338,18 @@ index 00000000..5053f4aa
 +template bool ggml_hip_ar_mmvq<1, 1>(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *, const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
 +template bool ggml_hip_ar_mmvq<1, 2>(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *, const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
 +template bool ggml_hip_ar_mmvq<2, 1>(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *, const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
++template bool ggml_hip_ar_mmvq<2, 1, 1>(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *, const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
++template bool ggml_hip_ar_mmvq<2, 1, 2>(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *, const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
++template bool ggml_hip_ar_mmvq<2, 1, 4>(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *, const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
 diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cuh b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cuh
 new file mode 100644
-index 00000000..b525d987
+index 00000000..1b9b1aee
 --- /dev/null
 +++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cuh
 @@ -0,0 +1,6 @@
 +#pragma once
 +#include "../impl.cuh"
 +
-+template<int mode, int rows>
++template<int mode, int rows, int unroll = 0>
 +bool ggml_hip_ar_mmvq(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *,
 +                     const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
