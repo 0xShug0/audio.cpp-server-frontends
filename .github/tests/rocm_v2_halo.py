@@ -328,14 +328,16 @@ def tts_kernels_manifest(root):
                 suite['build'] = 'baseline'
                 command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
                 command += ['--backend-impl', 'gfx1151_v1']
+    profiles = []
     for family in ['ming3_tts', 'omnivoice']:
         suite = next(s for s in plan['suites'] if s['id'] == family + '-b1')
         command = list(suite['cases'][0]['argv'])
         command[command.index('--out-dir') + 1] = '../results/profile-wavs/' + family
-        plan['suites'][-1]['cases'].append(dict(id='profile-' + family, gpu=True, timeout_s=180,
+        profiles.append(dict(id='profile-' + family, timeout_s=180,
             argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--collection-period', '4000:250:1',
                   '--collection-period-unit', 'msec', '--output-format', 'csv',
                   '--output-directory', '../results/profile/' + family, '--'] + command))
+    plan['suites'].insert(-1, dict(id='profiles', build='model', gpu=True, timeout_s=180, cases=profiles))
     probe = ['build/debug/bin/test-backend-ops', 'perf', '-b', 'ROCm0',
              '--suite', 'gfx1151_v1', '-o', 'MUL_MAT', '-p', r'type_a=f32.*bs=\[(16|7|8),[123]\]']
     plan['suites'].insert(1, dict(id='batched-probes', build='model', gpu=True, timeout_s=180,
