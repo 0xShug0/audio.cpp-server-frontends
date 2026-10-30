@@ -34,5 +34,14 @@
     "size": 2817000064,
     "sha256": "b86e03d1d2077bbaed157ab7a7fc646c3e309e69afa52c5e1c86b622b4715057",
     "destination": "inputs/qwen3_tts.gguf"
+  },
+  {
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "874fcb41ececda20bcbc0782d6b4ea7f7d069ea8",
+    "file": "Irodori-TTS-v4-Small-GGUF/irodori-tts-v4.1-small-mf-q8_0.gguf",
+    "size": 1368276320,
+    "sha256": "a450c277a29b771bde3ceb21fd753bfb9a61c93aef952e0a3b20ad8d3facbbcd",
+    "destination": "inputs/irodori_tts.gguf",
+    "family": "irodori_tts"
   }
 ]

@@ -85,6 +85,9 @@ jobs:
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             source_revision=f64cfb5f2e0c9132f8d85281a4ec55d080313698
+            if [[ "$VALIDATION_GROUP" == tts-main ]]; then
+              source_revision=f7a0982a3b70da5217535ff909eb9ec3a51dc8df
+            fi
             if [[ "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
               source_revision=141ec6f861aa61b8a7c81f1432c77ef9c08e3522
             fi
@@ -95,6 +98,11 @@ jobs:
             git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source checkout --detach FETCH_HEAD
             git -C source rev-parse HEAD > source/source-commit.txt
+            if [[ "$VALIDATION_GROUP" == tts-main ]]; then
+              git -C source apply --check ../.github/tests/generic-gates.patch
+              git -C source apply ../.github/tests/generic-gates.patch
+              cp .github/tests/generic-gates.patch source/
+            fi
             if [[ "$VALIDATION_GROUP" == tts-kernels ]]; then
               git -C source sparse-checkout add tests/unittests tests/yue2 tests/parakeet_tdt tests/moss_tts_v15
               cp -a source source-baseline
@@ -136,6 +144,8 @@ jobs:
           if os.environ['VALIDATION_GROUP'] in ['tts-main', 'breeze-ar', 'tts-profile', 'tts-kernels', 'rms-probes']:
               from rocm_v2_halo import tts_requests
               records = json.loads(Path('.github/tests/tts-model-files.json').read_text())
+              if os.environ['VALIDATION_GROUP'] != 'tts-main':
+                  records = [r for r in records if r['family'] != 'irodori_tts']
               if os.environ['VALIDATION_GROUP'] == 'rms-probes':
                   records = []
               if os.environ['VALIDATION_GROUP'] in ['tts-profile', 'tts-kernels']:
@@ -144,6 +154,8 @@ jobs:
                   records = [r for r in records if r['family'] == 'breeze_tts']
               hashes = [r['sha256'] + '  ' + r['destination'] for r in records]
               for family, sequence in tts_requests().items():
+                  if family == 'irodori_tts' and os.environ['VALIDATION_GROUP'] != 'tts-main':
+                      continue
                   if os.environ['VALIDATION_GROUP'] in ['tts-profile', 'tts-kernels'] and family not in ['ming3_tts', 'omnivoice']:
                       continue
                   if os.environ['VALIDATION_GROUP'] == 'breeze-ar' and family != 'breeze_tts':
@@ -431,7 +443,7 @@ jobs:
           name: validation-inputs
           path: probe-source.tar.gz
           compression-level: 0
-          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 3 }}
+          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 3 }}
   probe:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
@@ -548,7 +560,7 @@ jobs:
         with:
           name: validation-builds
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 7 }}
+          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 7 }}
       - name: Run checks
         continue-on-error: true
         shell: bash
@@ -560,7 +572,7 @@ jobs:
         with:
           name: validation-progress
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 7 }}
+          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 7 }}
       - name: Run additional checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -572,7 +584,7 @@ jobs:
         with:
           name: validation-additional
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 14 }}
+          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 14 }}
       - name: Finish checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -589,7 +601,7 @@ jobs:
         with:
           name: validation-results
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ inputs.focus == 'generic-gates' && 1 || 14 }}
+          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 14 }}
       - uses: actions/cache/save@v4
         if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' && env.VALIDATION_GROUP != 'generic-gates' }}
         continue-on-error: true

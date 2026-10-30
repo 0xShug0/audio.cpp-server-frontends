@@ -39,7 +39,7 @@ class HaloCampaignTests(unittest.TestCase):
         self.assertEqual(plan['builds'][0], existing['builds'][0])
         self.assertEqual(plan['builds'][1]['commands'][1], existing['builds'][1]['commands'][1])
         families = list(rocm_v2_halo.tts_requests())
-        self.assertEqual(families, ['breeze_tts', 'ming3_tts', 'omnivoice', 'qwen3_tts'])
+        self.assertEqual(families, ['breeze_tts', 'ming3_tts', 'omnivoice', 'qwen3_tts', 'irodori_tts'])
         for family in families:
             commands = []
             for label in ['a1', 'b1', 'b2', 'a2']:

@@ -244,6 +244,7 @@ def tts_requests():
                 request['language'] = 'English' if family == 'qwen3_tts' else 'en'
             if family == 'qwen3_tts':
                 request['options'] = {'instruct': 'A calm adult narrator with a warm voice.'}
+    requests['irodori_tts'] = model_requests()['irodori_tts']
     return requests
 
 
@@ -277,7 +278,7 @@ def tts_main_manifest(root):
 def tts_profile_manifest(root):
     plan = tts_main_manifest(root)
     build = plan['builds'][1]
-    build['commands'][0] = [x.replace('breeze_tts,ming3_tts,omnivoice,qwen3_tts',
+    build['commands'][0] = [x.replace(','.join(tts_requests()),
                                       'ming3_tts,omnivoice') for x in build['commands'][0]]
     cases = []
     for family in ['ming3_tts', 'omnivoice']:
