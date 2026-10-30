@@ -127,8 +127,8 @@ jobs:
             git -C source fetch --no-tags --depth=1 --filter=blob:none origin f64cfb5f2e0c9132f8d85281a4ec55d080313698
             git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf tests/unittests webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/sentencepiece external/utf8proc external/llama_tokenizer
             git -C source checkout --detach FETCH_HEAD
-            git -C source apply --check ../.github/tests/rdna-depth.patch
-            git -C source apply ../.github/tests/rdna-depth.patch
+            git -C source apply --index --unidiff-zero --check ../.github/tests/rdna-depth.patch
+            git -C source apply --index --unidiff-zero ../.github/tests/rdna-depth.patch
             git -C source rev-parse HEAD > source/source-commit.txt
             mkdir -p source/.github/tests source/toolchain
             cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
