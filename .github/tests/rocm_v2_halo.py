@@ -319,7 +319,7 @@ def ar_gemv_manifest(root):
     def argv(mode, rows, impl):
         return [f'build/debug/bin/ar-rows{rows}', mode, '-b', 'ROCm0',
                 '--suite', 'gfx1151_v1', '--backend-impl', impl,
-                '-o', 'MUL_MAT', '-p', r'type_a=q8_0,type_b=f32,m=[0-9]+,n=1,']
+                '-o', 'MUL_MAT', '-p', r'type_a=q8_0,type_b=f32,m=[0-9]+,n=(1|2),']
     checks = [dict(id=name, argv=argv('test', rows, impl)) for name, rows, impl in variants]
     timed = []
     for repeat in range(2):

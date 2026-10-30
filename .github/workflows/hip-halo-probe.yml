@@ -122,7 +122,7 @@ jobs:
             tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain ccache-4.13.6-linux-x86_64-musl-static/ccache
             cmake -S source/external/ggml -B source/build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DBUILD_SHARED_LIBS=OFF -DGGML_HIP=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_BLAS=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF
             cmake --build source/build/debug --target test-backend-ops --parallel 8
-            source/build/debug/bin/test-backend-ops test -b CPU --suite gfx1151_v1 -o MUL_MAT -p 'type_a=q8_0,type_b=f32,m=[0-9]+,n=1,' > cpu-preflight.log 2>&1
+            source/build/debug/bin/test-backend-ops test -b CPU --suite gfx1151_v1 -o MUL_MAT -p 'type_a=q8_0,type_b=f32,m=[0-9]+,n=(1|2),' > cpu-preflight.log 2>&1
             tail -5 cpu-preflight.log
             cp cpu-preflight.log source/
             python3 source/.github/tests/rocm_v2_halo.py --root source --ar-gemv
