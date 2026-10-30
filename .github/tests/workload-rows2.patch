@@ -1,0 +1,15 @@
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+@@ -102,9 +102,10 @@
+         const auto launch = [&](auto cols_tag, auto tail_tag) {
+             constexpr int cols = decltype(cols_tag)::value;
+             constexpr bool tail = decltype(tail_tag)::value;
+-            const dim3 grid((a->ne[1] + 4 * rows - 1) / (4 * rows),
++            constexpr int tile_rows = cols == 1 ? rows : 2 * rows;
++            const dim3 grid((a->ne[1] + 4 * tile_rows - 1) / (4 * tile_rows),
+                             (b->ne[1] + cols - 1) / cols, b->ne[2] * b->ne[3]);
+-            ar_q8<mode, rows, cols, unroll, tail, batched><<<grid, dim3(32, 4), 0, stream>>>(
++            ar_q8<mode, tile_rows, cols, unroll, tail, batched><<<grid, dim3(32, 4), 0, stream>>>(
+                 static_cast<const block_q8_0 *>(a->data), static_cast<const block_q8_1 *>(q8),
+                 static_cast<float *>(dst->data), a->ne[1], b->ne[1], a->ne[0],
+                 a->nb[1] / sizeof(block_q8_0), GGML_PAD(b->ne[0], MATRIX_ROW_PADDING) / QK8_1,

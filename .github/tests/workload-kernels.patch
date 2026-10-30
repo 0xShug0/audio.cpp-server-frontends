@@ -1,0 +1,187 @@
+diff --git a/external/ggml/src/ggml-cuda/im2col.cu b/external/ggml/src/ggml-cuda/im2col.cu
+index fa943643..b3838afc 100644
+--- a/external/ggml/src/ggml-cuda/im2col.cu
++++ b/external/ggml/src/ggml-cuda/im2col.cu
+@@ -306,7 +306,7 @@ void ggml_cuda_op_im2col(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+         const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
+         if (ggml_backend_buffer_get_type(dst->src[1]->buffer) == buft &&
+             ggml_backend_buffer_get_type(dst->buffer) == buft &&
+-            ctx.impl->im2col(dst->src[1], dst, ctx.stream())) {
++            ctx.impl->im2col(dst->src[1], dst, ctx.stream(), ggml_cuda_info().devices[ctx.device].nsm)) {
+             return;
+         }
+     }
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+index 6d5dfd2e..206d4a69 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+@@ -4,6 +4,6 @@
+ 
+ bool ggml_hip_gfx1151_v1_mul_mat(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t, int cc);
+ bool ggml_hip_gfx1151_v1_mul_mat_typed(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t);
+-bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t);
++bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t, int nsm);
+ 
+ bool ggml_hip_gfx1151_v1_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/im2col.cu b/external/ggml/src/ggml-hip/gfx1151_v1/im2col.cu
+index 0cae4f61..ec5896d4 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/im2col.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/im2col.cu
+@@ -65,7 +65,7 @@ void launch(const float * input, void * output,
+ 
+ } // namespace
+ 
+-bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor * input, ggml_tensor * out, hipStream_t stream) {
++bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor * input, ggml_tensor * out, hipStream_t stream, int nsm) {
+     const auto * params = reinterpret_cast<const int32_t *>(out->op_params);
+     const auto * kernel_tensor = out->src[0];
+     if (params[6] != 0 || params[7] != 0 || input->type != GGML_TYPE_F32 ||
+@@ -81,6 +81,11 @@ bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor * input, ggml_tensor * out, hi
+         return false;
+     }
+     const auto columns = channels * kernel;
++    const int64_t tiles = ((columns + 31) / 32) * std::min<int64_t>((positions + 31) / 32, 65535) *
++                          std::min<int64_t>(batches, 65535);
++    if (tiles < nsm) {
++        return false;
++    }
+     const auto channel_stride = input->nb[1] / sizeof(float);
+     const auto batch_stride = input->nb[2] / sizeof(float);
+     const auto * data = static_cast<const float *>(input->data);
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+index f58ce57f..01bd2ee1 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+@@ -112,9 +112,17 @@ bool ggml_hip_ar_mmvq(const ggml_tensor * a, const ggml_tensor * b, const ggml_t
+                 init_fastdiv_values(b->ne[2]), init_fastdiv_values(b->ne[2] / a->ne[2]),
+                 init_fastdiv_values(b->ne[3] / a->ne[3]));
+         };
+-        if (b->ne[1] == 1) launch(std::integral_constant<int, 1>{}, std::false_type{});
+-        else if (b->ne[1] % 2 == 0) launch(std::integral_constant<int, 2>{}, std::false_type{});
+-        else launch(std::integral_constant<int, 2>{}, std::true_type{});
++        switch (b->ne[1]) {
++            case 1: launch(std::integral_constant<int, 1>{}, std::false_type{}); break;
++            case 2: launch(std::integral_constant<int, 2>{}, std::false_type{}); break;
++            case 3: launch(std::integral_constant<int, 3>{}, std::false_type{}); break;
++            case 4: launch(std::integral_constant<int, 4>{}, std::false_type{}); break;
++            case 5: launch(std::integral_constant<int, 5>{}, std::false_type{}); break;
++            case 6: launch(std::integral_constant<int, 6>{}, std::false_type{}); break;
++            case 7: launch(std::integral_constant<int, 7>{}, std::false_type{}); break;
++            case 8: launch(std::integral_constant<int, 8>{}, std::false_type{}); break;
++            default: launch(std::integral_constant<int, 2>{}, std::true_type{}); break;
++        }
+     };
+     if (b->ne[2] * b->ne[3] > 1) dispatch(std::true_type{});
+     else dispatch(std::false_type{});
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu b/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
+index 0ae98797..5f68fa1c 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
+@@ -184,6 +184,10 @@ bool ggml_hip_gfx1151_v1_mul_mat(const ggml_tensor * a, const ggml_tensor * b,
+                           ggml_tensor * out, hipStream_t stream, int cc) {
+     const bool wmma = GGML_CUDA_CC_IS_RDNA3(cc) || GGML_CUDA_CC_IS_RDNA4(cc);
+     if (a->type != GGML_TYPE_F32) {
++        if (a->ne[2] == b->ne[2] && a->ne[3] == b->ne[3] &&
++            ggml_is_contiguous(a) && ggml_is_contiguous(b)) {
++            return false;
++        }
+         return wmma && ggml_hip_gfx1151_v1_mul_mat_typed(a, b, out, stream);
+     }
+     if (out->op != GGML_OP_MUL_MAT ||
+diff --git a/external/ggml/src/ggml-hip/impl.cuh b/external/ggml/src/ggml-hip/impl.cuh
+index 9998cd26..9ec8b3ef 100644
+--- a/external/ggml/src/ggml-hip/impl.cuh
++++ b/external/ggml/src/ggml-hip/impl.cuh
+@@ -9,7 +9,7 @@ struct ggml_cuda_mm_fusion_args_device;
+ struct ggml_hip_impl {
+     const char * name;
+     bool (*mul_mat)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t, int cc);
+-    bool (*im2col)(const ggml_tensor *, ggml_tensor *, hipStream_t);
++    bool (*im2col)(const ggml_tensor *, ggml_tensor *, hipStream_t, int nsm);
+     bool (*cpy)(const ggml_tensor *, ggml_tensor *, hipStream_t);
+     bool (*mmvq)(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *,
+                  const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t) = nullptr;
+diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
+index e21c7734..143db2a5 100644
+--- a/external/ggml/tests/test-backend-ops.cpp
++++ b/external/ggml/tests/test-backend-ops.cpp
+@@ -1088,7 +1088,10 @@ struct csv_printer : public printer {
+         return {
+             "op_name",
+             "op_params",
+-            "supported",
++            "supported",
++            "passed",
++            "time_us",
++            "n_runs",
+             "error_message",
+             "test_mode",
+             "backend_reg_name",
+@@ -1110,6 +1113,8 @@ static std::unique_ptr<printer> create_printer(output_formats format) {
+     GGML_ABORT("invalid output format");
+ }
+ 
++static int64_t perf_duration_us = 1000 * 1000;
++
+ struct test_case {
+     virtual ~test_case() {}
+ 
+@@ -1529,14 +1534,14 @@ struct test_case {
+             const uint64_t GFLOP = 1000 * 1000 * 1000;
+             const uint64_t target_flops_cpu =   8ULL * GFLOP;
+             const uint64_t target_flops_gpu = 100ULL * GFLOP;
+-            uint64_t target_flops = is_cpu ? target_flops_cpu : target_flops_gpu;
++            uint64_t target_flops = (is_cpu ? target_flops_cpu : target_flops_gpu) * perf_duration_us / (1000 * 1000);
+             n_runs = (int)std::min<int64_t>(ggml_graph_size(gf) - ggml_graph_n_nodes(gf), target_flops / op_flops(out)) + 1;
+         } else {
+             // based on memory size
+             const size_t GB = 1ULL << 30;
+             const size_t target_size_cpu =  8 * GB;
+             const size_t target_size_gpu = 32 * GB;
+-            size_t target_size = is_cpu ? target_size_cpu : target_size_gpu;
++            size_t target_size = (is_cpu ? target_size_cpu : target_size_gpu) * perf_duration_us / (1000 * 1000);
+             n_runs = (int)std::min<int64_t>(ggml_graph_size(gf) - ggml_graph_n_nodes(gf), target_size / op_size(out)) + 1;
+         }
+ 
+@@ -1580,7 +1585,7 @@ struct test_case {
+             total_time_us += end_time - start_time;
+             total_mem += mem;
+             total_runs += n_runs;
+-        } while (total_time_us < 1000*1000); // run for at least 1 second
++        } while (total_time_us < perf_duration_us);
+ 
+         // Create test result
+         double avg_time_us      = (double) total_time_us / total_runs;
+@@ -7023,7 +7028,10 @@ struct test_generic_op : public test_case {
+         }
+ 
+         ggml_tensor * out;
+-        if (inplace && source_count > 0) {
++        if (op == GGML_OP_CPY) {
++            GGML_ASSERT(source_count == 2);
++            out = ggml_cpy(ctx, source_tensors[0], source_tensors[1]);
++        } else if (inplace && source_count > 0) {
+             out = ggml_view_tensor(ctx, source_tensors[0]);
+         } else {
+             out = ggml_new_tensor_4d(ctx, type, ne[0], ne[1], ne[2], ne[3]);
+@@ -9858,6 +9866,7 @@ static void usage(char ** argv) {
+     printf("    op names for -o are as given by ggml_op_desc() (e.g. ADD, MUL_MAT, etc),\n");
+     printf("        optionally including the full test case string (e.g. \"ADD(type=f16,ne=[1,1,8,1],nr=[1,1,1,1],nf=1)\")\n");
+     printf("    --output specifies output format (default: console, options: console, sql, csv)\n");
++    printf("    --duration-ms sets minimum perf time per case (default: 1000)\n");
+     printf("    --backend-impl selects an optional backend implementation\n");
+     printf("    --suite gfx1151_v1 selects focused matmul and IM2COL1D correctness/performance cases\n");
+     printf("    --list-ops lists all available GGML operations\n");
+@@ -9905,6 +9914,12 @@ int main(int argc, char ** argv) {
+                 usage(argv);
+                 return 1;
+             }
++        } else if (strcmp(argv[i], "--duration-ms") == 0) {
++            if (i + 1 >= argc) return 1;
++            char * end = nullptr;
++            const auto value = std::strtoll(argv[++i], &end, 10);
++            if (end == argv[i] || *end != '\0' || value < 1 || value > 60000) return 1;
++            perf_duration_us = value * 1000;
+         } else if (strcmp(argv[i], "--backend-impl") == 0) {
+             if (i + 1 >= argc) return 1;
+             impl = argv[++i];

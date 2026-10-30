@@ -1,0 +1,10 @@
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+@@ -88,6 +88,7 @@
+ bool ggml_hip_ar_mmvq(const ggml_tensor * a, const ggml_tensor * b, const ggml_tensor * ids,
+                      const void * q8, const ggml_cuda_mm_fusion_args_device & fusion,
+                      ggml_tensor * dst, hipStream_t stream) {
++    if (b->ne[1] > 1) return false;
+     if (a->type != GGML_TYPE_Q8_0 || ids || a->ne[0] != b->ne[0] || b->ne[2] % a->ne[2] != 0 || b->ne[3] % a->ne[3] != 0 ||
+         !ggml_is_contiguous(dst) || fusion.gate || fusion.x_bias || fusion.gate_bias || fusion.residual_only) return false;
+     if (a->ne[0] > INT_MAX || a->ne[1] > INT_MAX || b->ne[1] < 1 || b->ne[1] > 2 * 65535 ||

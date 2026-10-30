@@ -20,6 +20,7 @@ int main(int argc, char ** argv) {
     hipDeviceProp_t device{};
     CHECK(hipGetDeviceProperties(&device, 0));
     std::printf("GPU=%s arch=%s\n", device.name, device.gcnArchName);
+    std::printf("device.nsm=%d device.l2_cache_bytes=%d\n", device.multiProcessorCount, device.l2CacheSize);
     if (argc == 2 && std::strcmp(argv[1], "health") == 0) {
         void * data = nullptr;
         CHECK(hipMalloc(&data, 4096));

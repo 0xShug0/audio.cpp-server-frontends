@@ -1,0 +1,198 @@
+{
+  "breeze_tts": [
+    {
+      "id": "warmup",
+      "text": "The next train leaves in ten minutes.",
+      "seed": 1234
+    },
+    {
+      "id": "short",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234
+    },
+    {
+      "id": "long",
+      "text": "At the edge of the village stood a small observatory. Every evening, Mara climbed the stairs and opened the heavy shutters before the stars appeared. She wrote down what she saw in a notebook, including the weather, the brightness of the moon, and any unusual lights above the hills. One evening a group of children came to visit. They expected a complicated lesson, but she simply asked them to look through the telescope. There was Saturn, surrounded by its pale rings. For a moment nobody spoke. Then one child asked whether the planet had always been waiting there for them. Mara smiled and said that some things become new only when we finally notice them.",
+      "seed": 1234
+    },
+    {
+      "id": "short_repeat",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234
+    }
+  ],
+  "ming3_tts": [
+    {
+      "id": "warmup",
+      "text": "The next train leaves in ten minutes.",
+      "seed": 1234,
+      "language": "en"
+    },
+    {
+      "id": "short",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234,
+      "language": "en"
+    },
+    {
+      "id": "long",
+      "text": "At the edge of the village stood a small observatory. Every evening, Mara climbed the stairs and opened the heavy shutters before the stars appeared. She wrote down what she saw in a notebook, including the weather, the brightness of the moon, and any unusual lights above the hills. One evening a group of children came to visit. They expected a complicated lesson, but she simply asked them to look through the telescope. There was Saturn, surrounded by its pale rings. For a moment nobody spoke. Then one child asked whether the planet had always been waiting there for them. Mara smiled and said that some things become new only when we finally notice them.",
+      "seed": 1234,
+      "language": "en"
+    },
+    {
+      "id": "short_repeat",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234,
+      "language": "en"
+    }
+  ],
+  "omnivoice": [
+    {
+      "id": "warmup",
+      "text": "The next train leaves in ten minutes.",
+      "seed": 1234,
+      "language": "en"
+    },
+    {
+      "id": "short",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234,
+      "language": "en"
+    },
+    {
+      "id": "long",
+      "text": "At the edge of the village stood a small observatory. Every evening, Mara climbed the stairs and opened the heavy shutters before the stars appeared. She wrote down what she saw in a notebook, including the weather, the brightness of the moon, and any unusual lights above the hills. One evening a group of children came to visit. They expected a complicated lesson, but she simply asked them to look through the telescope. There was Saturn, surrounded by its pale rings. For a moment nobody spoke. Then one child asked whether the planet had always been waiting there for them. Mara smiled and said that some things become new only when we finally notice them.",
+      "seed": 1234,
+      "language": "en"
+    },
+    {
+      "id": "short_repeat",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234,
+      "language": "en"
+    }
+  ],
+  "qwen3_tts": [
+    {
+      "id": "warmup",
+      "text": "The next train leaves in ten minutes.",
+      "seed": 1234,
+      "language": "English",
+      "options": {
+        "instruct": "A calm adult narrator with a warm voice."
+      }
+    },
+    {
+      "id": "short",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234,
+      "language": "English",
+      "options": {
+        "instruct": "A calm adult narrator with a warm voice."
+      }
+    },
+    {
+      "id": "long",
+      "text": "At the edge of the village stood a small observatory. Every evening, Mara climbed the stairs and opened the heavy shutters before the stars appeared. She wrote down what she saw in a notebook, including the weather, the brightness of the moon, and any unusual lights above the hills. One evening a group of children came to visit. They expected a complicated lesson, but she simply asked them to look through the telescope. There was Saturn, surrounded by its pale rings. For a moment nobody spoke. Then one child asked whether the planet had always been waiting there for them. Mara smiled and said that some things become new only when we finally notice them.",
+      "seed": 1234,
+      "language": "English",
+      "options": {
+        "instruct": "A calm adult narrator with a warm voice."
+      }
+    },
+    {
+      "id": "short_repeat",
+      "text": "Please bring the blue folder to the meeting tomorrow morning. We will review the plans over a cup of coffee.",
+      "seed": 1234,
+      "language": "English",
+      "options": {
+        "instruct": "A calm adult narrator with a warm voice."
+      }
+    }
+  ],
+  "irodori_tts": [
+    {
+      "id": "warmup",
+      "text": "こんにちは。今日はよい天気ですね。",
+      "language": "ja",
+      "seed": 1234,
+      "options": {
+        "no_ref": true
+      }
+    },
+    {
+      "id": "short",
+      "text": "今日は穏やかな朝です。窓を開けると、庭から花の香りが入ってきました。遠くで鳥が鳴いています。温かいお茶を飲みながら、今日の予定をゆっくり考えました。",
+      "language": "ja",
+      "seed": 1234,
+      "options": {
+        "no_ref": true
+      }
+    },
+    {
+      "id": "long",
+      "text": "駅前の小さな本屋には、いつも静かな音楽が流れています。私は仕事が終わると、よくその店に立ち寄ります。店主のおじいさんは本について詳しく、私が探しているものをすぐに見つけてくれます。ある雨の日、古い旅行記を手に取ると、ページの間から一枚の写真が落ちました。そこには、海に向かって建つ白い灯台が写っていました。写真の裏には、またここで会いましょう、とだけ書かれていました。私はその言葉が気になって、閉店の時間まで本を読み続けました。外に出ると雨はすっかり止み、夕焼けが濡れた道を明るく照らしていました。",
+      "language": "ja",
+      "seed": 1234,
+      "options": {
+        "no_ref": true
+      }
+    },
+    {
+      "id": "short_repeat",
+      "text": "今日は穏やかな朝です。窓を開けると、庭から花の香りが入ってきました。遠くで鳥が鳴いています。温かいお茶を飲みながら、今日の予定をゆっくり考えました。",
+      "language": "ja",
+      "seed": 1234,
+      "options": {
+        "no_ref": true
+      }
+    }
+  ],
+  "yue2": [
+    {
+      "id": "warmup",
+      "text": "[Verse]\nThe morning sun is shining.\nI hear a song outside.",
+      "seed": 1234,
+      "options": {
+        "cot": "off",
+        "num_inference_steps": 8,
+        "style": "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix",
+        "guidance_scale": 1.0
+      }
+    },
+    {
+      "id": "cfg_off",
+      "text": "[Verse]\nSoft morning light is touching the window.\nI hear the city waking below.\n[Chorus]\nStay with the rhythm, let it carry us home.\nSing with the sunrise, we are never alone.",
+      "seed": 1234,
+      "options": {
+        "cot": "off",
+        "num_inference_steps": 8,
+        "style": "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix",
+        "guidance_scale": 1.0
+      }
+    },
+    {
+      "id": "cfg_on",
+      "text": "[Verse]\nSoft morning light is touching the window.\nI hear the city waking below.\n[Chorus]\nStay with the rhythm, let it carry us home.\nSing with the sunrise, we are never alone.",
+      "seed": 1234,
+      "options": {
+        "cot": "off",
+        "num_inference_steps": 8,
+        "style": "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix",
+        "guidance_scale": 2.0
+      }
+    },
+    {
+      "id": "cfg_off_repeat",
+      "text": "[Verse]\nSoft morning light is touching the window.\nI hear the city waking below.\n[Chorus]\nStay with the rhythm, let it carry us home.\nSing with the sunrise, we are never alone.",
+      "seed": 1234,
+      "options": {
+        "cot": "off",
+        "num_inference_steps": 8,
+        "style": "English, indie pop, bright acoustic guitar, soft drums, warm lead vocal, polished demo mix",
+        "guidance_scale": 1.0
+      }
+    }
+  ]
+}

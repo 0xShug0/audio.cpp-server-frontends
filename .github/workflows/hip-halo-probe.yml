@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes, generic-gates]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes, generic-gates, workload-probes]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -23,7 +23,7 @@ permissions:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.focus == 'workload-probes' && 30 || 15 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +42,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
+          if [[ "$VALIDATION_GROUP" == workload-probes ]]; then
+            python3 .github/tests/rocm_v2_workload.py --root source --prepare
+            exit 0
+          fi
           if [[ "$VALIDATION_GROUP" == generic-gates ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
@@ -443,11 +447,11 @@ jobs:
           name: validation-inputs
           path: probe-source.tar.gz
           compression-level: 0
-          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 3 }}
+          retention-days: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 3 }}
   probe:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.focus == 'workload-probes' && 90 || 45 }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -508,16 +512,21 @@ jobs:
             (cd source && sha256sum --check typed-source-sha256.txt) > results/typed-source-integrity.log
             cp source/typed-source-sha256.txt source/cpu-preflight.log results/
           fi
-          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
+          if [[ "$VALIDATION_GROUP" == workload-probes || "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
             python3 - <<'PYTHON'
-          import json, subprocess
+          import hashlib, json, subprocess
           from pathlib import Path
           for record in json.loads(Path('source/inputs/model-provenance.json').read_text()):
               target = Path('source') / record['destination']
+              target.parent.mkdir(parents=True, exist_ok=True)
               url = 'https://huggingface.co/{repo}/resolve/{revision}/{file}?download=true'.format(**record)
               subprocess.run(['curl', '--fail', '--location', '--connect-timeout', '20', '--max-time', '600',
                               '--retry', '2', '-o', str(target), url], check=True)
               assert target.stat().st_size == record['size'], 'model size mismatch: ' + record['family']
+              if not record['sha256']:
+                  data = target.read_bytes()
+                  actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+                  assert actual == record['blob_id'], 'sidecar hash mismatch: ' + record['file']
           PYTHON
           fi
           if [[ "$VALIDATION_GROUP" == generic-gates ]]; then
@@ -531,7 +540,16 @@ jobs:
             cp source/inputs/model-provenance.json results/
             cp source/inputs/*requests.json results/
           fi
-          echo "campaign_deadline=$(( $(date +%s) + 2400 ))" >> "$GITHUB_ENV"
+          duration=2400
+          if [[ "$VALIDATION_GROUP" == workload-probes ]]; then
+            duration=4800
+            for tree in source source-baseline source-rows2 source-vector; do
+              (cd "$tree" && sha256sum --check workload-source-sha256.txt) > "results/$tree-integrity.log"
+            done
+            cp source/cpu-preflight.log source/patch-sha256.txt source/workload-kernels.patch source/workload-rows2.patch source/workload-vector.patch results/
+            cp source/.github/tests/workload-probes/cases.json source/.github/tests/workload-probes/exclusions.json results/
+          fi
+          echo "campaign_deadline=$(( $(date +%s) + duration ))" >> "$GITHUB_ENV"
           echo "$PWD/source/toolchain" >> "$GITHUB_PATH"
           source/toolchain/ccache --version > results/ccache.log
           {
@@ -560,7 +578,7 @@ jobs:
         with:
           name: validation-builds
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 7 }}
+          retention-days: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 7 }}
       - name: Run checks
         continue-on-error: true
         shell: bash
@@ -572,7 +590,7 @@ jobs:
         with:
           name: validation-progress
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 7 }}
+          retention-days: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 7 }}
       - name: Run additional checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -584,13 +602,25 @@ jobs:
         with:
           name: validation-additional
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 14 }}
+          retention-days: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 14 }}
       - name: Finish checks
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           ulimit -c 0
+          if [[ "$VALIDATION_GROUP" == workload-probes ]]; then
+            probe_status=0
+            model_status=0
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --deadline-epoch "$campaign_deadline" --log || probe_status=$?
+            if python3 source/.github/tests/rocm_v2_workload.py --root results --source source --model-manifest; then
+              python3 source/.github/tests/rocm_v2_campaign.py --manifest source/workload-model-campaign.json --output-dir results/models --deadline-epoch "$campaign_deadline" --log || model_status=$?
+            else
+              model_status=1
+            fi
+            if (( probe_status || model_status )); then exit 1; fi
+            exit 0
+          fi
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --deadline-epoch "$campaign_deadline" --log
           if [[ "$VALIDATION_GROUP" == halo-final ]]; then
             python3 source/.github/tests/rocm_v2_halo.py --root results --source source --select-candidate
@@ -601,9 +631,9 @@ jobs:
         with:
           name: validation-results
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 14 }}
+          retention-days: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main') && 1 || 14 }}
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' && env.VALIDATION_GROUP != 'generic-gates' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' && env.VALIDATION_GROUP != 'generic-gates' && env.VALIDATION_GROUP != 'workload-probes' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}
