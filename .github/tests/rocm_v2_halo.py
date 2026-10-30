@@ -297,10 +297,13 @@ def breeze_ar_manifest(root):
                 suite['build'] = 'baseline'
                 command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
                 command += ['--backend-impl', 'gfx1151_v1']
+            else:
+                command[command.index('--backend-impl') + 1] = 'ar_stream2'
         elif suite['id'] == 'framework':
             suite['cases'] = [c for c in suite['cases'] if c['id'] == 'breeze_tts']
             command = suite['cases'][0]['argv']
             command[command.index('--baseline-implementation') + 1] = 'gfx1151_v1'
+            command[command.index('--candidate-implementation') + 1] = 'ar_stream2'
     return plan
 
 
@@ -417,15 +420,15 @@ def summarize_models(root, baseline_implementation='halo', families=None, candid
         for variant in ['a1', 'b1', 'b2', 'a2']:
             label = family + '-' + variant
             text = (root / 'case' / label / 'session.log').read_text()
-            selected_halo = ('implementation=' + candidate_implementation) in text
-            expected_halo = baseline_implementation == candidate_implementation or variant.startswith('b')
+            expected = candidate_implementation if variant.startswith('b') else baseline_implementation
             command = json.loads(text.splitlines()[0])['argv']
-            if selected_halo != expected_halo or 'session.wall_ms' not in text:
-                raise ValueError('Wrong implementation or missing canonical timing: ' + label)
-            if not expected_halo and '--backend-impl' in command:
-                raise ValueError('Original HIP baseline must omit --backend-impl: ' + label)
-            if expected_halo and command[command.index('--backend-impl') + 1] != candidate_implementation:
-                raise ValueError('Candidate must explicitly select Halo: ' + label)
+            if 'session.wall_ms' not in text:
+                raise ValueError('Missing canonical timing: ' + label)
+            if expected == 'default':
+                if '--backend-impl' in command or ('implementation=' + candidate_implementation) in text:
+                    raise ValueError('Original HIP baseline must omit --backend-impl: ' + label)
+            elif ('implementation=' + expected) not in text or '--backend-impl' not in command or command[command.index('--backend-impl') + 1] != expected:
+                raise ValueError('Wrong implementation: ' + label)
             metrics = {}
             for name, key, value in re.findall(r'^metrics\[([^\]]+)\]\.([^=]+)=(.*)$', text, re.M):
                 metrics.setdefault(name, {})[key] = value
