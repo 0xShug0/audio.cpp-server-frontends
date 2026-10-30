@@ -579,7 +579,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--source', type=Path)
-    parser.add_argument('--baseline-implementation',choices=['default','halo'],default='halo')
+    parser.add_argument('--baseline-implementation',choices=['default','halo','gfx1151_v1'],default='halo')
     parser.add_argument('--families', nargs='+')
     parser.add_argument('--candidate-implementation', default='halo')
     parser.add_argument('--request-set', choices=['models', 'tts-main'], default='models')
