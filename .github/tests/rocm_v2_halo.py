@@ -326,6 +326,25 @@ def tts_kernels_manifest(root):
     return plan
 
 
+def q8_probes_manifest(root):
+    plan = operator_manifest(root)
+    probe = ['build/debug/bin/test-backend-ops', '-b', 'ROCm0', '--suite', 'gfx1151_v1',
+             '-o', 'MUL_MAT', '-p', r'type_a=q8_0,type_b=f32,m=[0-9]+,n=[1-8],']
+    checks = [dict(id='health', argv=['build/debug/device-health', 'health'])]
+    checks += [dict(id=impl, argv=probe + ['test', '--backend-impl', impl])
+               for impl in ['default', 'gfx1151_v1']]
+    timing = [dict(id=str(i) + '-' + impl, argv=probe + ['perf', '--backend-impl', impl])
+              for i, impl in enumerate(['default', 'gfx1151_v1', 'gfx1151_v1', 'default'])]
+    trace = ['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0', '--suite', 'gfx1151_v1',
+             '--backend-impl', 'gfx1151_v1', '-o', 'MUL_MAT', '-p',
+             r'type_a=q8_0,type_b=f32,m=1024,n=6,k=1024,.*k_v=0,']
+    timing.append(dict(id='trace', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace',
+        '--output-format', 'csv', '--output-directory', '../results/profile/q8', '--'] + trace, timeout_s=60))
+    plan['suites'] = [dict(id='correctness', build='operators', gpu=True, timeout_s=300, cases=checks),
+                       dict(id='framework', build='operators', gpu=True, timeout_s=180, cases=timing)]
+    return plan
+
+
 def breeze_ar_manifest(root):
     from copy import deepcopy
     plan = tts_main_manifest(root)
@@ -684,6 +703,7 @@ if __name__ == '__main__':
     actions.add_argument('--tts-main', action='store_true')
     actions.add_argument('--tts-profile', action='store_true')
     actions.add_argument('--tts-kernels', action='store_true')
+    actions.add_argument('--q8-probes', action='store_true')
     actions.add_argument('--breeze-ar', action='store_true')
     actions.add_argument('--rdna-depth', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
@@ -702,5 +722,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = q8_probes_manifest(args.root) if args.q8_probes else tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

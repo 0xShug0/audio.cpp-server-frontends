@@ -1,106 +1,68 @@
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index f80c8931..186d67f3 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -3626,6 +3626,16 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
-         target_link_libraries(auk_flow_test PRIVATE yaml_vendor)
-     endif()
- 
-+    if (ENGINE_ENABLE_CUDA OR ENGINE_ENABLE_HIP)
-+        add_engine_unittest(cuda_round_bf16_fusion_test tests/unittests/test_cuda_round_bf16_fusion.cpp)
-+        if (ENGINE_ENABLE_HIP)
-+            add_test(NAME cuda_round_bf16_fusion_test COMMAND cuda_round_bf16_fusion_test ROCm)
-+        else()
-+            add_test(NAME cuda_round_bf16_fusion_test COMMAND cuda_round_bf16_fusion_test)
-+        endif()
-+        set_tests_properties(cuda_round_bf16_fusion_test PROPERTIES SKIP_RETURN_CODE 77)
-+    endif()
-+
-     if (ENGINE_ENABLE_CUDA)
-         add_engine_unittest(torch_random_cuda_multi_device_test
-             tests/unittests/test_torch_random_cuda_multi_device.cu)
-@@ -3638,9 +3648,6 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
-         add_engine_unittest(cuda_bias_fusion_test tests/unittests/test_cuda_bias_fusion.cpp)
-         add_test(NAME cuda_bias_fusion_test COMMAND cuda_bias_fusion_test)
-         set_tests_properties(cuda_bias_fusion_test PROPERTIES SKIP_RETURN_CODE 77)
--        add_engine_unittest(cuda_round_bf16_fusion_test tests/unittests/test_cuda_round_bf16_fusion.cpp)
--        add_test(NAME cuda_round_bf16_fusion_test COMMAND cuda_round_bf16_fusion_test)
--        set_tests_properties(cuda_round_bf16_fusion_test PROPERTIES SKIP_RETURN_CODE 77)
-         add_engine_unittest(cuda_rope_rows_test tests/unittests/test_cuda_rope_rows.cpp)
-         add_test(NAME cuda_rope_rows_test COMMAND cuda_rope_rows_test)
-         set_tests_properties(cuda_rope_rows_test PROPERTIES SKIP_RETURN_CODE 77)
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2f4fe797..f23dad3d 100644
+index 2f4fe797..ecf5f533 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -4259,7 +4259,7 @@ static bool ggml_cuda_safe_bias_fusion(const ggml_cgraph * graph, int i) {
- }
- #endif
+@@ -5696,6 +5696,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
+     }
+     static const ggml_hip_impl gfx1151_v1 = {
+         "gfx1151_v1", ggml_hip_gfx1151_v1_mul_mat, ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy,
++        ggml_hip_gfx1151_v1_mmvq,
+     };
+     ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
+     if (backend) {
+diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
+index d629b805..cf2a8e62 100644
+--- a/external/ggml/src/ggml-cuda/mmvq.cu
++++ b/external/ggml/src/ggml-cuda/mmvq.cu
+@@ -3,7 +3,10 @@
+ #include "unary.cuh"
+ #include "vecdotq.cuh"
  
--#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-+#if !defined(GGML_USE_MUSA)
- // bf16-reference graphs (see ggml_round_bf16) insert a ROUND_BF16 after most
- // activations, which breaks the usual fusion patterns. These helpers match the
- // rounding that directly follows a fusable op so it can run in that op's kernel.
-@@ -4284,6 +4284,7 @@ static bool ggml_cuda_ranges_overlap(const ggml_tensor * a, const ggml_tensor *
-     return a0 < b0 + ggml_nbytes(b) && b0 < a0 + ggml_nbytes(a);
- }
- 
-+#if !defined(GGML_USE_HIP)
- // ROUND(gate) -> SILU -> ROUND, [VIEW up], ROUND(up) -> MUL -> ROUND starting at node i.
- static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int i) {
-     if (i + 6 >= cgraph->n_nodes) {
-@@ -4321,6 +4322,7 @@ static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int
-     return !ggml_cuda_ranges_overlap(dst, gate) && !ggml_cuda_ranges_overlap(dst, up);
- }
- #endif
+-#include <cstdint>
++#include <cstdint>
++#ifdef GGML_USE_HIP
++#include "../ggml-hip/impl.cuh"
 +#endif
  
- // try and fuse nodes and return the number of nodes to skip
- static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
-@@ -4369,8 +4371,12 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
-         }
+ typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
+ 
+@@ -1119,6 +1122,13 @@ void ggml_cuda_mul_mat_vec_q(
+         quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
      }
  
++#ifdef GGML_USE_HIP
++    if (ctx.impl && ctx.impl->mmvq &&
++        ctx.impl->mmvq(src0, src1, ids, src1_q8_1.get(), fusion_local, dst, stream)) {
++        return;
++    }
 +#endif
 +
-+#if !defined(GGML_USE_MUSA)
-     // bf16-reference rounding folded into the producing kernel; opt-in per backend
-     // through ggml_backend_cuda_set_round_bf16_fusion().
-+#if !defined(GGML_USE_HIP)
-     if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_RMS_NORM && ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {}) &&
-         ggml_cuda_is_elidable(cgraph, i + 1) && ggml_cuda_is_round_bf16_of(cgraph, i + 2, cgraph->nodes[i + 1])) {
-         const int outputs[] = { i + 2 };
-@@ -4379,6 +4385,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
-             return 2;
-         }
-     }
-+#endif
-     if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_ADD && ggml_cuda_is_elidable(cgraph, i) &&
-         ggml_cuda_is_round_bf16_of(cgraph, i + 1, node) &&
-         node->type == GGML_TYPE_F32 && node->src[0]->type == GGML_TYPE_F32 && node->src[1]->type == GGML_TYPE_F32 &&
-@@ -4395,11 +4402,13 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
-             return 1;
-         }
-     }
-+#if !defined(GGML_USE_HIP)
-     if (cuda_ctx->round_bf16_fusion && node->op == GGML_OP_UNARY &&
-         ggml_get_unary_op(node) == GGML_UNARY_OP_ROUND_BF16 && ggml_cuda_can_fuse_swiglu_round_bf16(cgraph, i)) {
-         ggml_cuda_op_swiglu_round_bf16(*cuda_ctx, node->src[0], cgraph->nodes[i + 3], cgraph->nodes[i + 6]);
-         return 6;
-     }
-+#endif
+     const int64_t s01 = src0->nb[1] / ts_src0;
+     const int64_t s11 = ne10_padded / QK8_1;
+     const int64_t s1  =  dst->nb[1] / ts_dst;
+diff --git a/external/ggml/src/ggml-hip/CMakeLists.txt b/external/ggml/src/ggml-hip/CMakeLists.txt
+index 85dcd0a9..6958e39c 100644
+--- a/external/ggml/src/ggml-hip/CMakeLists.txt
++++ b/external/ggml/src/ggml-hip/CMakeLists.txt
+@@ -96,6 +96,7 @@ else()
+ endif()
  
- #endif
+ list(APPEND GGML_SOURCES_ROCM gfx1151_v1/sgemm.cu gfx1151_v1/matmul.cu gfx1151_v1/im2col.cu gfx1151_v1/cpy.cu)
++list(APPEND GGML_SOURCES_ROCM gfx1151_v1/mmvq.cu)
  
-@@ -5701,6 +5710,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
-     if (backend) {
-         auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
-         ctx->impl = &gfx1151_v1;
-+        ctx->round_bf16_fusion = true;
-         GGML_LOG_INFO("ROCm%d: implementation=%s\n", device->device, ctx->impl->name);
-     }
-     return backend;
+ if (CXX_IS_HIPCC)
+     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+index 6d5dfd2e..ea90f1ff 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+@@ -7,3 +7,6 @@ bool ggml_hip_gfx1151_v1_mul_mat_typed(const ggml_tensor *, const ggml_tensor *,
+ bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t);
+ 
+ bool ggml_hip_gfx1151_v1_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
++
++bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *,
++                            const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
 diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu b/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
 index f61bc0e6..39628471 100644
 --- a/external/ggml/src/ggml-hip/gfx1151_v1/sgemm.cu
@@ -196,8 +158,27 @@ index f61bc0e6..39628471 100644
 +    }
      return true;
  }
+diff --git a/external/ggml/src/ggml-hip/impl.cuh b/external/ggml/src/ggml-hip/impl.cuh
+index 66eb02ac..9998cd26 100644
+--- a/external/ggml/src/ggml-hip/impl.cuh
++++ b/external/ggml/src/ggml-hip/impl.cuh
+@@ -3,10 +3,14 @@
+ #include "ggml.h"
+ #include <hip/hip_runtime.h>
+ 
++struct ggml_cuda_mm_fusion_args_device;
++
+ // False means ineligible, before any kernel launches. Execution errors are not retried.
+ struct ggml_hip_impl {
+     const char * name;
+     bool (*mul_mat)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t, int cc);
+     bool (*im2col)(const ggml_tensor *, ggml_tensor *, hipStream_t);
+     bool (*cpy)(const ggml_tensor *, ggml_tensor *, hipStream_t);
++    bool (*mmvq)(const ggml_tensor *, const ggml_tensor *, const ggml_tensor *, const void *,
++                 const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t) = nullptr;
+ };
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 48e523e9..24484c50 100644
+index 48e523e9..3fc0b8c3 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
 @@ -9509,6 +9509,25 @@ struct test_gfx1151_v1_mul_mat_precision : public test_mul_mat {
@@ -226,39 +207,108 @@ index 48e523e9..24484c50 100644
      for (bool strict : {false, true}) {
          for (const auto & shape : std::vector<std::array<int64_t, 3>>{
                  {63, 127, 255}, {128, 768, 256}, {128, 768, 5461}, {128, 768, 5462},
-diff --git a/tests/unittests/test_cuda_round_bf16_fusion.cpp b/tests/unittests/test_cuda_round_bf16_fusion.cpp
-index d16c4b57..08311229 100644
---- a/tests/unittests/test_cuda_round_bf16_fusion.cpp
-+++ b/tests/unittests/test_cuda_round_bf16_fusion.cpp
-@@ -102,9 +102,9 @@ std::vector<float> run(ggml_backend_t backend, Pattern pattern, int width, int r
- }
- }
- 
--int main() {
-+int main(int argc, char ** argv) {
-     engine::core::ensure_backends_loaded();
--    auto reg = ggml_backend_reg_by_name("CUDA");
-+    auto reg = ggml_backend_reg_by_name(argc > 1 ? argv[1] : "CUDA");
-     if (!reg || ggml_backend_reg_dev_count(reg) == 0) return 77;
-     auto backend = ggml_backend_dev_init(ggml_backend_reg_dev_get(reg, 0), nullptr);
-     if (!backend) return 1;
-@@ -120,8 +120,8 @@ int main() {
-     const char * names[] = {"rms_norm*w", "add", "swiglu"};
-     try {
-         for (Pattern pattern : {Pattern::RmsNormMul, Pattern::Add, Pattern::SwiGlu}) {
--            for (int width : {1, 17, 1024, 2048, 8192}) {
--                for (int rows : {1, 4}) {
-+            for (int width : {1, 17, 33, 96, 256, 896, 1024, 2048, 4096, 8192}) {
-+                for (int rows : {1, 2, 3, 4, 6, 17}) {
-                     const auto reference = run(backend, pattern, width, rows, true);
-                     const auto fused = run(backend, pattern, width, rows, false);
-                     for (size_t i = 0; i < reference.size(); ++i) {
-@@ -136,7 +136,7 @@ int main() {
-                 }
-             }
-         }
--        std::cout << "PASS: bf16 rounding fused into rms_norm*w, add and swiglu; odd widths, multiple rows, "
-+        std::cout << "PASS: bf16 rounding chains match the unfused results; odd widths, multiple rows, "
-                      "strided gate/up views, exceptional values\n";
-     } catch (const std::exception & error) {
-         std::cerr << error.what() << '\n';
+@@ -9522,6 +9541,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_gfx1151_v1() {
+         cases.emplace_back(new test_gfx1151_v1_mul_mat_precision(
+             GGML_TYPE_F32, 128, 768, 256, strict, false, 288));
+     }
++    for (int64_t cols = 1; cols <= 8; ++cols) {
++        for (const auto & shape : std::vector<std::array<int64_t, 2>>{
++                {127, 256}, {896, 896}, {1024, 1024}, {4096, 1024},
++                {1024, 4096}, {769, 1280}, {1537, 1536}, {2049, 6144}}) {
++            cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32,
++                shape[0], cols, shape[1], one, one));
++        }
++    }
++    cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 1024, 6, 1024,
++                                       one, one, std::array<int64_t, 4>{0, 1, 2, 3}, 1280));
+     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+         cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 129, 769, 256, one, one));
+     }
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+new file mode 100644
+index 00000000..68b5447b
+--- /dev/null
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+@@ -0,0 +1,82 @@
++#include "gfx1151_v1.cuh"
++#include "ggml-cuda/mmvq.cuh"
++#include "ggml-cuda/vecdotq.cuh"
++#include <climits>
++#include <type_traits>
++
++namespace {
++using q8_pair = int __attribute__((vector_size(8), aligned(2), may_alias));
++
++template<int cols>
++#ifdef __HIP_DEVICE_COMPILE__
++__attribute__((target("unaligned-access-mode")))
++#endif
++__global__ __launch_bounds__(128) void gfx1151_v1_mmvq(
++        const block_q8_0 * a, const block_q8_1 * b, float * dst,
++        int m, int k, int stride_a, int stride_b) {
++    const int lane = threadIdx.x;
++    const int64_t row = int64_t(blockIdx.x) * 4 + threadIdx.y;
++    const int quant = 2 * (lane % 4);
++    if (row >= m) return;
++    float sum[cols] = {};
++#pragma clang loop unroll_count(2)
++    for (int index = 0; index < k / (QK8_0 * 8); ++index) {
++        const int block = index * 8 + lane / 4;
++        int u[cols][2];
++        float scale_b[cols];
++#pragma unroll
++        for (int c = 0; c < cols; ++c) {
++            const auto & x = b[c * stride_b + block];
++            u[c][0] = get_int_b4(x.qs, quant);
++            u[c][1] = get_int_b4(x.qs, quant + 1);
++            scale_b[c] = __half2float(__low2half(x.ds));
++        }
++        const auto & w = a[row * stride_a + block];
++        const q8_pair value = __builtin_nontemporal_load(
++            reinterpret_cast<const q8_pair *>(w.qs + quant * 4));
++        const int v[2] = {value[0], value[1]};
++#pragma unroll
++        for (int c = 0; c < cols; ++c) {
++            sum[c] += vec_dot_q8_0_q8_1_impl<float, 2>(v, u[c], __half2float(w.d), scale_b[c]);
++        }
++    }
++#pragma unroll
++    for (int c = 0; c < cols; ++c) {
++        const float value = warp_reduce_sum<32>(sum[c]);
++        if (lane == 0) dst[int64_t(c) * m + row] = value;
++    }
++}
++} // namespace
++
++bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor * a, const ggml_tensor * b, const ggml_tensor * ids,
++                            const void * q8, const ggml_cuda_mm_fusion_args_device & fusion,
++                            ggml_tensor * dst, hipStream_t stream) {
++    if (a->type != GGML_TYPE_Q8_0 || b->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
++        dst->op != GGML_OP_MUL_MAT || ids || a->ne[2] != 1 || a->ne[3] != 1 ||
++        b->ne[2] != 1 || b->ne[3] != 1 || b->ne[1] < 1 || b->ne[1] > 8 ||
++        !ggml_is_contiguous(dst) || fusion.gate || fusion.x_bias || fusion.gate_bias || fusion.residual_only ||
++        a->ne[0] < 256 || a->ne[0] > INT_MAX || a->ne[0] % 256 || a->ne[1] < 1 || a->ne[1] > INT_MAX ||
++        a->nb[0] != sizeof(block_q8_0) || a->nb[1] % sizeof(block_q8_0) ||
++        a->nb[1] / sizeof(block_q8_0) > INT_MAX) {
++        return false;
++    }
++    const dim3 grid((a->ne[1] + 3) / 4);
++    const auto launch = [&](auto cols_tag) {
++        constexpr int cols = decltype(cols_tag)::value;
++        gfx1151_v1_mmvq<cols><<<grid, dim3(32, 4), 0, stream>>>(
++            static_cast<const block_q8_0 *>(a->data), static_cast<const block_q8_1 *>(q8),
++            static_cast<float *>(dst->data), a->ne[1], a->ne[0],
++            a->nb[1] / sizeof(block_q8_0), GGML_PAD(b->ne[0], MATRIX_ROW_PADDING) / QK8_1);
++    };
++    switch (b->ne[1]) {
++        case 1: launch(std::integral_constant<int, 1>{}); break;
++        case 2: launch(std::integral_constant<int, 2>{}); break;
++        case 3: launch(std::integral_constant<int, 3>{}); break;
++        case 4: launch(std::integral_constant<int, 4>{}); break;
++        case 5: launch(std::integral_constant<int, 5>{}); break;
++        case 6: launch(std::integral_constant<int, 6>{}); break;
++        case 7: launch(std::integral_constant<int, 7>{}); break;
++        case 8: launch(std::integral_constant<int, 8>{}); break;
++    }
++    return true;
++}

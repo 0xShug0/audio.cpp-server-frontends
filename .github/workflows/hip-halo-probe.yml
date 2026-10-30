@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, q8-probes]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -42,11 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
-          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels ]]; then
+          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == q8-probes ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
             source_revision=f64cfb5f2e0c9132f8d85281a4ec55d080313698
-            if [[ "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels ]]; then
+            if [[ "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == q8-probes ]]; then
               source_revision=141ec6f861aa61b8a7c81f1432c77ef9c08e3522
             fi
             if [[ "$VALIDATION_GROUP" == breeze-ar ]]; then
@@ -66,6 +66,10 @@ jobs:
           target_link_libraries(test-backend-ops PRIVATE ggml Threads::Threads)
           CMAKE
             fi
+            if [[ "$VALIDATION_GROUP" == q8-probes ]]; then
+              git -C source apply --check ../.github/tests/tts-kernels.patch
+              git -C source apply ../.github/tests/tts-kernels.patch
+            fi
             if [[ "$VALIDATION_GROUP" == tts-profile ]]; then
               git -C source apply --check ../.github/tests/tts-profile.patch
               git -C source apply ../.github/tests/tts-profile.patch
@@ -82,9 +86,11 @@ jobs:
           sys.path.insert(0, '.github/tests')
           from rocm_v2_halo import model_requests
           root = Path('source')
-          if os.environ['VALIDATION_GROUP'] in ['tts-main', 'breeze-ar', 'tts-profile', 'tts-kernels']:
+          if os.environ['VALIDATION_GROUP'] in ['tts-main', 'breeze-ar', 'tts-profile', 'tts-kernels', 'q8-probes']:
               from rocm_v2_halo import tts_requests
               records = json.loads(Path('.github/tests/tts-model-files.json').read_text())
+              if os.environ['VALIDATION_GROUP'] == 'q8-probes':
+                  records = []
               if os.environ['VALIDATION_GROUP'] in ['tts-profile', 'tts-kernels']:
                   records = [r for r in records if r['family'] in ['ming3_tts', 'omnivoice']]
               if os.environ['VALIDATION_GROUP'] == 'breeze-ar':
@@ -112,7 +118,9 @@ jobs:
                   request_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
               (root / 'inputs/input-sha256.txt').write_text(record['sha256'] + '  inputs/irodori.gguf\n' + request_digest + '  inputs/irodori_tts-requests.json\n')
           hashes = []
-          for name in subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0'):
+          tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root)
+          tracked += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z', 'external/ggml'], cwd=root)
+          for name in tracked.decode().split('\0'):
               file = root / name
               if name and file.is_file():
                   with file.open('rb') as stream:
@@ -418,7 +426,7 @@ jobs:
             (cd source && sha256sum --check .github/tests/halo-hip-baseline-sha256.txt) > results/source-integrity.log
             cp source/.github/tests/halo-hip-baseline-sha256.txt results/
           fi
-          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels ]]; then
+          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == q8-probes ]]; then
             (cd source && sha256sum --check main-source-sha256.txt) > results/source-integrity.log
             cp source/main-source-sha256.txt results/
           fi
@@ -441,7 +449,7 @@ jobs:
             (cd source && sha256sum --check typed-source-sha256.txt) > results/typed-source-integrity.log
             cp source/typed-source-sha256.txt source/cpu-preflight.log results/
           fi
-          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels ]]; then
+          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == q8-probes ]]; then
             python3 - <<'PYTHON'
           import json, subprocess
           from pathlib import Path
@@ -530,7 +538,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'q8-probes' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}
