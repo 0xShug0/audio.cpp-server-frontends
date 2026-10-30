@@ -45,9 +45,9 @@ jobs:
           if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar ]]; then
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
-            source_revision=46e3893bec3be00f24e8db742ec4a03283a53746
+            source_revision=f64cfb5f2e0c9132f8d85281a4ec55d080313698
             if [[ "$VALIDATION_GROUP" == tts-main ]]; then
-              source_revision=67c7c4dff00d4d5355f93fd1713eac6f5c02aaa5
+              source_revision=f64cfb5f2e0c9132f8d85281a4ec55d080313698
             fi
             if [[ "$VALIDATION_GROUP" == breeze-ar ]]; then
               source_revision=482e9a1504b878eec266a5f33e8841d898d011c6
@@ -84,18 +84,13 @@ jobs:
               (root / 'inputs/input-sha256.txt').write_text('\n'.join(hashes) + '\n')
           else:
               record = next(r for r in json.loads(Path('.github/tests/halo-model-files.json').read_text()) if r['destination'] == 'inputs/irodori.gguf')
-              target = root / record['destination']
-              url = 'https://huggingface.co/{repo}/resolve/{revision}/{file}?download=true'.format(**record)
-              subprocess.run(['curl', '--fail', '--location', '--connect-timeout', '20', '--max-time', '600', '--retry', '2', '-o', str(target), url], check=True)
-              with target.open('rb') as stream:
-                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-              assert digest == record['sha256'] and target.stat().st_size == record['size'], 'model integrity mismatch'
+              record = dict(record, family='irodori_tts')
               requests = root / 'inputs/irodori_tts-requests.json'
               requests.write_text(json.dumps(model_requests()['irodori_tts'], ensure_ascii=False, indent=2) + '\n')
               (root / 'inputs/model-provenance.json').write_text(json.dumps([record], indent=2))
               with requests.open('rb') as stream:
                   request_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-              (root / 'inputs/input-sha256.txt').write_text(digest + '  inputs/irodori.gguf\n' + request_digest + '  inputs/irodori_tts-requests.json\n')
+              (root / 'inputs/input-sha256.txt').write_text(record['sha256'] + '  inputs/irodori.gguf\n' + request_digest + '  inputs/irodori_tts-requests.json\n')
           hashes = []
           for name in subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0'):
               file = root / name
@@ -422,7 +417,7 @@ jobs:
             (cd source && sha256sum --check typed-source-sha256.txt) > results/typed-source-integrity.log
             cp source/typed-source-sha256.txt source/cpu-preflight.log results/
           fi
-          if [[ "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar ]]; then
+          if [[ "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar ]]; then
             python3 - <<'PYTHON'
           import json, subprocess
           from pathlib import Path

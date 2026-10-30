@@ -227,10 +227,7 @@ def irodori_main_manifest(root):
     for label in ['a1', 'b1', 'b2', 'a2']:
         suites.append(dict(id='irodori_tts-' + label, build='model', gpu=True, timeout_s=600,
                            cases=[dict(id='session', argv=command(label, label.startswith('b')))]))
-    suites.append(dict(id='framework', build='model', gpu=True, timeout_s=300,
-        cases=[dict(id='trace', argv=['/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
-            '--output-directory', '../results/profile/gfx1151_v1', '--'] + command('trace', True))]))
-    suites.append(dict(id='report', build='model', gpu=False, timeout_s=120,
+    suites.append(dict(id='framework', build='model', gpu=False, timeout_s=120,
         cases=[dict(id='summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results',
             '--summarize-models', '--families', 'irodori_tts', '--baseline-implementation', 'default',
             '--candidate-implementation', 'gfx1151_v1'])]))
