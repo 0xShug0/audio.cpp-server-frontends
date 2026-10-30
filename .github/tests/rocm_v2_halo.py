@@ -304,6 +304,32 @@ def breeze_ar_manifest(root):
     return plan
 
 
+def rdna_depth_manifest(root):
+    plan = qwen_manifest(root)
+    build = plan['builds'][1]
+    build['commands'][0] = ['-DAUDIOCPP_MODELS=breeze_tts' if x.startswith('-DAUDIOCPP_MODELS=') else x
+                              for x in build['commands'][0]]
+    build['commands'][1] = ['cmake', '--build', 'build/debug', '--target',
+                            'decoder_packed_projection_test', 'test-backend-ops', '--parallel', '8']
+    build['commands'].append(['cmake', '-E', 'make_directory', '../results/hidden'])
+    implementations = ['gfx1151_v1', 'ar_w2', 'ar_w4', 'ar_w8']
+    math = [dict(id=impl, argv=['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
+            '--suite', 'gfx1151_v1', '--backend-impl', impl, '-o', 'MUL_MAT',
+            '-p', r'type_a=q8_0,type_b=f32,m=[0-9]+,n=(1|2),']) for impl in implementations]
+    timed = []
+    for batch in [1, 2]:
+        for round in range(2):
+            for slot, impl in enumerate(implementations + list(reversed(implementations))):
+                name = f'b{batch}-r{round}-s{slot}-{impl}'
+                timed.append(dict(id=name, depends_on=['correctness/' + impl],
+                    argv=['build/debug/bin/decoder_packed_projection_test', '--ar-probe',
+                          '--impl', impl, '--batch', str(batch), '--output', '../results/hidden/' + name + '.safetensors', '--log']))
+    plan['suites'] = [
+        dict(id='correctness', build='model', gpu=True, timeout_s=90, cases=math),
+        dict(id='framework', build='model', gpu=True, timeout_s=180, cases=timed)]
+    return plan
+
+
 def ggml_v1_manifest(root):
     plan = operator_manifest(root)
     probe = ['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
@@ -595,6 +621,7 @@ if __name__ == '__main__':
     actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--tts-main', action='store_true')
     actions.add_argument('--breeze-ar', action='store_true')
+    actions.add_argument('--rdna-depth', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
     actions.add_argument('--summarize-operators', action='store_true')
     actions.add_argument('--summarize-models', action='store_true')
@@ -611,5 +638,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

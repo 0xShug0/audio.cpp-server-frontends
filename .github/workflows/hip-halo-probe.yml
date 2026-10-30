@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar]
+        options: [complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth]
         default: ggml-v1
   push:
     branches: [experiment/rocm-v2-probes]
@@ -118,6 +118,34 @@ jobs:
             python3 source/.github/tests/rocm_v2_halo.py --root source --"$VALIDATION_GROUP"
             python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
             tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build "${archive_roots[@]}"
+            du -h probe-source.tar.gz
+            exit 0
+          fi
+          if [[ "$VALIDATION_GROUP" == rdna-depth ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin f64cfb5f2e0c9132f8d85281a4ec55d080313698
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf tests/unittests webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/sentencepiece external/utf8proc external/llama_tokenizer
+            git -C source checkout --detach FETCH_HEAD
+            git -C source apply --check ../.github/tests/rdna-depth.patch
+            git -C source apply ../.github/tests/rdna-depth.patch
+            git -C source rev-parse HEAD > source/source-commit.txt
+            mkdir -p source/.github/tests source/toolchain
+            cp .github/tests/rocm_v2_*.py .github/tests/hip_vmm_probe.cpp source/.github/tests/
+            cat >> source/CMakeLists.txt <<'CMAKE'
+          add_executable(decoder_packed_projection_test tests/unittests/test_decoder_packed_projections.cpp)
+          target_link_libraries(decoder_packed_projection_test PRIVATE engine_runtime ggml)
+          add_executable(test-backend-ops external/ggml/tests/test-backend-ops.cpp)
+          target_link_libraries(test-backend-ops PRIVATE ggml)
+          CMAKE
+            python3 -c 'import hashlib, subprocess; from pathlib import Path; r=Path("source"); names=subprocess.check_output(["git", "ls-files", "-z"], cwd=r).decode().split("\0"); lines=[hashlib.sha256((r/n).read_bytes()).hexdigest()+"  "+n for n in names if n and (r/n).is_file()]; (r/"depth-source-sha256.txt").write_text("\n".join(lines)+"\n")'
+            cp source/depth-source-sha256.txt source/patch-sha256.txt
+            curl --fail --location --max-time 120 --retry 2 -o ccache.tar.xz https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+            tar -xJf ccache.tar.xz --strip-components=1 -C source/toolchain ccache-4.13.6-linux-x86_64-musl-static/ccache
+            c++ -std=c++17 -fsyntax-only -Isource/include -Isource/external/ggml/include -Isource/external/cJSON source/tests/unittests/test_decoder_packed_projections.cpp
+            python3 source/.github/tests/rocm_v2_halo.py --root source --rdna-depth
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            tar -czf probe-source.tar.gz --exclude=.git --exclude=source/build source
             du -h probe-source.tar.gz
             exit 0
           fi
@@ -379,6 +407,9 @@ jobs:
             (cd source-baseline && sha256sum --check baseline-source-sha256.txt) > results/baseline-source-integrity.log
             cp source-baseline/source-commit.txt results/baseline-commit.txt
           fi
+          if [[ "$VALIDATION_GROUP" == rdna-depth ]]; then
+            (cd source && sha256sum --check depth-source-sha256.txt) > results/source-integrity.log
+          fi
           if [[ "$VALIDATION_GROUP" == ar-gemv ]]; then
             (cd source && sha256sum --check ar-source-sha256.txt) > results/source-integrity.log
             cp source/ar-source-sha256.txt source/cpu-preflight.log results/
@@ -480,7 +511,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: 14
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}
