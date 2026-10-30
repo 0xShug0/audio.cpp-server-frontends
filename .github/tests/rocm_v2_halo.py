@@ -293,6 +293,38 @@ def tts_profile_manifest(root):
     return plan
 
 
+def tts_kernels_manifest(root):
+    from copy import deepcopy
+    plan = tts_main_manifest(root)
+    candidate = plan['builds'][1]
+    candidate['commands'][0] = ['-DAUDIOCPP_MODELS=ming3_tts,omnivoice' if x.startswith('-DAUDIOCPP_MODELS=')
+                                else x for x in candidate['commands'][0]]
+    baseline = deepcopy(candidate)
+    baseline['id'] = 'baseline'
+    baseline['cwd'] = '../source-baseline'
+    plan['builds'].insert(1, baseline)
+    candidate['commands'][0] = [x.replace('-DENGINE_BUILD_TESTS=OFF', '-DENGINE_BUILD_TESTS=ON')
+                                for x in candidate['commands'][0]]
+    candidate['commands'][1].insert(candidate['commands'][1].index('--parallel'), 'cuda_round_bf16_fusion_test')
+    plan['suites'] = [s for s in plan['suites'] if s['id'] in ['correctness', 'framework']
+                      or s['id'].startswith(('ming3_tts-', 'omnivoice-'))]
+    plan['suites'][0]['cases'].append(dict(id='round-fusion',
+        argv=['build/debug/bin/cuda_round_bf16_fusion_test', 'ROCm', '--log']))
+    for suite in plan['suites']:
+        if suite['id'] == 'framework':
+            suite['cases'] = [c for c in suite['cases'] if c['id'] in ['ming3_tts', 'omnivoice']]
+            for case in suite['cases']:
+                command = case['argv']
+                command[command.index('--baseline-implementation') + 1] = 'gfx1151_v1'
+        elif suite['id'] != 'correctness':
+            command = suite['cases'][0]['argv']
+            if suite['id'].split('-')[-1].startswith('a'):
+                suite['build'] = 'baseline'
+                command[0] = '../source-baseline/build/debug/bin/audiocpp_cli'
+                command += ['--backend-impl', 'gfx1151_v1']
+    return plan
+
+
 def breeze_ar_manifest(root):
     from copy import deepcopy
     plan = tts_main_manifest(root)
@@ -650,6 +682,7 @@ if __name__ == '__main__':
     actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--tts-main', action='store_true')
     actions.add_argument('--tts-profile', action='store_true')
+    actions.add_argument('--tts-kernels', action='store_true')
     actions.add_argument('--breeze-ar', action='store_true')
     actions.add_argument('--rdna-depth', action='store_true')
     actions.add_argument('--prepare-models', action='store_true')
@@ -668,5 +701,5 @@ if __name__ == '__main__':
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
                          tts_requests() if args.request_set == 'tts-main' else None)
     else:
-        plan = tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')
