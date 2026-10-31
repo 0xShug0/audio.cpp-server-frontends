@@ -7,7 +7,7 @@ on:
       focus:
         description: Validation group
         type: choice
-        options: [asr-music, complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes, generic-gates, workload-probes, workload-refine]
+        options: [yue2-vulkan, asr-music, complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes, generic-gates, workload-probes, workload-refine]
         default: ggml-v1
 
 permissions:
@@ -36,6 +36,28 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s .github/tests -p "test_rocm_v2_*.py" -v
+          if [[ "$VALIDATION_GROUP" == yue2-vulkan ]]; then
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source fetch --no-tags --depth=1 --filter=blob:none origin 41c1f8ffa0d13a1b7e366e30ea5fe5ab8d169d48
+            git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
+            git -C source checkout --detach FETCH_HEAD
+            git -C source rev-parse HEAD > source/source-commit.txt
+            mkdir -p source/.github/tests
+            cp .github/tests/rocm_v2_campaign.py .github/tests/yue2_vulkan_1153.py .github/tests/yue2-vulkan-1153-*.json source/.github/tests/
+            python3 source/.github/tests/yue2_vulkan_1153.py --root source --prepare
+            python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir prepare-results --validate-only --log
+            python3 - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+          root = Path('source')
+          paths = sorted(p for p in root.rglob('*') if p.is_file() and '.git' not in p.parts)
+          (root / 'main-source-sha256.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.relative_to(root).as_posix() + '\n' for p in paths))
+          PYTHON
+            tar -czf probe-source.tar.gz --exclude=.git source
+            du -h probe-source.tar.gz
+            exit 0
+          fi
           if [[ "$VALIDATION_GROUP" == workload-probes || "$VALIDATION_GROUP" == workload-refine ]]; then
             extra=()
             if [[ "$VALIDATION_GROUP" == workload-refine ]]; then extra+=(--refine); fi
@@ -484,11 +506,11 @@ jobs:
           name: validation-inputs
           path: probe-source.tar.gz
           compression-level: 0
-          retention-days: ${{ (inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 3 }}
+          retention-days: ${{ (inputs.focus == 'yue2-vulkan' || inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 3 }}
   probe:
     needs: prepare
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
-    timeout-minutes: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'workload-refine') && 90 || 45 }}
+    timeout-minutes: ${{ (inputs.focus == 'workload-probes' || inputs.focus == 'workload-refine' || inputs.focus == 'yue2-vulkan') && 90 || 45 }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -526,7 +548,7 @@ jobs:
             (cd source && sha256sum --check .github/tests/halo-hip-baseline-sha256.txt) > results/source-integrity.log
             cp source/.github/tests/halo-hip-baseline-sha256.txt results/
           fi
-          if [[ "$VALIDATION_GROUP" == asr-music || "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
+          if [[ "$VALIDATION_GROUP" == yue2-vulkan || "$VALIDATION_GROUP" == asr-music || "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
             (cd source && sha256sum --check main-source-sha256.txt) > results/source-integrity.log
             cp source/main-source-sha256.txt results/
           fi
@@ -549,7 +571,7 @@ jobs:
             (cd source && sha256sum --check typed-source-sha256.txt) > results/typed-source-integrity.log
             cp source/typed-source-sha256.txt source/cpu-preflight.log results/
           fi
-          if [[ "$VALIDATION_GROUP" == asr-music || "$VALIDATION_GROUP" == workload-refine || "$VALIDATION_GROUP" == workload-probes || "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
+          if [[ "$VALIDATION_GROUP" == yue2-vulkan || "$VALIDATION_GROUP" == asr-music || "$VALIDATION_GROUP" == workload-refine || "$VALIDATION_GROUP" == workload-probes || "$VALIDATION_GROUP" == irodori-main || "$VALIDATION_GROUP" == tts-main || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-profile || "$VALIDATION_GROUP" == tts-kernels || "$VALIDATION_GROUP" == rms-probes ]]; then
             python3 - <<'PYTHON'
           import hashlib, json, subprocess
           from pathlib import Path
@@ -577,6 +599,23 @@ jobs:
             cp source/inputs/model-provenance.json results/
             cp source/inputs/*requests.json results/
           fi
+          if [[ "$VALIDATION_GROUP" == yue2-vulkan ]]; then
+            mkdir -p source/inputs/vulkan-debs source/inputs/vulkan-sdk
+            (cd source/inputs/vulkan-debs && apt-get download libvulkan-dev glslc libshaderc1 vulkan-tools spirv-headers)
+            for package in source/inputs/vulkan-debs/*.deb; do dpkg-deb -x "$package" source/inputs/vulkan-sdk; done
+            sdk="$PWD/source/inputs/vulkan-sdk/usr"
+            export PATH="$sdk/bin:$PATH"
+            export LD_LIBRARY_PATH="$sdk/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+            echo "$sdk/bin" >> "$GITHUB_PATH"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            echo "CMAKE_PREFIX_PATH=$sdk" >> "$GITHUB_ENV"
+            vulkaninfo --summary > results/vulkan-device.log 2>&1
+            grep -m1 'deviceName' results/vulkan-device.log | grep -E 'AMD|RADV'
+            cp source/source-commit.txt source/inputs/yue2-requests.json results/
+            uname -a > results/environment.log
+            echo "campaign_deadline=$(( $(date +%s) + 4800 ))" >> "$GITHUB_ENV"
+            exit 0
+          fi
           duration=2400
           if [[ "$VALIDATION_GROUP" == workload-probes || "$VALIDATION_GROUP" == workload-refine ]]; then
             duration=4800
@@ -603,6 +642,7 @@ jobs:
             uname -a
           } > results/environment.log 2>&1
       - uses: actions/cache/restore@v4
+        if: ${{ inputs.focus != 'yue2-vulkan' }}
         id: cache
         continue-on-error: true
         with:
@@ -618,11 +658,11 @@ jobs:
           ulimit -c 0
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --through-suite builds --deadline-epoch "$campaign_deadline" --log
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && inputs.focus != 'yue2-vulkan' }}
         with:
           name: validation-builds
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 7 }}
+          retention-days: ${{ (inputs.focus == 'yue2-vulkan' || inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 7 }}
       - name: Run checks
         continue-on-error: true
         shell: bash
@@ -630,11 +670,11 @@ jobs:
           ulimit -c 0
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --through-suite correctness --deadline-epoch "$campaign_deadline" --log
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && inputs.focus != 'yue2-vulkan' }}
         with:
           name: validation-progress
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 7 }}
+          retention-days: ${{ (inputs.focus == 'yue2-vulkan' || inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 7 }}
       - name: Run additional checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -642,13 +682,13 @@ jobs:
           ulimit -c 0
           python3 source/.github/tests/rocm_v2_campaign.py --manifest source/campaign.json --output-dir results --resume --through-suite framework --deadline-epoch "$campaign_deadline" --log
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && inputs.focus != 'yue2-vulkan' }}
         with:
           name: validation-additional
           path: |
             ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
             !${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/wavs/
-          retention-days: ${{ (inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 14 }}
+          retention-days: ${{ (inputs.focus == 'yue2-vulkan' || inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 14 }}
       - name: Finish checks
         if: ${{ !cancelled() }}
         shell: bash
@@ -677,9 +717,9 @@ jobs:
         with:
           name: validation-results
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
-          retention-days: ${{ (inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 14 }}
+          retention-days: ${{ (inputs.focus == 'yue2-vulkan' || inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 14 }}
       - uses: actions/cache/save@v4
-        if: ${{ always() && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'asr-music' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' && env.VALIDATION_GROUP != 'generic-gates' && env.VALIDATION_GROUP != 'workload-probes' && env.VALIDATION_GROUP != 'workload-refine' }}
+        if: ${{ always() && env.VALIDATION_GROUP != 'yue2-vulkan' && env.VALIDATION_GROUP != 'ggml-v1' && env.VALIDATION_GROUP != 'irodori-main' && env.VALIDATION_GROUP != 'tts-main' && env.VALIDATION_GROUP != 'asr-music' && env.VALIDATION_GROUP != 'ar-gemv' && env.VALIDATION_GROUP != 'breeze-ar' && env.VALIDATION_GROUP != 'rdna-depth' && env.VALIDATION_GROUP != 'tts-profile' && env.VALIDATION_GROUP != 'tts-kernels' && env.VALIDATION_GROUP != 'rms-probes' && env.VALIDATION_GROUP != 'generic-gates' && env.VALIDATION_GROUP != 'workload-probes' && env.VALIDATION_GROUP != 'workload-refine' }}
         continue-on-error: true
         with:
           path: ${{ env.CCACHE_DIR }}

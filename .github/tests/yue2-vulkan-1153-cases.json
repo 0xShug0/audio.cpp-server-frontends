@@ -1,0 +1,52 @@
+[
+  {
+    "id": 1,
+    "seed": 1755317411,
+    "style": "Instrumental progressive rock, melodic electric guitar, organ, powerful drums, dynamic evolving arrangement"
+  },
+  {
+    "id": 2,
+    "seed": 388003351,
+    "style": "Instrumental lo-fi hip hop, mellow electric piano, dusty drums, relaxed bass, soft vinyl texture"
+  },
+  {
+    "id": 3,
+    "seed": 1273794687,
+    "style": "Instrumental reggae, offbeat guitar, deep bass, organ, relaxed drums and percussion, sunny island atmosphere"
+  },
+  {
+    "id": 4,
+    "seed": 1279573142,
+    "style": "Instrumental solo piano, lyrical melody, expressive dynamics, flowing arpeggios, gentle romantic atmosphere"
+  },
+  {
+    "id": 5,
+    "seed": 2100058170,
+    "style": "Instrumental funk, syncopated electric bass, clean rhythm guitar, brass stabs, tight energetic drums"
+  },
+  {
+    "id": 6,
+    "seed": 765710641,
+    "style": "Instrumental Afrobeat, interlocking clean guitars, syncopated percussion, warm bass, lively horn section"
+  },
+  {
+    "id": 7,
+    "seed": 1617255751,
+    "style": "Instrumental ambient electronic music, evolving synth pads, delicate bells, spacious reverberation, a calm reflective mood"
+  },
+  {
+    "id": 8,
+    "seed": 1965106946,
+    "style": "Instrumental heavy metal, distorted electric guitars, powerful bass, double-kick drums, energetic melodic riffs"
+  },
+  {
+    "id": 9,
+    "seed": 684403694,
+    "style": "Instrumental bluegrass, banjo, fiddle, acoustic guitar and upright bass, brisk cheerful acoustic ensemble"
+  },
+  {
+    "id": 10,
+    "seed": 1131944383,
+    "style": "Instrumental cinematic orchestral music, sweeping strings, bold brass, timpani, an adventurous triumphant melody"
+  }
+]
