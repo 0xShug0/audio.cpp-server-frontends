@@ -17,9 +17,6 @@ def prepare(root):
     hashes = [r['sha256'] + '  ' + r['destination'] for r in models if r['sha256']]
     hashes.append(hashlib.sha256(requests.read_bytes()).hexdigest() + '  inputs/yue2-requests.json')
     (inputs / 'input-sha256.txt').write_text('\n'.join(hashes) + '\n')
-    results = root.parent / 'results'
-    for folder in ('wavs', 'timing'):
-        (results / folder).mkdir(parents=True, exist_ok=True)
     commands = []
     for case in cases:
         name = f'{case["id"]:02d}-seed-{case["seed"]}'
@@ -43,7 +40,8 @@ def prepare(root):
                       '-DENGINE_BUILD_WARMBENCH=OFF', '-DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF',
                       '-DAUDIOCPP_MODEL_SET=custom', '-DAUDIOCPP_MODELS=yue2',
                       '-DVulkan_LIBRARY=/lib/x86_64-linux-gnu/libvulkan.so.1'],
-                     ['cmake', '--build', 'build/debug', '--target', 'audiocpp_cli', '--parallel', '8']]}],
+                     ['cmake', '--build', 'build/debug', '--target', 'audiocpp_cli', '--parallel', '8'],
+                     ['cmake', '-E', 'make_directory', '../results/wavs', '../results/timing']]}],
         'suites': [{'id': 'correctness', 'build': 'vulkan', 'gpu': True, 'timeout_s': 900,
                     'cases': commands}],
         'health_check': {'argv': ['vulkaninfo', '--summary'], 'timeout_s': 20}}
