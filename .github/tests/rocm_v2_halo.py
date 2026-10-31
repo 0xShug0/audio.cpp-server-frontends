@@ -275,6 +275,67 @@ def tts_main_manifest(root):
     return plan
 
 
+def prepare_asr_music_inputs(root):
+    helpers = Path(__file__).resolve().parent
+    records = json.loads((helpers / 'asr-music-model-files.json').read_text())
+    requests = json.loads((helpers / 'asr-music-requests.json').read_text())
+    inputs = root / 'inputs'
+    hashes = [r['sha256'] + '  ' + r['destination'] for r in records if r['sha256']]
+    import io
+    for name, source, start, seconds in [
+            ('asr-warmup.wav', 'assets/asr_validation/librispeech/librispeech_test_clean_6930-75918-0000.wav', 0, None),
+            ('asr-short.wav', 'assets/asr_validation/librispeech/librispeech_test_clean_6930-75918-0001.wav', 0, None),
+            ('asr-long.wav', 'assets/resources/vibevoice_two_speaker_longform.wav', 20, 60)]:
+        blob = subprocess.check_output(['git', 'show', 'HEAD:' + source], cwd=root)
+        with wave.open(io.BytesIO(blob), 'rb') as original, wave.open(str(inputs / name), 'wb') as out:
+            out.setparams(original.getparams())
+            original.setpos(start * original.getframerate())
+            count = original.getnframes() if seconds is None else seconds * original.getframerate()
+            pcm = original.readframes(count)
+            if seconds is not None and len(pcm) != count * original.getnchannels() * original.getsampwidth():
+                raise ValueError('Source audio is shorter than requested: ' + source)
+            out.writeframes(pcm)
+        hashes.append(hashlib.sha256((inputs / name).read_bytes()).hexdigest() + '  inputs/' + name)
+    for family, sequence in requests.items():
+        path = inputs / (family + '-requests.json')
+        path.write_text(json.dumps(sequence, ensure_ascii=False, indent=2) + '\n')
+        hashes.append(hashlib.sha256(path.read_bytes()).hexdigest() + '  inputs/' + path.name)
+    for r in records:
+        (root / r['destination']).parent.mkdir(parents=True, exist_ok=True)
+    (inputs / 'model-provenance.json').write_text(json.dumps(records, indent=2) + '\n')
+    (inputs / 'input-sha256.txt').write_text('\n'.join(hashes) + '\n')
+
+
+def asr_music_manifest(root):
+    plan = qwen_manifest(root)
+    build = plan['builds'][1]
+    build['commands'][0] = ['-DAUDIOCPP_MODELS=yue2,qwen3_asr,nemotron_asr' if x.startswith('-DAUDIOCPP_MODELS=') else x
+                            for x in build['commands'][0]]
+    build['commands'].append(['cmake', '-E', 'make_directory', '../results/transcripts'])
+    suites = [dict(id='correctness', build='model', gpu=True, timeout_s=30,
+                   cases=[dict(id='health', argv=['build/debug/device-health', 'health'])])]
+    for family in ['yue2', 'qwen3_asr', 'nemotron_asr']:
+        for label in ['a1', 'b1', 'b2', 'a2']:
+            name = family + '-' + label
+            argv = ['build/debug/bin/audiocpp_cli', '--task', 'gen' if family == 'yue2' else 'asr',
+                    '--family', family, '--backend', 'hip', '--threads', '8',
+                    '--model', 'inputs/yue2' if family == 'yue2' else 'inputs/' + family + '.gguf',
+                    '--request-sequence', 'inputs/' + family + '-requests.json',
+                    '--out-dir', '../results/wavs/' + name, '--log', '--metrics']
+            if family != 'yue2':
+                argv += ['--text-out', '../results/transcripts/' + name + '.txt']
+            if label.startswith('b'):
+                argv += ['--backend-impl', 'gfx1151_v1']
+            suites.append(dict(id=name, build='model', gpu=True, timeout_s=900,
+                               cases=[dict(id='session', argv=argv)]))
+    suites.append(dict(id='framework', build='model', gpu=False, timeout_s=120, cases=[
+        dict(id='yue2-summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results',
+            '--summarize-models', '--families', 'yue2', '--baseline-implementation', 'default',
+            '--candidate-implementation', 'gfx1151_v1', '--request-set', 'asr-music'])]))
+    plan['suites'] = suites
+    return plan
+
+
 def tts_profile_manifest(root):
     plan = tts_main_manifest(root)
     build = plan['builds'][1]
@@ -757,7 +818,7 @@ if __name__ == '__main__':
     parser.add_argument('--baseline-implementation',choices=['default','halo','gfx1151_v1'],default='halo')
     parser.add_argument('--families', nargs='+')
     parser.add_argument('--candidate-implementation', default='halo')
-    parser.add_argument('--request-set', choices=['models', 'tts-main'], default='models')
+    parser.add_argument('--request-set', choices=['models', 'tts-main', 'asr-music'], default='models')
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--operators', action='store_true')
     actions.add_argument('--followup', action='store_true')
@@ -769,6 +830,7 @@ if __name__ == '__main__':
     actions.add_argument('--ar-gemv', action='store_true')
     actions.add_argument('--irodori-main', action='store_true')
     actions.add_argument('--tts-main', action='store_true')
+    actions.add_argument('--asr-music', action='store_true')
     actions.add_argument('--tts-profile', action='store_true')
     actions.add_argument('--tts-kernels', action='store_true')
     actions.add_argument('--rms-probes', action='store_true')
@@ -789,7 +851,8 @@ if __name__ == '__main__':
         summarize_operators(args.root)
     elif args.summarize_models:
         summarize_models(args.root,args.baseline_implementation,args.families,args.candidate_implementation,
-                         tts_requests() if args.request_set == 'tts-main' else None)
+                         tts_requests() if args.request_set == 'tts-main' else
+                         json.loads((Path(__file__).resolve().parent / 'asr-music-requests.json').read_text()) if args.request_set == 'asr-music' else None)
     else:
-        plan = generic_gates_manifest(args.root) if args.generic_gates else rms_probes_manifest(args.root) if args.rms_probes else tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
+        plan = asr_music_manifest(args.root) if args.asr_music else generic_gates_manifest(args.root) if args.generic_gates else rms_probes_manifest(args.root) if args.rms_probes else tts_kernels_manifest(args.root) if args.tts_kernels else tts_profile_manifest(args.root) if args.tts_profile else rdna_depth_manifest(args.root) if args.rdna_depth else breeze_ar_manifest(args.root) if args.breeze_ar else ar_gemv_manifest(args.root) if args.ar_gemv else tts_main_manifest(args.root) if args.tts_main else irodori_main_manifest(args.root) if args.irodori_main else ggml_v1_manifest(args.root) if args.ggml_v1 else typed_manifest(args.root) if args.typed else hip_baseline_manifest(args.root) if args.hip_baseline else operator_manifest(args.root) if args.operators else followup_manifest(args.root) if args.followup else model_manifest(args.root) if args.models else manifest(args.root)
         (args.root / 'campaign.json').write_text(json.dumps(plan, indent=2) + '\n')

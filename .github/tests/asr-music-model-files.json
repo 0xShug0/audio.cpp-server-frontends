@@ -1,0 +1,78 @@
+[
+  {
+    "family": "yue2",
+    "repo": "audio-cpp/Yue2-3B-GGUF",
+    "revision": "cca74d8980c00f30ab8d52248a367c01ad633ec2",
+    "file": "yue2-3b-q8_0.gguf",
+    "size": 4264195616,
+    "sha256": "52be345b5155bf9ef0b2411e7df8d1d2b8e13b6d977a2f70c35612ec69b1f591",
+    "destination": "inputs/yue2/yue2-3b-q8_0.gguf"
+  },
+  {
+    "repo": "audio-cpp/Yue2-3B-GGUF",
+    "revision": "cca74d8980c00f30ab8d52248a367c01ad633ec2",
+    "file": "yue2-vae-f16.gguf",
+    "size": 265218656,
+    "sha256": "d4f4a05d8f291ae820cd1e43609da3fa91b56465810091a2b08c3350b751719d",
+    "destination": "inputs/yue2/yue2-vae-f16.gguf",
+    "family": "yue2"
+  },
+  {
+    "repo": "audio-cpp/Yue2-3B-GGUF",
+    "revision": "cca74d8980c00f30ab8d52248a367c01ad633ec2",
+    "file": "sidecars/yue2-model-config.json",
+    "size": 959,
+    "sha256": null,
+    "destination": "inputs/yue2/sidecars/yue2-model-config.json",
+    "blob_id": "9584e50ba9d6e487690544e14dd7555edbe27973",
+    "family": "yue2"
+  },
+  {
+    "repo": "audio-cpp/Yue2-3B-GGUF",
+    "revision": "cca74d8980c00f30ab8d52248a367c01ad633ec2",
+    "file": "sidecars/yue2-generation-config.json",
+    "size": 466,
+    "sha256": null,
+    "destination": "inputs/yue2/sidecars/yue2-generation-config.json",
+    "blob_id": "f8214009f5bb5425319e4519b12e4853ad72acf3",
+    "family": "yue2"
+  },
+  {
+    "repo": "audio-cpp/Yue2-3B-GGUF",
+    "revision": "cca74d8980c00f30ab8d52248a367c01ad633ec2",
+    "file": "sidecars/yue2-qwen.tiktoken",
+    "size": 2561218,
+    "sha256": null,
+    "destination": "inputs/yue2/sidecars/yue2-qwen.tiktoken",
+    "blob_id": "9b9b0e0416d84d7c88333eb261c77e5fe2d7f7be",
+    "family": "yue2"
+  },
+  {
+    "repo": "audio-cpp/Yue2-3B-GGUF",
+    "revision": "cca74d8980c00f30ab8d52248a367c01ad633ec2",
+    "file": "sidecars/yue2-vae-config.json",
+    "size": 1378,
+    "sha256": null,
+    "destination": "inputs/yue2/sidecars/yue2-vae-config.json",
+    "blob_id": "f68832bef1b99f53dd70460f6b0d336971a664b8",
+    "family": "yue2"
+  },
+  {
+    "family": "qwen3_asr",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "874fcb41ececda20bcbc0782d6b4ea7f7d069ea8",
+    "file": "Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf",
+    "size": 2473017600,
+    "sha256": "3bc2462eca3a3a8f56abcd860d0943ffdc0546547dde55a9d08589607d6f3936",
+    "destination": "inputs/qwen3_asr.gguf"
+  },
+  {
+    "family": "nemotron_asr",
+    "repo": "audio-cpp/audio.cpp-gguf",
+    "revision": "874fcb41ececda20bcbc0782d6b4ea7f7d069ea8",
+    "file": "Nemotron-3.5-ASR-Streaming-0.6B-GGUF/nemotron-3.5-asr-streaming-0.6b-q8_0.gguf",
+    "size": 930625888,
+    "sha256": "c58b62c1bdd6c5d7b14b08126c5bd16c1289fee6e0d6ac0761dbd3aa6d714935",
+    "destination": "inputs/nemotron_asr.gguf"
+  }
+]

@@ -1,0 +1,84 @@
+{
+  "yue2": [
+    {
+      "id": "warmup",
+      "text": "[Verse]\nThe morning sun is shining.\nI hear a song outside.",
+      "seed": 831001,
+      "options": {
+        "style": "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM",
+        "cot": "full",
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0
+      }
+    },
+    {
+      "id": "cfg_off",
+      "text": "[Verse]\nNeon fades along the lane\nFootsteps keep the time of rain\nFold the night and leave it here\nMorning has a sky to clear\n\n[Chorus]\nLet the day come into view\nEvery road begins with you\nHold a little room for light\nWe will sing beyond the night",
+      "seed": 831001,
+      "options": {
+        "style": "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM",
+        "cot": "full",
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0
+      }
+    },
+    {
+      "id": "cfg_on",
+      "text": "[Verse]\nNeon fades along the lane\nFootsteps keep the time of rain\nFold the night and leave it here\nMorning has a sky to clear\n\n[Chorus]\nLet the day come into view\nEvery road begins with you\nHold a little room for light\nWe will sing beyond the night",
+      "seed": 831001,
+      "options": {
+        "style": "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM",
+        "cot": "full",
+        "num_inference_steps": 8,
+        "guidance_scale": 2.0
+      }
+    },
+    {
+      "id": "cfg_off_repeat",
+      "text": "[Verse]\nNeon fades along the lane\nFootsteps keep the time of rain\nFold the night and leave it here\nMorning has a sky to clear\n\n[Chorus]\nLet the day come into view\nEvery road begins with you\nHold a little room for light\nWe will sing beyond the night",
+      "seed": 831001,
+      "options": {
+        "style": "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM",
+        "cot": "full",
+        "num_inference_steps": 8,
+        "guidance_scale": 1.0
+      }
+    }
+  ],
+  "qwen3_asr": [
+    {
+      "id": "warmup",
+      "audio": "asr-warmup.wav"
+    },
+    {
+      "id": "short",
+      "audio": "asr-short.wav"
+    },
+    {
+      "id": "long",
+      "audio": "asr-long.wav"
+    },
+    {
+      "id": "short_repeat",
+      "audio": "asr-short.wav"
+    }
+  ],
+  "nemotron_asr": [
+    {
+      "id": "warmup",
+      "audio": "asr-warmup.wav"
+    },
+    {
+      "id": "short",
+      "audio": "asr-short.wav"
+    },
+    {
+      "id": "long",
+      "audio": "asr-long.wav"
+    },
+    {
+      "id": "short_repeat",
+      "audio": "asr-short.wav"
+    }
+  ]
+}
