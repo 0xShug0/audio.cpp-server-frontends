@@ -1,0 +1,280 @@
+diff --git a/external/ggml/src/ggml-cuda/common.cuh b/external/ggml/src/ggml-cuda/common.cuh
+index 7114e199..2eb057aa 100644
+--- a/external/ggml/src/ggml-cuda/common.cuh
++++ b/external/ggml/src/ggml-cuda/common.cuh
+@@ -1380,6 +1380,7 @@ struct ggml_cuda_stream_context {
+ 
+ #ifdef GGML_USE_HIP
+ struct ggml_hip_impl;
++struct ggml_hip_q8_cache;
+ #endif
+ 
+ struct ggml_backend_cuda_context {
+@@ -1388,6 +1389,7 @@ struct ggml_backend_cuda_context {
+     cudaEvent_t copy_event = nullptr;
+ #ifdef GGML_USE_HIP
+     const ggml_hip_impl * impl = nullptr;
++    ggml_hip_q8_cache * q8_cache = nullptr;
+ #endif
+ 
+     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 2f4fe797..415e064a 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -86,6 +86,9 @@
+ #include <map>
+ #include <memory>
+ #include <mutex>
++#ifdef GGML_USE_HIP
++#include <optional>
++#endif
+ #include <cstdarg>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -4821,6 +4824,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+     return 0;
+ }
+ 
++template<bool share_q8 = false>
+ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
+     bool graph_evaluated_or_captured = false;
+ 
+@@ -4919,6 +4923,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                 stream_ctx.concurrent_events.clear();
+             }
+ 
++#ifdef GGML_USE_HIP
++            std::optional<ggml_hip_q8_cache> q8_cache;
++            if constexpr (share_q8) {
++                if (!should_launch_concurrent_events) q8_cache.emplace(*cuda_ctx);
++            }
++#endif
++
+             for (int i = 0; i < cgraph->n_nodes; i++) {
+                 ggml_tensor * node = cgraph->nodes[i];
+                 if (is_concurrent_event_active) {
+@@ -4967,9 +4978,22 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                     continue;
+                 }
+ 
++#ifdef GGML_USE_HIP
++                if constexpr (share_q8) {
++                    // Internal fallback scratch is not graph-owned and cannot be retained.
++                    if (q8_cache) q8_cache->input = node->src[1];
++                }
++#endif
+                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
+ 
+                 if (nodes_to_skip != 0) {
++#ifdef GGML_USE_HIP
++                    if constexpr (share_q8) {
++                        if (q8_cache) {
++                            for (int j = i; j <= i + nodes_to_skip; ++j) q8_cache->invalidate(cgraph->nodes[j]);
++                        }
++                    }
++#endif
+                     i += nodes_to_skip;
+                     continue;
+                 }
+@@ -4991,6 +5015,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
+                 }
+                 GGML_ASSERT(ok);
++#ifdef GGML_USE_HIP
++                if constexpr (share_q8) {
++                    if (q8_cache) q8_cache->invalidate(node);
++                }
++#endif
+ 
+                 if (!is_concurrent_event_active) {
+                     try_launch_concurrent_event(node);
+@@ -5111,7 +5140,14 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+         CUDA_CHECK(cudaStreamBeginCapture(cuda_ctx->stream(), cudaStreamCaptureModeRelaxed));
+     }
+ 
+-    ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
++#ifdef GGML_USE_HIP
++    if (cuda_ctx->impl) {
++        ggml_cuda_graph_evaluate_and_capture<true>(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
++    } else
++#endif
++    {
++        ggml_cuda_graph_evaluate_and_capture<false>(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
++    }
+ 
+     return GGML_STATUS_SUCCESS;
+ }
+diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
+index d629b805..25e0f190 100644
+--- a/external/ggml/src/ggml-cuda/mmvq.cu
++++ b/external/ggml/src/ggml-cuda/mmvq.cu
+@@ -1111,6 +1111,29 @@ void ggml_cuda_mul_mat_vec_q(
+     }
+ 
+     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
++#ifdef GGML_USE_HIP
++    const size_t quant_bytes = ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1;
++    ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool());
++    char * quant_data;
++    bool prepared = false;
++    auto * cache = src0->type == GGML_TYPE_Q8_0 && ctx.q8_cache && ctx.q8_cache->input == src1
++        ? ctx.q8_cache : nullptr;
++    if (cache) {
++        prepared = cache->matches(src1);
++        cache->allocate(quant_bytes);
++        quant_data = cache->data;
++    } else {
++        quant_data = src1_q8_1.alloc(quant_bytes);
++    }
++    if (!prepared) {
++        const int64_t s11 = src1->nb[1] / ts_src1;
++        const int64_t s12 = src1->nb[2] / ts_src1;
++        const int64_t s13 = src1->nb[3] / ts_src1;
++        quantize_row_q8_1_cuda(src1_d, nullptr, quant_data, src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
++        if (cache) cache->source = *src1;
++    }
++
++#else
+     ggml_cuda_pool_alloc<char> src1_q8_1(ctx.pool(), ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1);
+     {
+         const int64_t s11 = src1->nb[1] / ts_src1;
+@@ -1119,6 +1142,9 @@ void ggml_cuda_mul_mat_vec_q(
+         quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+     }
+ 
++    char * quant_data = src1_q8_1.get();
++#endif
++
+     const int64_t s01 = src0->nb[1] / ts_src0;
+     const int64_t s11 = ne10_padded / QK8_1;
+     const int64_t s1  =  dst->nb[1] / ts_dst;
+@@ -1142,7 +1168,7 @@ void ggml_cuda_mul_mat_vec_q(
+     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
+ 
+     mul_mat_vec_q_switch_type(
+-        src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
++        src0->data, src0->type, quant_data, ids_d, fusion_local, dst_d, ne00,
+         ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
+         ne02, nchannels_y, nchannels_dst, s02, stride_channel_y, stride_channel_dst,
+         ne03,              ne3,           s03, s13,              s3,               ids_stride, stream);
+diff --git a/external/ggml/src/ggml-cuda/mmvq.cuh b/external/ggml/src/ggml-cuda/mmvq.cuh
+index e6071e41..748311ad 100644
+--- a/external/ggml/src/ggml-cuda/mmvq.cuh
++++ b/external/ggml/src/ggml-cuda/mmvq.cuh
+@@ -2,6 +2,54 @@
+ 
+ #define MMVQ_MAX_BATCH_SIZE 8 // Max. batch size for which to use MMVQ kernels.
+ 
++#ifdef GGML_USE_HIP
++// Prepared activations are valid only within one serial graph evaluation.
++struct ggml_hip_q8_cache {
++    ggml_backend_cuda_context & ctx;
++    ggml_tensor source = {};
++    const ggml_tensor * input = nullptr;
++    char * data = nullptr;
++    size_t size = 0;
++
++    explicit ggml_hip_q8_cache(ggml_backend_cuda_context & ctx) : ctx(ctx) {
++        GGML_ASSERT(ctx.q8_cache == nullptr);
++        ctx.q8_cache = this;
++    }
++
++    ggml_hip_q8_cache(const ggml_hip_q8_cache &) = delete;
++    ggml_hip_q8_cache & operator=(const ggml_hip_q8_cache &) = delete;
++
++    ~ggml_hip_q8_cache() {
++        ctx.q8_cache = nullptr;
++        if (data) ctx.pool().free(data, size);
++    }
++
++    bool matches(const ggml_tensor * input) const {
++        return source.data == input->data && source.type == input->type &&
++               ggml_are_same_shape(&source, input) && ggml_are_same_stride(&source, input);
++    }
++
++    void allocate(size_t bytes) {
++        if (bytes > size) {
++            if (data) ctx.pool().free(data, size);
++            data = static_cast<char *>(ctx.pool().alloc(bytes, &size));
++        }
++    }
++
++    void invalidate(const ggml_tensor * output) {
++        if (!source.data || output->op == GGML_OP_NONE || output->op == GGML_OP_VIEW ||
++            output->op == GGML_OP_RESHAPE || output->op == GGML_OP_TRANSPOSE || output->op == GGML_OP_PERMUTE) {
++            return;
++        }
++        const auto src = reinterpret_cast<uintptr_t>(source.data);
++        const auto dst = reinterpret_cast<uintptr_t>(output->data);
++        if (dst < src ? src - dst < ggml_nbytes(output) : dst - src < ggml_nbytes(&source)) {
++            source.data = nullptr;
++        }
++    }
++};
++#endif
++
+ // Returns the maximum batch size for which MMVQ should be used for MUL_MAT_ID,
+ // based on the quantization type and GPU architecture (compute capability).
+ int get_mmvq_mmid_max_batch(ggml_type type, int cc);
+diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
+index 3974a065..971c1be9 100644
+--- a/external/ggml/tests/test-backend-ops.cpp
++++ b/external/ggml/tests/test-backend-ops.cpp
+@@ -1540,6 +1540,8 @@ struct test_case {
+             n_runs = (int)std::min<int64_t>(ggml_graph_size(gf) - ggml_graph_n_nodes(gf), target_size / op_size(out)) + 1;
+         }
+ 
++        if (run_whole_graph()) n_runs = 1;
++
+         // duplicate the op
+         for (int i = 1; i < n_runs; i++) {
+             ggml_graph_add_node(gf, out);
+@@ -5743,6 +5745,34 @@ struct test_topk_moe : public test_case {
+     }
+ };
+ 
++struct test_mul_mat_shared_input : public test_case {
++    const int64_t m, n, k;
++    const bool mutate, strided;
++
++    test_mul_mat_shared_input(int64_t m, int64_t n, int64_t k, bool mutate = false, bool strided = false)
++        : m(m), n(n), k(k), mutate(mutate), strided(strided) {}
++
++    std::string op_desc(ggml_tensor *) override { return "MUL_MAT_SHARED"; }
++    std::string vars() override { return VARS_TO_STR5(m, n, k, mutate, strided); }
++    bool run_whole_graph() override { return true; }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        auto * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k + (strided ? 32 : 0), n);
++        auto * first = strided ? ggml_view_2d(ctx, input, k, n, input->nb[1], 0) : input;
++        auto * a = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, k, m);
++        auto * out = ggml_mul_mat(ctx, a, first);
++        auto * next = mutate ? ggml_scale_inplace(ctx, input, 0.5f) : input;
++        // Separate tensor headers exercise equivalent module-created views.
++        next = ggml_view_2d(ctx, next, k, n, next->nb[1], 0);
++        auto * b = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, k, m + 1);
++        auto * second = ggml_mul_mat(ctx, b, next);
++        out = ggml_concat(ctx, out, second, 0);
++        auto * c = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, k, m + 3);
++        auto * third = ggml_mul_mat(ctx, c, next);
++        return ggml_concat(ctx, out, third, 0);
++    }
++};
++
+ struct test_mul_mat_vec_fusion : public test_case {
+     const ggml_type type;
+     const ggml_glu_op glu_op;
+@@ -9509,6 +9539,12 @@ struct test_gfx1151_v1_mul_mat_precision : public test_mul_mat {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_gfx1151_v1() {
+     std::vector<std::unique_ptr<test_case>> cases;
+     const std::array<int64_t, 2> one = {1, 1};
++    for (const auto & shape : std::vector<std::array<int64_t, 3>>{
++            {31, 1, 96}, {257, 2, 288}, {513, 3, 1024}, {127, 6, 768},
++            {2048, 1, 2048}, {6144, 2, 2048}, {2048, 1, 6144}}) {
++        cases.emplace_back(new test_mul_mat_shared_input(shape[0], shape[1], shape[2]));
++        cases.emplace_back(new test_mul_mat_shared_input(shape[0], shape[1], shape[2], true, true));
++    }
+     for (bool strict : {false, true}) {
+         for (const auto & shape : std::vector<std::array<int64_t, 3>>{
+                 {72, 72, 128}, {128, 192, 128}, {384, 640, 160},

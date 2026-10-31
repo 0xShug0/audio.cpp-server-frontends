@@ -277,7 +277,8 @@ def tts_main_manifest(root):
 
 def prepare_asr_music_inputs(root):
     helpers = Path(__file__).resolve().parent
-    records = json.loads((helpers / 'asr-music-model-files.json').read_text())
+    records = [r for r in json.loads((helpers / 'asr-music-model-files.json').read_text())
+               if r['family'] in ['yue2', 'qwen3_asr']]
     requests = json.loads((helpers / 'asr-music-requests.json').read_text())
     inputs = root / 'inputs'
     hashes = [r['sha256'] + '  ' + r['destination'] for r in records if r['sha256']]
@@ -297,6 +298,8 @@ def prepare_asr_music_inputs(root):
             out.writeframes(pcm)
         hashes.append(hashlib.sha256((inputs / name).read_bytes()).hexdigest() + '  inputs/' + name)
     for family, sequence in requests.items():
+        if family not in ['yue2', 'qwen3_asr']:
+            continue
         path = inputs / (family + '-requests.json')
         path.write_text(json.dumps(sequence, ensure_ascii=False, indent=2) + '\n')
         hashes.append(hashlib.sha256(path.read_bytes()).hexdigest() + '  inputs/' + path.name)
@@ -307,30 +310,43 @@ def prepare_asr_music_inputs(root):
 
 
 def asr_music_manifest(root):
+    import copy
     plan = qwen_manifest(root)
     build = plan['builds'][1]
-    build['commands'][0] = ['-DAUDIOCPP_MODELS=yue2,qwen3_asr,nemotron_asr' if x.startswith('-DAUDIOCPP_MODELS=') else x
+    build['commands'][0] = ['-DAUDIOCPP_MODELS=yue2,qwen3_asr' if x.startswith('-DAUDIOCPP_MODELS=') else x
                             for x in build['commands'][0]]
+    build['commands'][1].insert(build['commands'][1].index('--parallel'), 'test-backend-ops')
+    baseline = copy.deepcopy(build)
+    baseline.update(id='baseline', cwd='../source-baseline')
+    plan['builds'].insert(1, baseline)
     build['commands'].append(['cmake', '-E', 'make_directory', '../results/transcripts'])
-    suites = [dict(id='correctness', build='model', gpu=True, timeout_s=30,
-                   cases=[dict(id='health', argv=['build/debug/device-health', 'health'])])]
-    for family in ['yue2', 'qwen3_asr', 'nemotron_asr']:
+    suites = [dict(id='correctness', build='model', gpu=True, timeout_s=120, cases=[
+        dict(id='ggml-' + impl, argv=['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
+             '--suite', 'gfx1151_v1', '--backend-impl', impl]) for impl in ['default', 'gfx1151_v1']])]
+    timed = []
+    for label in ['a1', 'b1', 'b2', 'a2']:
+        candidate = label.startswith('b')
+        binary = ('../source-baseline/' if not candidate else '') + 'build/debug/bin/test-backend-ops'
+        timed.append(dict(id='shared-' + label, argv=[binary, 'perf', '-b', 'ROCm0',
+            '--suite', 'gfx1151_v1', '--backend-impl', 'gfx1151_v1', '-o', 'MUL_MAT_SHARED', '-p', 'mutate=0']))
+    suites.append(dict(id='shared-timing', build='model', gpu=True, timeout_s=120, cases=timed))
+    for family in ['yue2', 'qwen3_asr']:
         for label in ['a1', 'b1', 'b2', 'a2']:
             name = family + '-' + label
-            argv = ['build/debug/bin/audiocpp_cli', '--task', 'gen' if family == 'yue2' else 'asr',
-                    '--family', family, '--backend', 'hip', '--threads', '8',
+            candidate = label.startswith('b')
+            binary = ('../source-baseline/' if not candidate else '') + 'build/debug/bin/audiocpp_cli'
+            argv = [binary, '--task', 'gen' if family == 'yue2' else 'asr',
+                    '--family', family, '--backend', 'hip', '--backend-impl', 'gfx1151_v1', '--threads', '8',
                     '--model', 'inputs/yue2' if family == 'yue2' else 'inputs/' + family + '.gguf',
                     '--request-sequence', 'inputs/' + family + '-requests.json',
                     '--out-dir', '../results/wavs/' + name, '--log', '--metrics']
             if family != 'yue2':
                 argv += ['--text-out', '../results/transcripts/' + name + '.txt']
-            if label.startswith('b'):
-                argv += ['--backend-impl', 'gfx1151_v1']
-            suites.append(dict(id=name, build='model', gpu=True, timeout_s=900,
+            suites.append(dict(id=name, build='model' if candidate else 'baseline', gpu=True, timeout_s=900,
                                cases=[dict(id='session', argv=argv)]))
     suites.append(dict(id='framework', build='model', gpu=False, timeout_s=120, cases=[
         dict(id='yue2-summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results',
-            '--summarize-models', '--families', 'yue2', '--baseline-implementation', 'default',
+            '--summarize-models', '--families', 'yue2', '--baseline-implementation', 'gfx1151_v1',
             '--candidate-implementation', 'gfx1151_v1', '--request-set', 'asr-music'])]))
     plan['suites'] = suites
     return plan

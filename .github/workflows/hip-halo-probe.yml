@@ -107,6 +107,19 @@ jobs:
             git -C source sparse-checkout set include src app docs model_specs tools/cmake tests/perf webui/native/demo_voices external/ggml external/cJSON external/cpp-httplib external/libyaml external/llama_tokenizer external/sentencepiece external/utf8proc
             git -C source checkout --detach FETCH_HEAD
             git -C source rev-parse HEAD > source/source-commit.txt
+            if [[ "$VALIDATION_GROUP" == asr-music ]]; then
+              cp -a source source-baseline
+              git -C source apply --check ../.github/tests/asr-q8-shared.patch
+              git -C source apply ../.github/tests/asr-q8-shared.patch
+              cp source/external/ggml/tests/test-backend-ops.cpp source-baseline/external/ggml/tests/test-backend-ops.cpp
+              for tree in source source-baseline; do
+                cat >> "$tree/CMakeLists.txt" <<'CMAKE'
+          add_executable(test-backend-ops external/ggml/tests/test-backend-ops.cpp)
+          target_link_libraries(test-backend-ops PRIVATE ggml Threads::Threads)
+          CMAKE
+              done
+              ln -s ../source/inputs source-baseline/inputs
+            fi
             if [[ "$VALIDATION_GROUP" == tts-main ]]; then
               cat >> source/CMakeLists.txt <<'CMAKE'
           add_executable(test-backend-ops external/ggml/tests/test-backend-ops.cpp)
@@ -203,7 +216,7 @@ jobs:
           (root / 'patch-sha256.txt').write_text(manifest)
           PYTHON
             archive_roots=(source)
-            if [[ "$VALIDATION_GROUP" == tts-kernels ]]; then
+            if [[ "$VALIDATION_GROUP" == asr-music || "$VALIDATION_GROUP" == tts-kernels ]]; then
               python3 -c 'import hashlib, subprocess; from pathlib import Path; r=Path("source-baseline"); names=subprocess.check_output(["git", "ls-files", "-z"], cwd=r).decode().split("\0"); lines=[hashlib.sha256((r/n).read_bytes()).hexdigest()+"  "+n for n in names if n and (r/n).is_file()]; (r/"baseline-source-sha256.txt").write_text("\n".join(lines)+"\n")'
               archive_roots+=(source-baseline)
             fi
@@ -521,7 +534,7 @@ jobs:
             (cd source && sha256sum --check main-source-sha256.txt) > results/source-integrity.log
             cp source/main-source-sha256.txt results/
           fi
-          if [[ "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-kernels ]]; then
+          if [[ "$VALIDATION_GROUP" == asr-music || "$VALIDATION_GROUP" == breeze-ar || "$VALIDATION_GROUP" == tts-kernels ]]; then
             (cd source-baseline && sha256sum --check baseline-source-sha256.txt) > results/baseline-source-integrity.log
             cp source-baseline/source-commit.txt results/baseline-commit.txt
           fi
