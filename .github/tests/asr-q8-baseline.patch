@@ -1,0 +1,71 @@
+diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
+index 3974a065..2f8bac75 100644
+--- a/external/ggml/tests/test-backend-ops.cpp
++++ b/external/ggml/tests/test-backend-ops.cpp
+@@ -1540,6 +1540,8 @@ struct test_case {
+             n_runs = (int)std::min<int64_t>(ggml_graph_size(gf) - ggml_graph_n_nodes(gf), target_size / op_size(out)) + 1;
+         }
+ 
++        if (run_whole_graph()) n_runs = 1;
++
+         // duplicate the op
+         for (int i = 1; i < n_runs; i++) {
+             ggml_graph_add_node(gf, out);
+@@ -5743,6 +5745,37 @@ struct test_topk_moe : public test_case {
+     }
+ };
+ 
++struct test_mul_mat_exact_swiglu : public test_case {
++    const int64_t m, n, k;
++    const bool metadata, extra_consumer, separate_input, offset;
++
++    test_mul_mat_exact_swiglu(int64_t m, int64_t n, int64_t k, bool metadata = true,
++                             bool extra_consumer = false, bool separate_input = false, bool offset = false)
++        : m(m), n(n), k(k), metadata(metadata), extra_consumer(extra_consumer), separate_input(separate_input), offset(offset) {}
++
++    std::string op_desc(ggml_tensor *) override { return "MUL_MAT_EXACT_SWIGLU"; }
++    std::string vars() override { return VARS_TO_STR7(m, n, k, metadata, extra_consumer, separate_input, offset); }
++    bool run_whole_graph() override { return true; }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        auto * input = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, 1, n);
++        if (offset) {
++            input = ggml_view_3d(ctx, ggml_new_tensor_1d(ctx, GGML_TYPE_F32, k * n + 32),
++                                 k, 1, n, k * sizeof(float), k * sizeof(float), 32 * sizeof(float));
++        }
++        auto * gate_input = metadata ? ggml_reshape_2d(ctx, input, k, n) : input;
++        auto * gate = ggml_mul_mat(ctx, ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, k, m), gate_input);
++        if (metadata) gate = ggml_reshape_3d(ctx, gate, m, 1, n);
++        auto * silu = ggml_silu(ctx, gate);
++        auto * up_input = separate_input ? ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, 1, n) : input;
++        if (metadata) up_input = ggml_reshape_2d(ctx, up_input, k, n);
++        auto * up = ggml_mul_mat(ctx, ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, k, m), up_input);
++        if (metadata) up = ggml_reshape_3d(ctx, up, m, 1, n);
++        auto * out = ggml_mul(ctx, silu, up);
++        return extra_consumer ? ggml_add(ctx, out, gate) : out;
++    }
++};
++
+ struct test_mul_mat_vec_fusion : public test_case {
+     const ggml_type type;
+     const ggml_glu_op glu_op;
+@@ -9509,6 +9542,19 @@ struct test_gfx1151_v1_mul_mat_precision : public test_mul_mat {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_gfx1151_v1() {
+     std::vector<std::unique_ptr<test_case>> cases;
+     const std::array<int64_t, 2> one = {1, 1};
++    for (const auto & shape : std::vector<std::array<int64_t, 3>>{
++            {31, 1, 96}, {257, 2, 288}, {513, 3, 1024}, {127, 6, 768},
++            {6144, 1, 2048}, {6144, 2, 2048}}) {
++        for (bool metadata : {false, true}) {
++            cases.emplace_back(new test_mul_mat_exact_swiglu(shape[0], shape[1], shape[2], metadata));
++        }
++    }
++    for (int64_t columns : {4, 5, 7, 8}) {
++        cases.emplace_back(new test_mul_mat_exact_swiglu(257, columns, 288));
++    }
++    cases.emplace_back(new test_mul_mat_exact_swiglu(257, 2, 288, true, false, false, true));
++    cases.emplace_back(new test_mul_mat_exact_swiglu(257, 2, 288, true, true));
++    cases.emplace_back(new test_mul_mat_exact_swiglu(257, 2, 288, true, false, true));
+     for (bool strict : {false, true}) {
+         for (const auto & shape : std::vector<std::array<int64_t, 3>>{
+                 {72, 72, 128}, {128, 192, 128}, {384, 640, 160},

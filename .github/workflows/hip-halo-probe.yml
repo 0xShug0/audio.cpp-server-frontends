@@ -9,12 +9,6 @@ on:
         type: choice
         options: [asr-music, complete, sgemm, precision, submission, matrix, fused, dispatch, split, loads, integrated, refine, qwen, halo, halo-ops, halo-final, hip-baseline, halo-types, ggml-v1, irodori-main, tts-main, ar-gemv, breeze-ar, rdna-depth, tts-profile, tts-kernels, rms-probes, generic-gates, workload-probes, workload-refine]
         default: ggml-v1
-  push:
-    branches: [experiment/rocm-v2-probes]
-    paths:
-      - .github/workflows/hip-halo-probe.yml
-      - .github/tests/rocm_v2_*
-      - .github/tests/rocm-v2-*
 
 permissions:
   contents: read
@@ -109,6 +103,8 @@ jobs:
             git -C source rev-parse HEAD > source/source-commit.txt
             if [[ "$VALIDATION_GROUP" == asr-music ]]; then
               cp -a source source-baseline
+              git -C source-baseline apply --check ../.github/tests/asr-q8-baseline.patch
+              git -C source-baseline apply ../.github/tests/asr-q8-baseline.patch
               git -C source apply --check ../.github/tests/asr-q8-shared.patch
               git -C source apply ../.github/tests/asr-q8-shared.patch
               cp source/external/ggml/tests/test-backend-ops.cpp source-baseline/external/ggml/tests/test-backend-ops.cpp
@@ -649,7 +645,9 @@ jobs:
         if: always()
         with:
           name: validation-additional
-          path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
+          path: |
+            ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
+            !${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/wavs/
           retention-days: ${{ (inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 14 }}
       - name: Finish checks
         if: ${{ !cancelled() }}

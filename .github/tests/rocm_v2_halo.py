@@ -328,7 +328,8 @@ def asr_music_manifest(root):
         candidate = label.startswith('b')
         binary = ('../source-baseline/' if not candidate else '') + 'build/debug/bin/test-backend-ops'
         timed.append(dict(id='shared-' + label, argv=[binary, 'perf', '-b', 'ROCm0',
-            '--suite', 'gfx1151_v1', '--backend-impl', 'gfx1151_v1', '-o', 'MUL_MAT_SHARED', '-p', 'mutate=0']))
+            '--suite', 'gfx1151_v1', '--backend-impl', 'gfx1151_v1', '-o', 'MUL_MAT_EXACT_SWIGLU',
+            '-p', 'metadata=1,extra_consumer=0,separate_input=0']))
     suites.append(dict(id='shared-timing', build='model', gpu=True, timeout_s=120, cases=timed))
     for family in ['yue2', 'qwen3_asr']:
         for label in ['a1', 'b1', 'b2', 'a2']:
