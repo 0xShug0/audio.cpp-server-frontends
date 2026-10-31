@@ -1,5 +1,5 @@
 diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
-index 2f4fe797..51522c61 100644
+index 2f4fe797..5a2f50b1 100644
 --- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -2717,7 +2717,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_f(const ggml_tensor * tensor) {
@@ -110,11 +110,29 @@ index 2f4fe797..51522c61 100644
      bool fused_mul_mat_vec = false;
      int  fused_node_count  = 0;
  
+@@ -5696,6 +5772,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
+     }
+     static const ggml_hip_impl gfx1151_v1 = {
+         "gfx1151_v1", ggml_hip_gfx1151_v1_mul_mat, ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy,
++        ggml_hip_gfx1151_v1_mmvq,
+     };
+     ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
+     if (backend) {
 diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
-index d629b805..98eb1d49 100644
+index d629b805..40fcf5c6 100644
 --- a/external/ggml/src/ggml-cuda/mmvq.cu
 +++ b/external/ggml/src/ggml-cuda/mmvq.cu
-@@ -686,7 +686,11 @@ static void mul_mat_vec_q_switch_fusion(
+@@ -4,6 +4,9 @@
+ #include "vecdotq.cuh"
+ 
+ #include <cstdint>
++#ifdef GGML_USE_HIP
++#include "../ggml-hip/impl.cuh"
++#endif
+ 
+ typedef float (*vec_dot_q_cuda_t)(const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs);
+ 
+@@ -686,7 +689,11 @@ static void mul_mat_vec_q_switch_fusion(
          const uint32_t ids_stride, cudaStream_t stream) {
  
      const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
@@ -127,7 +145,7 @@ index d629b805..98eb1d49 100644
          if (has_fusion) {
              if constexpr (type == GGML_TYPE_Q8_0) {
                  if (fusion.residual_only) {
-@@ -1077,7 +1081,11 @@ void ggml_cuda_mul_mat_vec_q(
+@@ -1077,7 +1084,11 @@ void ggml_cuda_mul_mat_vec_q(
  
      if (fusion) {
          GGML_ASSERT( !ids || dst->ne[2] == 1);
@@ -140,8 +158,63 @@ index d629b805..98eb1d49 100644
  
          if (fusion->x_bias) {
              GGML_ASSERT(fusion->x_bias->type == GGML_TYPE_F32);
+@@ -1119,6 +1130,11 @@ void ggml_cuda_mul_mat_vec_q(
+         quantize_row_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
+     }
+ 
++#ifdef GGML_USE_HIP
++    if (!ids && ctx.impl && ctx.impl->mmvq &&
++        ctx.impl->mmvq(src0, src1, src1_q8_1.get(), fusion_local, dst, stream)) return;
++#endif
++
+     const int64_t s01 = src0->nb[1] / ts_src0;
+     const int64_t s11 = ne10_padded / QK8_1;
+     const int64_t s1  =  dst->nb[1] / ts_dst;
+diff --git a/external/ggml/src/ggml-hip/CMakeLists.txt b/external/ggml/src/ggml-hip/CMakeLists.txt
+index 85dcd0a9..332e36d5 100644
+--- a/external/ggml/src/ggml-hip/CMakeLists.txt
++++ b/external/ggml/src/ggml-hip/CMakeLists.txt
+@@ -95,7 +95,7 @@ else()
+         ../ggml-cuda/template-instances/fattn-vec-instance-bf16-bf16.cu)
+ endif()
+ 
+-list(APPEND GGML_SOURCES_ROCM gfx1151_v1/sgemm.cu gfx1151_v1/matmul.cu gfx1151_v1/im2col.cu gfx1151_v1/cpy.cu)
++list(APPEND GGML_SOURCES_ROCM gfx1151_v1/sgemm.cu gfx1151_v1/matmul.cu gfx1151_v1/im2col.cu gfx1151_v1/cpy.cu gfx1151_v1/mmvq.cu)
+ 
+ if (CXX_IS_HIPCC)
+     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+index 206d4a69..a7478448 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+@@ -7,3 +7,6 @@ bool ggml_hip_gfx1151_v1_mul_mat_typed(const ggml_tensor *, const ggml_tensor *,
+ bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t, int nsm);
+ 
+ bool ggml_hip_gfx1151_v1_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
++
++bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor *, const ggml_tensor *, const void *,
++                            const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t);
+diff --git a/external/ggml/src/ggml-hip/impl.cuh b/external/ggml/src/ggml-hip/impl.cuh
+index 8c0901d8..ef12416b 100644
+--- a/external/ggml/src/ggml-hip/impl.cuh
++++ b/external/ggml/src/ggml-hip/impl.cuh
+@@ -3,10 +3,14 @@
+ #include "ggml.h"
+ #include <hip/hip_runtime.h>
+ 
++struct ggml_cuda_mm_fusion_args_device;
++
+ // False means ineligible, before any kernel launches. Execution errors are not retried.
+ struct ggml_hip_impl {
+     const char * name;
+     bool (*mul_mat)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t, int cc);
+     bool (*im2col)(const ggml_tensor *, ggml_tensor *, hipStream_t, int nsm);
+     bool (*cpy)(const ggml_tensor *, ggml_tensor *, hipStream_t);
++    bool (*mmvq)(const ggml_tensor *, const ggml_tensor *, const void *,
++                 const ggml_cuda_mm_fusion_args_device &, ggml_tensor *, hipStream_t) = nullptr;
+ };
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
-index 3974a065..2f8bac75 100644
+index 3974a065..cac31bbf 100644
 --- a/external/ggml/tests/test-backend-ops.cpp
 +++ b/external/ggml/tests/test-backend-ops.cpp
 @@ -1540,6 +1540,8 @@ struct test_case {
@@ -191,7 +264,7 @@ index 3974a065..2f8bac75 100644
  struct test_mul_mat_vec_fusion : public test_case {
      const ggml_type type;
      const ggml_glu_op glu_op;
-@@ -9509,6 +9542,19 @@ struct test_gfx1151_v1_mul_mat_precision : public test_mul_mat {
+@@ -9509,6 +9542,25 @@ struct test_gfx1151_v1_mul_mat_precision : public test_mul_mat {
  static std::vector<std::unique_ptr<test_case>> make_test_cases_gfx1151_v1() {
      std::vector<std::unique_ptr<test_case>> cases;
      const std::array<int64_t, 2> one = {1, 1};
@@ -208,6 +281,116 @@ index 3974a065..2f8bac75 100644
 +    cases.emplace_back(new test_mul_mat_exact_swiglu(257, 2, 288, true, false, false, true));
 +    cases.emplace_back(new test_mul_mat_exact_swiglu(257, 2, 288, true, true));
 +    cases.emplace_back(new test_mul_mat_exact_swiglu(257, 2, 288, true, false, true));
++    for (int64_t columns = 1; columns <= 8; ++columns) {
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32,
++            31, columns, 96, {3, 2}, {2, 3}));
++        cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32,
++            257, columns, 288, one, one, {0, 1, 2, 3}, 320));
++    }
      for (bool strict : {false, true}) {
          for (const auto & shape : std::vector<std::array<int64_t, 3>>{
                  {72, 72, 128}, {128, 192, 128}, {384, 640, 160},
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+new file mode 100644
+index 00000000..fc91a45a
+--- /dev/null
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/mmvq.cu
+@@ -0,0 +1,98 @@
++#include "gfx1151_v1.cuh"
++#include "ggml-cuda/mmvq.cuh"
++#include "ggml-cuda/vecdotq.cuh"
++#include "ggml-cuda/unary.cuh"
++#include <type_traits>
++
++namespace {
++using q8_pair = int __attribute__((vector_size(8), aligned(2), may_alias));
++
++template<int cols, bool gated>
++#ifdef __HIP_DEVICE_COMPILE__
++__attribute__((target("unaligned-access-mode")))
++#endif
++__global__ __launch_bounds__(128) void gfx1151_v1_q8_stream(
++        const char * weights, const char * gate_weights, const block_q8_1 * input, float * output,
++        int rows, int blocks, size_t row_stride, size_t channel_stride, size_t sample_stride,
++        int channels_per_weight, int samples_per_weight, int input_stride,
++        size_t output_col_stride, size_t output_channel_stride, size_t output_sample_stride) {
++    const int lane = threadIdx.x;
++    const int row = blockIdx.x * 4 + threadIdx.y;
++    if (row >= rows) return;
++    const size_t weight_offset = row * row_stride +
++        (blockIdx.y / channels_per_weight) * channel_stride +
++        (blockIdx.z / samples_per_weight) * sample_stride;
++    const auto * w = reinterpret_cast<const block_q8_0 *>(weights + weight_offset);
++    const block_q8_0 * g = nullptr;
++    if constexpr (gated) g = reinterpret_cast<const block_q8_0 *>(gate_weights + weight_offset);
++    input += (size_t(blockIdx.z) * gridDim.y + blockIdx.y) * cols * input_stride;
++    output += blockIdx.z * output_sample_stride + blockIdx.y * output_channel_stride + row;
++    constexpr int lanes_per_block = QI8_0 / VDR_Q8_0_Q8_1_MMVQ;
++    constexpr int blocks_per_wave = 32 / lanes_per_block;
++    const int quant = VDR_Q8_0_Q8_1_MMVQ * (lane % lanes_per_block);
++    float sum[cols] = {};
++    float gate_sum[gated ? cols : 1] = {};
++    const auto accumulate = [&](int block) {
++        const auto value = __builtin_nontemporal_load(reinterpret_cast<const q8_pair *>(w[block].qs + quant * 4));
++        const int v[2] = {value[0], value[1]};
++        int vg[2];
++        if constexpr (gated) {
++            const auto gv = __builtin_nontemporal_load(reinterpret_cast<const q8_pair *>(g[block].qs + quant * 4));
++            vg[0] = gv[0]; vg[1] = gv[1];
++        }
++#pragma unroll
++        for (int c = 0; c < cols; ++c) {
++            const auto & x = input[c * input_stride + block];
++            const int u[2] = {get_int_b4(x.qs, quant), get_int_b4(x.qs, quant + 1)};
++            sum[c] += vec_dot_q8_0_q8_1_impl<float, 2>(v, u, w[block].d, __low2half(x.ds));
++            if constexpr (gated) {
++                gate_sum[c] += vec_dot_q8_0_q8_1_impl<float, 2>(vg, u, g[block].d, __low2half(x.ds));
++            }
++        }
++    };
++    // Full groups have a wave-uniform bound; only the final group needs a lane mask.
++    const int groups = blocks / blocks_per_wave;
++#pragma clang loop unroll(disable)
++    for (int group = 0; group < groups; ++group) accumulate(group * blocks_per_wave + lane / lanes_per_block);
++    const int tail = groups * blocks_per_wave + lane / lanes_per_block;
++    if (tail < blocks) accumulate(tail);
++#pragma unroll
++    for (int c = 0; c < cols; ++c) {
++        float result = warp_reduce_sum<32>(sum[c]);
++        if constexpr (gated) result *= ggml_cuda_op_silu_single(warp_reduce_sum<32>(gate_sum[c]));
++        if (lane == 0) output[c * output_col_stride] = result;
++    }
++}
++} // namespace
++
++bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor * a, const ggml_tensor * b, const void * q8,
++                            const ggml_cuda_mm_fusion_args_device & fusion, ggml_tensor * dst, hipStream_t stream) {
++    if (a->type != GGML_TYPE_Q8_0 || b->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
++        b->ne[1] < 1 || b->ne[1] > MMVQ_MAX_BATCH_SIZE ||
++        fusion.x_bias || fusion.gate_bias || fusion.residual_only ||
++        (fusion.gate && fusion.glu_op != GGML_GLU_OP_SWIGLU)) return false;
++    const dim3 grid((a->ne[1] + 3) / 4, dst->ne[2], dst->ne[3]);
++    const auto launch = [&](auto columns) {
++        constexpr int cols = decltype(columns)::value;
++        const auto run = [&](auto use_gate) {
++            gfx1151_v1_q8_stream<cols, decltype(use_gate)::value><<<grid, dim3(32, 4), 0, stream>>>(
++                static_cast<const char *>(a->data), static_cast<const char *>(fusion.gate),
++                static_cast<const block_q8_1 *>(q8), static_cast<float *>(dst->data),
++                a->ne[1], a->ne[0] / QK8_0, a->nb[1], a->nb[2], a->nb[3],
++                dst->ne[2] / a->ne[2], dst->ne[3] / a->ne[3], GGML_PAD(b->ne[0], MATRIX_ROW_PADDING) / QK8_1,
++                dst->nb[1] / sizeof(float), dst->nb[2] / sizeof(float), dst->nb[3] / sizeof(float));
++        };
++        if (fusion.gate) run(std::true_type{}); else run(std::false_type{});
++    };
++    switch (b->ne[1]) {
++        case 1: launch(std::integral_constant<int, 1>{}); break;
++        case 2: launch(std::integral_constant<int, 2>{}); break;
++        case 3: launch(std::integral_constant<int, 3>{}); break;
++        case 4: launch(std::integral_constant<int, 4>{}); break;
++        case 5: launch(std::integral_constant<int, 5>{}); break;
++        case 6: launch(std::integral_constant<int, 6>{}); break;
++        case 7: launch(std::integral_constant<int, 7>{}); break;
++        case 8: launch(std::integral_constant<int, 8>{}); break;
++    }
++    return true;
++}

@@ -1,3 +1,145 @@
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 2f4fe797..51522c61 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2717,7 +2717,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_f(const ggml_tensor * tensor) {
+     return use_mul_mat_vec_f;
+ }
+ 
+-static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
++static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor, bool multiple_columns = false) {
+     ggml_tensor *       src0 = tensor->src[0];
+     ggml_tensor *       src1 = tensor->src[1];
+     const ggml_tensor * dst  = tensor;
+@@ -2736,7 +2736,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+     }
+     //we only support fusion for ncols_dst = 1
+     if ((tensor->op == GGML_OP_MUL_MAT ||
+-         tensor->op == GGML_OP_MUL_MAT_PACK4) && dst->ne[1] != 1) {
++         tensor->op == GGML_OP_MUL_MAT_PACK4) && dst->ne[1] != 1 && !multiple_columns) {
+         return false;
+     }
+ 
+@@ -4322,6 +4322,78 @@ static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int
+ }
+ #endif
+ 
++#ifdef GGML_USE_HIP
++static int ggml_hip_fuse_q8_swiglu(ggml_backend_cuda_context & ctx, ggml_cgraph * graph, int i) {
++    auto * gate = graph->nodes[i];
++    if (!ctx.impl || gate->op != GGML_OP_MUL_MAT || gate->src[0]->type != GGML_TYPE_Q8_0 ||
++        !ggml_cuda_should_fuse_mul_mat_vec_q(gate, true)) {
++        return 0;
++    }
++    int indices[3];
++    int end = i + 1;
++    int count = 0;
++    for (auto op : {GGML_OP_UNARY, GGML_OP_MUL_MAT, GGML_OP_MUL}) {
++        while (end < graph->n_nodes && graph->nodes[end]->op == GGML_OP_RESHAPE) ++end;
++        if (end == graph->n_nodes || graph->nodes[end]->op != op) return 0;
++        indices[count++] = end++;
++    }
++    auto * silu = graph->nodes[indices[0]];
++    auto * up = graph->nodes[indices[1]];
++    auto * output = graph->nodes[indices[2]];
++    auto base = [](const ggml_tensor * tensor) {
++        while (tensor->op == GGML_OP_RESHAPE) {
++            if (tensor->data != tensor->src[0]->data ||
++                !ggml_is_contiguous(tensor) || !ggml_is_contiguous(tensor->src[0]) ||
++                ggml_nelements(tensor) != ggml_nelements(tensor->src[0])) return (const ggml_tensor *) nullptr;
++            tensor = tensor->src[0];
++        }
++        return tensor;
++    };
++    if (ggml_get_unary_op(silu) != GGML_UNARY_OP_SILU || base(silu->src[0]) != gate ||
++        !((base(output->src[0]) == silu && base(output->src[1]) == up) ||
++          (base(output->src[1]) == silu && base(output->src[0]) == up)) ||
++        !ggml_are_same_shape(output->src[0], output->src[1]) ||
++        !ggml_cuda_should_fuse_mul_mat_vec_q(up, true) ||
++        up->src[0]->type != GGML_TYPE_Q8_0 || !ggml_are_same_shape(gate->src[0], up->src[0]) ||
++        !ggml_are_same_stride(gate->src[0], up->src[0]) ||
++        base(gate->src[1]) != base(up->src[1]) || !base(gate->src[1]) ||
++        gate->src[1]->data != up->src[1]->data ||
++        !ggml_are_same_shape(gate->src[1], up->src[1]) ||
++        !ggml_are_same_stride(gate->src[1], up->src[1]) ||
++        output->type != GGML_TYPE_F32 || !ggml_is_contiguous(output) ||
++        !ggml_is_contiguous(up) || ggml_nelements(output) != ggml_nelements(up)) {
++        return 0;
++    }
++    // Only eliminate intermediates whose complete consumer set lies in this span.
++    for (int j = i; j < end - 1; ++j) {
++        auto * node = graph->nodes[j];
++        const auto * root = base(node);
++        if (root != gate && root != silu && root != up) continue;
++        if ((node->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++            (node->op != GGML_OP_RESHAPE && !(node->flags & GGML_TENSOR_FLAG_COMPUTE))) return 0;
++        int uses = 0;
++        for (int k = j + 1; k < end; ++k) {
++            for (auto * src : graph->nodes[k]->src) uses += src == node;
++        }
++        if (ggml_node_get_use_count(graph, j) != uses) return 0;
++    }
++    for (auto * input : {gate->src[0], up->src[0], gate->src[1]}) {
++        const auto a = reinterpret_cast<uintptr_t>(output->data);
++        const auto b = reinterpret_cast<uintptr_t>(input->data);
++        if (a < b ? b - a < ggml_nbytes(output) : a - b < ggml_nbytes(input)) return 0;
++    }
++    const int outputs[] = {end - 1};
++    if (!ggml_cuda_check_fusion_memory_ranges(graph, i, end - i, outputs, 1)) return 0;
++    ggml_tensor matrix_output = *up;
++    matrix_output.data = output->data;
++    ggml_cuda_mm_fusion_args_host fusion{};
++    fusion.gate = gate->src[0];
++    fusion.glu_op = GGML_GLU_OP_SWIGLU;
++    ggml_cuda_mul_mat_vec_q(ctx, up->src[0], up->src[1], nullptr, &matrix_output, &fusion);
++    return end - i - 1;
++}
++#endif
++
+ // try and fuse nodes and return the number of nodes to skip
+ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
+ 
+@@ -4562,6 +4634,10 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+         }
+     }
+ 
++#ifdef GGML_USE_HIP
++    if (const int skipped = ggml_hip_fuse_q8_swiglu(*cuda_ctx, cgraph, i)) return skipped;
++#endif
++
+     bool fused_mul_mat_vec = false;
+     int  fused_node_count  = 0;
+ 
+diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
+index d629b805..98eb1d49 100644
+--- a/external/ggml/src/ggml-cuda/mmvq.cu
++++ b/external/ggml/src/ggml-cuda/mmvq.cu
+@@ -686,7 +686,11 @@ static void mul_mat_vec_q_switch_fusion(
+         const uint32_t ids_stride, cudaStream_t stream) {
+ 
+     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
+-    if constexpr (c_ncols_dst == 1) {
++    if constexpr (c_ncols_dst == 1
++#ifdef GGML_USE_HIP
++                  || type == GGML_TYPE_Q8_0
++#endif
++    ) {
+         if (has_fusion) {
+             if constexpr (type == GGML_TYPE_Q8_0) {
+                 if (fusion.residual_only) {
+@@ -1077,7 +1081,11 @@ void ggml_cuda_mul_mat_vec_q(
+ 
+     if (fusion) {
+         GGML_ASSERT( !ids || dst->ne[2] == 1);
+-        GGML_ASSERT(  ids || dst->ne[1] == 1);
++        GGML_ASSERT(ids || dst->ne[1] == 1
++#ifdef GGML_USE_HIP
++                    || (ctx.impl && src0->type == GGML_TYPE_Q8_0 && !fusion->x_bias && !fusion->gate_bias)
++#endif
++        );
+ 
+         if (fusion->x_bias) {
+             GGML_ASSERT(fusion->x_bias->type == GGML_TYPE_F32);
 diff --git a/external/ggml/tests/test-backend-ops.cpp b/external/ggml/tests/test-backend-ops.cpp
 index 3974a065..2f8bac75 100644
 --- a/external/ggml/tests/test-backend-ops.cpp

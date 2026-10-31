@@ -323,6 +323,12 @@ def asr_music_manifest(root):
     suites = [dict(id='correctness', build='model', gpu=True, timeout_s=120, cases=[
         dict(id='ggml-' + impl, argv=['build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0',
              '--suite', 'gfx1151_v1', '--backend-impl', impl]) for impl in ['default', 'gfx1151_v1']])]
+    suites[0]['cases'].append(dict(id='stream-kernel-trace', argv=[
+        '/opt/rocm/bin/rocprofv3', '--kernel-trace', '--output-format', 'csv',
+        '--output-directory', '../results/profile/q8-stream', '--',
+        'build/debug/bin/test-backend-ops', 'test', '-b', 'ROCm0', '--suite', 'gfx1151_v1',
+        '--backend-impl', 'gfx1151_v1', '-o', 'MUL_MAT_EXACT_SWIGLU',
+        '-p', 'm=6144,n=2,k=2048,metadata=1']))
     timed = []
     for label in ['a1', 'b1', 'b2', 'a2']:
         candidate = label.startswith('b')
@@ -349,6 +355,11 @@ def asr_music_manifest(root):
         dict(id='yue2-summary', argv=['python3', '.github/tests/rocm_v2_halo.py', '--root', '../results',
             '--summarize-models', '--families', 'yue2', '--baseline-implementation', 'gfx1151_v1',
             '--candidate-implementation', 'gfx1151_v1', '--request-set', 'asr-music'])]))
+    suites[-1]['cases'].append(dict(id='stream-kernel-executed', argv=['python3', '-c',
+        "from pathlib import Path; files=list(Path('../results/profile/q8-stream').rglob('*.csv')); "
+        "assert files, 'Missing kernel trace'; data='\\n'.join(p.read_text() for p in files); "
+        "assert 'gfx1151_v1_q8_stream' in data, 'Streaming kernel did not execute'; "
+        "print('Streaming kernel execution confirmed')"]))
     plan['suites'] = suites
     return plan
 
