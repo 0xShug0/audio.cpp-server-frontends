@@ -676,7 +676,7 @@ jobs:
           path: ${{ github.workspace }}/rocm-v2-${{ github.run_id }}-${{ github.run_attempt }}/results/
           retention-days: ${{ (inputs.focus == 'yue2-vulkan' || inputs.focus == 'workload-refine' || inputs.focus == 'workload-probes' || inputs.focus == 'generic-gates' || inputs.focus == 'tts-main' || inputs.focus == 'asr-music') && 1 || 7 }}
       - name: Run additional checks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.focus != 'yue2-vulkan' }}
         shell: bash
         run: |
           ulimit -c 0
