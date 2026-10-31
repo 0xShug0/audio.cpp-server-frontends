@@ -1,6 +1,7 @@
 """Prepare and inspect the ten-song YuE2 Vulkan reproduction using the existing campaign runner."""
 import argparse
-import audioop
+import array
+import sys
 import hashlib
 import json
 import math
@@ -69,13 +70,17 @@ def inspect_wav(path):
             count = len(block) // (width * channels)
             rms = []
             for ch in (0, 1):
-                pcm = audioop.tomono(block, width, 1 if ch == 0 else 0, 1 if ch == 1 else 0)
-                value = audioop.rms(pcm, width)
-                rms.append(value)
-                sums[ch] += audioop.avg(pcm, width) * count
-                squares[ch] += value * value * count
-                peaks[ch] = max(peaks[ch], audioop.max(pcm, width))
-            silent = max(rms) == 0
+                samples = array.array('h')
+                samples.frombytes(block)
+                if sys.byteorder != 'little':
+                    samples.byteswap()
+                pcm = samples[ch::channels]
+                energy = sum(value * value for value in pcm)
+                rms.append(math.sqrt(energy / count))
+                sums[ch] += sum(pcm)
+                squares[ch] += energy
+                peaks[ch] = max(peaks[ch], max(pcm), -min(pcm))
+            silent = max(rms) / 32768 < 1e-5
             quiet += int(silent and count == rate)
             streak = streak + 1 if silent and count == rate else 0
             longest = max(longest, streak)
