@@ -19,16 +19,16 @@ def prepare(root):
             file=f'Qwen3-ASR-{size}B-GGUF/qwen3-asr-{size}b-q8_0.gguf',
             size=length, sha256=digest, destination=f'inputs/qwen3-asr-{size}b-q8_0.gguf'))
     (inputs / 'model-provenance.json').write_text(json.dumps(models, indent=2) + '\n')
-    # Paths resolve from the native CLI's source-root working directory.
+    # Audio paths resolve relative to the request-sequence file in inputs/.
     requests = {'requests': [
-        dict(id='warmup', audio='assets/asr_validation/librispeech/librispeech_test_clean_6930-75918-0000.wav'),
-        dict(id='long_327', audio='assets/resources/qwen3_tts_longform_asr_input.wav'),
-        dict(id='long_167', audio='assets/resources/vibevoice_two_speaker_longform.wav'),
+        dict(id='warmup', audio='../assets/asr_validation/librispeech/librispeech_test_clean_6930-75918-0000.wav'),
+        dict(id='long_327', audio='../assets/resources/qwen3_tts_longform_asr_input.wav'),
+        dict(id='long_167', audio='../assets/resources/vibevoice_two_speaker_longform.wav'),
     ]}
     request_path = inputs / 'qwen3-asr-requests.json'
     request_path.write_text(json.dumps(requests, indent=2) + '\n')
     hashes = [m['sha256'] + '  ' + m['destination'] for m in models]
-    for path in [request_path] + [root / r['audio'] for r in requests['requests']]:
+    for path in [request_path] + [(inputs / r['audio']).resolve() for r in requests['requests']]:
         hashes.append(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.relative_to(root).as_posix())
     (inputs / 'input-sha256.txt').write_text('\n'.join(hashes) + '\n')
     plan = qwen_manifest(root)
