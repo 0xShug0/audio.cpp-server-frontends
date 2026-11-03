@@ -1,0 +1,87 @@
+name: Real-time RE-USE HIP streaming
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-realtime-reuse.yml
+      - .github/tests/realtime-reuse-streaming.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  streaming:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 45
+    env:
+      SOURCE_REF: 9078b468da310ae1aca8480fc23393b0546c4108
+      MODEL_REF: 2619b5cc7dcbc0235915104a293d7b94b3b8a1fc
+      GIT_LFS_SKIP_SMUDGE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout pinned audio.cpp without frontends
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source models
+          curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE_REF"
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+          } 2>&1 | tee results/source-download.log
+          curl -fLsS --retry 2 --max-time 60 -o results/measure.py \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/realtime-reuse-streaming.py"
+          curl -fLsS --retry 2 --max-time 120 -o models/sample.wav \
+            "https://raw.githubusercontent.com/0xShug0/audio.cpp/$SOURCE_REF/assets/resources/sample.wav"
+          curl -fLsS --retry 2 --max-time 600 -o models/realtime-reuse-f32.gguf \
+            "https://huggingface.co/audio-cpp/RE-USE-GGUF/resolve/$MODEL_REF/realtime-reuse-f32.gguf"
+          echo 'f560b06c5387c24a867f46435e4f384a314162e0de3a06af89cf265c28f76e49  models/realtime-reuse-f32.gguf' | sha256sum -c -
+          printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
+      - name: Build Debug HIP server with realtime RE-USE only
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          printf 'arch=%s\n' "$arch" | tee -a results/environment.log
+          lscpu >> results/environment.log
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=realtime_reuse \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+            -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            2>&1 | tee results/configure.log
+          cmake --build source/build/debug --target audiocpp_server --parallel 16 \
+            2>&1 | tee results/build.log
+      - name: Collect one warmup and two streaming requests
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python3 results/measure.py 2>&1 | tee results/collection.log
+          cat results/summary.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload logs and WAV outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: realtime-reuse-hip-streaming
+          path: results/
+          retention-days: 1
