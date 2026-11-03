@@ -3,6 +3,10 @@ name: Validate HIP release artifacts on AMD
 on:
   workflow_dispatch:
     inputs:
+      release_only:
+        description: Build current audio.cpp release packages only, without model tests
+        type: boolean
+        default: false
       source_sha:
         description: 'audio.cpp commit (empty resolves current main)'
         type: string
@@ -51,7 +55,7 @@ jobs:
           echo "Building clean audio.cpp $sha" >> "$GITHUB_STEP_SUMMARY"
   packages:
     needs: prepare
-    if: inputs.artifact_run_id == ''
+    if: inputs.artifact_run_id == '' && !inputs.release_only
     uses: ./.github/workflows/release-hip.yml
     with:
       source_repository: 0xShug0/audio.cpp
@@ -59,7 +63,16 @@ jobs:
       version: validation-${{ github.run_number }}
       gpu_targets: ${{ inputs.gpu_targets || 'gfx1151' }}
       platforms: ${{ inputs.platforms || '["ubuntu-24.04", "windows-2022"]' }}
+  release-only:
+    needs: prepare
+    if: inputs.release_only
+    uses: ./.github/workflows/hip-release-only.yml
+    with:
+      source_repository: 0xShug0/audio.cpp
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      version: main-${{ needs.prepare.outputs.source_sha }}
   test-inputs:
+    if: ${{ !inputs.release_only }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +94,7 @@ jobs:
           compression-level: 0
   user-test:
     needs: [prepare, test-inputs, packages]
-    if: always() && needs.prepare.result == 'success' && needs.test-inputs.result == 'success' && (needs.packages.result == 'success' || inputs.artifact_run_id != '')
+    if: always() && !inputs.release_only && needs.prepare.result == 'success' && needs.test-inputs.result == 'success' && (needs.packages.result == 'success' || inputs.artifact_run_id != '')
     strategy:
       fail-fast: false
       matrix:

@@ -1,6 +1,17 @@
 name: Build HIP release only
 
 on:
+  workflow_call:
+    inputs:
+      source_repository:
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       source_repository:
