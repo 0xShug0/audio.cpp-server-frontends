@@ -7,6 +7,10 @@ on:
         description: Measure RE-USE and SoulX from existing HIP release artifacts
         type: boolean
         default: false
+      results_run_id:
+        description: 'Resume model timings from an earlier run; completed cases are retained'
+        type: string
+        default: ''
       release_only:
         description: Build current audio.cpp release packages only, without model tests
         type: boolean
@@ -158,6 +162,14 @@ jobs:
           activate-environment: qwen3-tts
           python-version: '3.12'
           auto-activate-base: false
+      - name: Restore previous model measurements and logs
+        if: inputs.results_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: reuse-soulx-prebuilt-hip-rtf
+          path: ${{ runner.temp }}/hip-model-rtf-${{ github.run_id }}/results
+          run-id: ${{ inputs.results_run_id }}
+          github-token: ${{ github.token }}
       - name: Compare prebuilt HIP implementations sequentially
         shell: bash -el {0}
         env:
