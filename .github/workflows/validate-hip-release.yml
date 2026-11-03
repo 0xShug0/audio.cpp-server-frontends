@@ -3,6 +3,10 @@ name: Validate HIP release artifacts on AMD
 on:
   workflow_dispatch:
     inputs:
+      model_rtf:
+        description: Measure RE-USE and SoulX from existing HIP release artifacts
+        type: boolean
+        default: false
       release_only:
         description: Build current audio.cpp release packages only, without model tests
         type: boolean
@@ -55,7 +59,7 @@ jobs:
           echo "Building clean audio.cpp $sha" >> "$GITHUB_STEP_SUMMARY"
   packages:
     needs: prepare
-    if: inputs.artifact_run_id == '' && !inputs.release_only
+    if: inputs.artifact_run_id == '' && !inputs.release_only && !inputs.model_rtf
     uses: ./.github/workflows/release-hip.yml
     with:
       source_repository: 0xShug0/audio.cpp
@@ -72,7 +76,7 @@ jobs:
       source_sha: ${{ needs.prepare.outputs.source_sha }}
       version: main-${{ needs.prepare.outputs.source_sha }}
   test-inputs:
-    if: ${{ !inputs.release_only }}
+    if: ${{ !inputs.release_only && !inputs.model_rtf }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -94,7 +98,7 @@ jobs:
           compression-level: 0
   user-test:
     needs: [prepare, test-inputs, packages]
-    if: always() && !inputs.release_only && needs.prepare.result == 'success' && needs.test-inputs.result == 'success' && (needs.packages.result == 'success' || inputs.artifact_run_id != '')
+    if: always() && !inputs.release_only && !inputs.model_rtf && needs.prepare.result == 'success' && needs.test-inputs.result == 'success' && (needs.packages.result == 'success' || inputs.artifact_run_id != '')
     strategy:
       fail-fast: false
       matrix:
@@ -132,3 +136,40 @@ jobs:
         with:
           name: hip-user-results-${{ runner.os }}
           path: ${{ env.USER_TEST_ROOT }}/results/
+
+  model-rtf:
+    needs: prepare
+    if: inputs.model_rtf
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: hip-release-Linux
+          path: ${{ runner.temp }}/hip-model-rtf-${{ github.run_id }}/packages
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: qwen3-tts
+          python-version: '3.12'
+          auto-activate-base: false
+      - name: Compare prebuilt HIP implementations sequentially
+        shell: bash -el {0}
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/hip-model-rtf-$GITHUB_RUN_ID"
+          mkdir -p "$root/results"
+          python scripts/ci/test_reuse_soulx_prebuilt.py --root "$root" 2>&1 | tee "$root/results/validation.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reuse-soulx-prebuilt-hip-rtf
+          path: ${{ runner.temp }}/hip-model-rtf-${{ github.run_id }}/results/
+          retention-days: 1
