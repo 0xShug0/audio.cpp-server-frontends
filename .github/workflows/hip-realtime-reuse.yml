@@ -27,6 +27,7 @@ jobs:
           mkdir -p results source models
           curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
             "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          printf '\n/tests/soulx_flashhead/components.cpp\n/tests/soulx_flashhead/session_test.cpp\n' >> results/source.sparse
           {
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
