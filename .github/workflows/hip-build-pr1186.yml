@@ -1,0 +1,99 @@
+name: HIP dependency discovery PR 1186
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-build-pr1186.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hip:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout audio.cpp GGML only
+        timeout-minutes: 12
+        env:
+          MAIN_SHA: b1accdc98a92530a8fdab70d5e3b3b1dcf8e7d2e
+          PR_SHA: 3bf6e1871d46a446846703c0cd1966b190347c14
+        run: |
+          set -euo pipefail
+          mkdir -p results source
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$MAIN_SHA"
+            git -C source sparse-checkout set external/ggml
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = "$MAIN_SHA"
+            du -sh source
+          } > results/source-download.log 2>&1
+          cp source/external/ggml/src/ggml-hip/CMakeLists.txt results/main-CMakeLists.txt
+          curl --fail --location --connect-timeout 20 --max-time 60 --retry 1 \
+            -o results/pr-CMakeLists.txt \
+            "https://raw.githubusercontent.com/0xShug0/audio.cpp/$PR_SHA/external/ggml/src/ggml-hip/CMakeLists.txt"
+          echo 'f684a9a9845f765c2dd55b7f35a40cf4621ca7d544372c0ee30ef251cf2554f1  results/pr-CMakeLists.txt' | sha256sum -c -
+          printf 'main=%s\npr=%s\n' "$MAIN_SHA" "$PR_SHA" > results/source-refs.txt
+          df -Pk . /tmp > results/disk-space.txt
+      - name: Build and test main, PR, and header-only discovery sequentially
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version > results/environment.log 2>&1
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          printf 'rocm=%s\narch=%s\n' "$rocm" "$arch" >> results/environment.log
+          find -L "$rocm" -maxdepth 5 -type f \( -iname '*hipcub*cmake' -o -iname '*rocprim*cmake' \) \
+            -print -exec cat {} \; > results/installed-package-configs.log
+          failed=0
+          for variant in main pr pr-headers; do
+            if [[ "$variant" != main ]]; then
+              cp results/pr-CMakeLists.txt source/external/ggml/src/ggml-hip/CMakeLists.txt
+            fi
+            extra=(-DCMAKE_DISABLE_FIND_PACKAGE_hipcub=OFF -DCMAKE_DISABLE_FIND_PACKAGE_rocprim=OFF)
+            if [[ "$variant" == pr-headers ]]; then
+              extra=(-DCMAKE_DISABLE_FIND_PACKAGE_hipcub=ON -DCMAKE_DISABLE_FIND_PACKAGE_rocprim=ON)
+            fi
+            rc=0
+            cmake -S source/external/ggml -B source/build/debug -G Ninja \
+              --trace-source="$PWD/source/external/ggml/src/ggml-hip/CMakeLists.txt" --trace-expand \
+              -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 \
+              -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+              -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+              -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+              -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+              -DGGML_HIP=ON -DGGML_CUDA=OFF -DGGML_VULKAN=OFF \
+              -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=ON -DGGML_BUILD_EXAMPLES=OFF \
+              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON "${extra[@]}" \
+              > "results/$variant-configure.log" 2>&1 || rc=$?
+            echo "$rc" > "results/$variant-configure.exit"
+            if [[ "$rc" -ne 0 ]]; then failed=1; continue; fi
+            cp source/build/debug/CMakeCache.txt "results/$variant-CMakeCache.txt"
+            cp source/build/debug/compile_commands.json "results/$variant-compile_commands.json"
+            rc=0
+            cmake --build source/build/debug --target test-backend-ops --parallel 8 \
+              > "results/$variant-build.log" 2>&1 || rc=$?
+            echo "$rc" > "results/$variant-build.exit"
+            if [[ "$rc" -ne 0 ]]; then failed=1; continue; fi
+            rc=0
+            timeout 300 source/build/debug/bin/test-backend-ops test -o ARGSORT -b ROCm0 \
+              > "results/$variant-argsort.log" 2>&1 || rc=$?
+            echo "$rc" > "results/$variant-argsort.exit"
+            if [[ "$rc" -ne 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Upload logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-build-pr1186-${{ github.run_attempt }}
+          path: results/
+          retention-days: 1
