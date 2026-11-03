@@ -7,10 +7,10 @@ on:
         description: Measure RE-USE and SoulX from existing HIP release artifacts
         type: boolean
         default: false
-      results_run_id:
-        description: 'Resume model timings from an earlier run; completed cases are retained'
+      model_families:
+        description: 'Models to collect, space-separated (reuse and/or soulx_flashhead)'
         type: string
-        default: ''
+        default: 'reuse soulx_flashhead'
       release_only:
         description: Build current audio.cpp release packages only, without model tests
         type: boolean
@@ -79,6 +79,8 @@ jobs:
       source_repository: 0xShug0/audio.cpp
       source_sha: ${{ needs.prepare.outputs.source_sha }}
       version: main-${{ needs.prepare.outputs.source_sha }}
+      platforms: ${{ inputs.platforms }}
+      model_families: ${{ inputs.model_rtf && inputs.model_families || '' }}
   test-inputs:
     if: ${{ !inputs.release_only && !inputs.model_rtf }}
     runs-on: ubuntu-24.04
@@ -143,7 +145,7 @@ jobs:
 
   model-rtf:
     needs: prepare
-    if: inputs.model_rtf
+    if: inputs.model_rtf && !inputs.release_only
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
     timeout-minutes: 90
     steps:
@@ -162,23 +164,18 @@ jobs:
           activate-environment: qwen3-tts
           python-version: '3.12'
           auto-activate-base: false
-      - name: Restore previous model measurements and logs
-        if: inputs.results_run_id != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: reuse-soulx-prebuilt-hip-rtf
-          path: ${{ runner.temp }}/hip-model-rtf-${{ github.run_id }}/results
-          run-id: ${{ inputs.results_run_id }}
-          github-token: ${{ github.token }}
-      - name: Compare prebuilt HIP implementations sequentially
+      - name: Collect prebuilt HIP logs and outputs sequentially
         shell: bash -el {0}
         env:
           PYTHONUNBUFFERED: '1'
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          MODEL_FAMILIES: ${{ inputs.model_families }}
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/hip-model-rtf-$GITHUB_RUN_ID"
           mkdir -p "$root/results"
-          python scripts/ci/test_reuse_soulx_prebuilt.py --root "$root" 2>&1 | tee "$root/results/validation.log"
+          read -r -a families <<< "$MODEL_FAMILIES"
+          python scripts/ci/test_reuse_soulx_prebuilt.py --root "$root" --source-sha "$SOURCE_SHA" --models "${families[@]}" 2>&1 | tee "$root/results/collection.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

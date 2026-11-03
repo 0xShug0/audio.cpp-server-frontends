@@ -12,6 +12,12 @@ on:
       version:
         type: string
         required: true
+      platforms:
+        type: string
+        default: '["ubuntu-24.04", "windows-2022"]'
+      model_families:
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       source_repository:
@@ -28,6 +34,12 @@ on:
         description: Version used in package names
         type: string
         required: true
+      platforms:
+        type: string
+        default: '["ubuntu-24.04", "windows-2022"]'
+      model_families:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -40,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022]
+        os: ${{ fromJSON(inputs.platforms) }}
     runs-on: ${{ fromJSON(matrix.os == 'windows-2022' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
     timeout-minutes: 90
     env:
@@ -53,7 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/ci/hip-release-only
+          sparse-checkout: scripts/ci
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -87,6 +99,7 @@ jobs:
         with:
           name: hip-build-logs-${{ runner.os }}
           path: dist/logs/
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: hip-release-${{ runner.os }}
@@ -96,3 +109,30 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
+          retention-days: 1
+      - uses: conda-incubator/setup-miniconda@v3
+        if: runner.os == 'Linux' && inputs.model_families != ''
+        with:
+          activate-environment: qwen3-tts
+          python-version: '3.12'
+          auto-activate-base: false
+      - name: Collect HIP model logs and outputs on the build runner
+        if: runner.os == 'Linux' && inputs.model_families != ''
+        shell: bash -el {0}
+        env:
+          MODEL_FAMILIES: ${{ inputs.model_families }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PYTHONUNBUFFERED: '1'
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/hip-model-rtf-$GITHUB_RUN_ID"
+          mkdir -p "$root/packages" "$root/results"
+          cp dist/*.tar.gz dist/SHA256SUMS "$root/packages/"
+          read -r -a families <<< "$MODEL_FAMILIES"
+          python scripts/ci/test_reuse_soulx_prebuilt.py --root "$root" --source-sha "$SOURCE_SHA" --models "${families[@]}" 2>&1 | tee "$root/results/collection.log"
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux' && inputs.model_families != ''
+        with:
+          name: reuse-soulx-prebuilt-hip-rtf
+          path: ${{ runner.temp }}/hip-model-rtf-${{ github.run_id }}/results/
+          retention-days: 1
