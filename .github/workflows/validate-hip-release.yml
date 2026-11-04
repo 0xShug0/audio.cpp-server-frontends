@@ -164,6 +164,10 @@ jobs:
           activate-environment: qwen3-tts
           python-version: '3.12'
           auto-activate-base: false
+          # The home directory is RAM on the DevLab Strix Halo runners and outlives
+          # the job; runner.temp is on scratch and is cleaned after it.
+          installation-dir: ${{ runner.temp }}/miniconda3
+          pkgs-dirs: ${{ runner.temp }}/conda_pkgs
       - name: Collect prebuilt HIP logs and outputs sequentially
         shell: bash -el {0}
         env:
