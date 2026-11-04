@@ -116,10 +116,13 @@ jobs:
           activate-environment: qwen3-tts
           python-version: '3.12'
           auto-activate-base: false
-          # The home directory is RAM on the DevLab Strix Halo runners and outlives
-          # the job; runner.temp is on scratch and is cleaned after it.
-          installation-dir: ${{ runner.temp }}/miniconda3
-          pkgs-dirs: ${{ runner.temp }}/conda_pkgs
+          # Linux only: there the home directory is RAM on the DevLab Strix Halo
+          # runners and outlives the job, while runner.temp is on scratch and is
+          # cleaned after it. Not on Windows: conda init writes the shared
+          # account's PowerShell profile, and once runner.temp is cleaned that
+          # profile points at a deleted install and fails every PowerShell step.
+          installation-dir: ${{ runner.os == 'Linux' && format('{0}/miniconda3', runner.temp) || '' }}
+          pkgs-dirs: ${{ runner.os == 'Linux' && format('{0}/conda_pkgs', runner.temp) || '' }}
       - name: Collect HIP model logs and outputs on the build runner
         if: runner.os == 'Linux' && inputs.model_families != ''
         shell: bash -el {0}
