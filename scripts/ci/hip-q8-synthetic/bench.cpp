@@ -63,6 +63,8 @@ static double median(std::vector<double> values);
 static void projection_blocks(ggml_backend_t a, ggml_backend_t b, int hidden, int kv,
                               int ff, int cols, std::mt19937 & rng) {
     Graph ga(a), gb(b);
+    auto * wa_ctx = ggml_init({1024 * 1024, nullptr, true});
+    auto * wb_ctx = ggml_init({1024 * 1024, nullptr, true});
     std::normal_distribution<float> sample(0, 0.1f);
     struct Upload {
         ggml_tensor * a;
@@ -74,6 +76,8 @@ static void projection_blocks(ggml_backend_t a, ggml_backend_t b, int hidden, in
     for (int layer = 0; layer < 4; ++layer) {
         const int shapes[][2] = {{hidden, hidden}, {hidden, kv}, {hidden, kv},
                                 {hidden, hidden}, {hidden, ff}, {hidden, ff}, {ff, hidden}};
+        ggml_tensor * xa = nullptr, * xb = nullptr;
+        int projection = 0;
         for (const auto & shape : shapes) {
             const int k = shape[0], m = shape[1];
             std::vector<float> source(size_t(k) * m);
@@ -81,16 +85,20 @@ static void projection_blocks(ggml_backend_t a, ggml_backend_t b, int hidden, in
             std::vector<unsigned char> weights(ggml_row_size(GGML_TYPE_Q8_0, k) * m);
             require(ggml_quantize_chunk(GGML_TYPE_Q8_0, source.data(), weights.data(), 0, m, k, nullptr)
                     == weights.size(), "block quantization size mismatch");
-            auto * wa = ggml_new_tensor_2d(ga.ctx, GGML_TYPE_Q8_0, k, m);
-            auto * wb = ggml_new_tensor_2d(gb.ctx, GGML_TYPE_Q8_0, k, m);
-            auto * xa = ggml_new_tensor_2d(ga.ctx, GGML_TYPE_F32, k, cols);
-            auto * xb = ggml_new_tensor_2d(gb.ctx, GGML_TYPE_F32, k, cols);
+            auto * wa = ggml_new_tensor_2d(wa_ctx, GGML_TYPE_Q8_0, k, m);
+            auto * wb = ggml_new_tensor_2d(wb_ctx, GGML_TYPE_Q8_0, k, m);
             uploads.push_back({wa, wb, std::move(weights)});
-            std::vector<float> values(k * cols);
-            for (auto & value : values) value = sample(rng);
-            std::vector<unsigned char> bytes(values.size() * sizeof(float));
-            std::memcpy(bytes.data(), values.data(), bytes.size());
-            uploads.push_back({xa, xb, std::move(bytes)});
+            // Q/K/V share input; so do the gate and up projections.
+            if (projection != 1 && projection != 2 && projection != 5) {
+                xa = ggml_new_tensor_2d(ga.ctx, GGML_TYPE_F32, k, cols);
+                xb = ggml_new_tensor_2d(gb.ctx, GGML_TYPE_F32, k, cols);
+                std::vector<float> values(k * cols);
+                for (auto & value : values) value = sample(rng);
+                std::vector<unsigned char> bytes(values.size() * sizeof(float));
+                std::memcpy(bytes.data(), values.data(), bytes.size());
+                uploads.push_back({xa, xb, std::move(bytes)});
+            }
+            ++projection;
             ga.output = ggml_mul_mat(ga.ctx, wa, xa);
             gb.output = ggml_mul_mat(gb.ctx, wb, xb);
             ggml_build_forward_expand(ga.graph, ga.output);
@@ -99,7 +107,11 @@ static void projection_blocks(ggml_backend_t a, ggml_backend_t b, int hidden, in
     }
     ga.buffer = ggml_backend_alloc_ctx_tensors(ga.ctx, a);
     gb.buffer = ggml_backend_alloc_ctx_tensors(gb.ctx, b);
-    require(ga.buffer && gb.buffer, "projection block allocation failed");
+    auto * wa_buffer = ggml_backend_alloc_ctx_tensors(wa_ctx, a);
+    auto * wb_buffer = ggml_backend_alloc_ctx_tensors(wb_ctx, b);
+    require(ga.buffer && gb.buffer && wa_buffer && wb_buffer, "projection block allocation failed");
+    ggml_backend_buffer_set_usage(wa_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    ggml_backend_buffer_set_usage(wb_buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     for (const auto & item : uploads) {
         ggml_backend_tensor_set(item.a, item.bytes.data(), 0, item.bytes.size());
         ggml_backend_tensor_set(item.b, item.bytes.data(), 0, item.bytes.size());
@@ -125,6 +137,10 @@ static void projection_blocks(ggml_backend_t a, ggml_backend_t b, int hidden, in
     const double ma = median(ta), mb = median(tb);
     std::printf("projection_blocks,H=%d,KV=%d,FF=%d,N=%d,default_us=%.3f,selected_us=%.3f,reduction_pct=%.2f\n",
                 hidden,kv,ff,cols,ma,mb,100*(1-mb/ma));
+    ggml_backend_buffer_free(wb_buffer);
+    ggml_backend_buffer_free(wa_buffer);
+    ggml_free(wb_ctx);
+    ggml_free(wa_ctx);
 }
 
 static double median(std::vector<double> values) {

@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Apply opt-in Q8 experiment
-        run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-q8-synthetic/q8-load.patch"
+        run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-q8-synthetic/q8-group.patch"
       - name: Build GGML and run generated tensor benchmark
         run: |
           set -euo pipefail
