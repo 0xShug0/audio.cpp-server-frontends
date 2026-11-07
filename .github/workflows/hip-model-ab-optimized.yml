@@ -22,6 +22,10 @@ on:
         description: Build and run the diagnostic YuE2 and VibeVoice profile
         type: boolean
         default: false
+      q4_pair:
+        description: Build with the experimental gfx1151 Q4_0 pair kernel
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -75,6 +79,9 @@ jobs:
       - name: Apply diagnostic-only instrumentation
         if: inputs.decode_profile
         run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-decode-profile.patch"
+      - name: Apply isolated gfx1151 Q4 pair experiment
+        if: inputs.q4_pair
+        run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-q4-pair.patch"
       - name: Build optimized testing prebuilt, never publish
         run: python scripts/ci/hip-release-only/build_hip_release.py --source source --output dist --optimized-test
       - uses: actions/upload-artifact@v4
