@@ -1,0 +1,233 @@
+name: Optimized HIP prebuilt model A-B
+
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-model-ab-optimized.yml
+      - scripts/ci/collect_hip_model_ab.py
+      - scripts/ci/hip_model_ab_manifest.json
+      - scripts/ci/hip-release-only/build_hip_release.py
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Reuse the optimized prebuilt from this run instead of rebuilding
+        type: string
+        default: ''
+      completed_models:
+        description: JSON array of models already validated outside the runner; never rerun these
+        type: string
+        default: '[]'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: optimized-hip-model-ab
+  cancel-in-progress: false
+
+env:
+  GIT_LFS_SKIP_SMUDGE: '1'
+
+jobs:
+  build:
+    if: github.event_name == 'push' || inputs.artifact_run_id == ''
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 120
+    env:
+      ROCM_VERSION: '10.0.0'
+      GPU_TARGETS: gfx1151
+      SOURCE_REPOSITORY: 0xShug0/audio.cpp
+      RELEASE_VERSION: optimized-ab-04a58777
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: 04a587779625f334b666b26f2ec92827f4cbfad7
+          path: source
+          persist-credentials: false
+          sparse-checkout: |
+            app
+            include
+            src
+            external
+            model_specs
+            tools
+            scripts
+            tests/perf
+            webui/native/dist
+            webui/native/demo_voices
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools (no GitHub caches)
+        run: python -m pip install --no-cache-dir cmake ninja patchelf
+      - name: Build optimized testing prebuilt, never publish
+        run: python scripts/ci/hip-release-only/build_hip_release.py --source source --output dist --optimized-test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optimized-hip-build-logs
+          path: dist/logs/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: optimized-hip-prebuilt
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+  models:
+    needs: build
+    if: always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.artifact_run_id != ''))
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 360
+    env:
+      OMP_NUM_THREADS: '8'
+      OPENBLAS_NUM_THREADS: '8'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: optimized-hip-prebuilt
+          path: packages
+          run-id: ${{ inputs.artifact_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Install runtime and direct-download client (no model caches)
+        run: |
+          python -m pip install --no-cache-dir huggingface_hub
+          python -m pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,device-gfx1151]==10.0.0'
+      - name: Extract exact prebuilt and retain environment evidence
+        id: setup
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess, tarfile, rocm_sdk
+          packages = pathlib.Path('packages')
+          for line in (packages / 'SHA256SUMS').read_text().splitlines():
+              expected, filename = line.split(None, 1)
+              with (packages / filename.strip()).open('rb') as stream:
+                  assert hashlib.file_digest(stream, 'sha256').hexdigest() == expected
+          archive, = packages.glob('*.tar.gz')
+          binary = pathlib.Path('binary').resolve()
+          binary.mkdir()
+          with tarfile.open(archive) as package:
+              package.extractall(binary, filter='data')
+          manifest = json.loads(pathlib.Path('scripts/ci/hip_model_ab_manifest.json').read_text())
+          build = json.loads((binary / 'BUILD.json').read_text())
+          assert build['source_sha'] == manifest['source_sha']
+          assert build['openmp'] and build['optimized_test'] and build['cpu'] == 'native'
+          paths = list(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64', 'hipblas', 'hipblaslt')))
+          library_path = os.pathsep.join([str(binary), *paths])
+          os.environ['LD_LIBRARY_PATH'] = library_path
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / ('model-ab-' + os.environ['GITHUB_RUN_ID'])
+          root.mkdir()
+          pathlib.Path('results/environment').mkdir(parents=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'LD_LIBRARY_PATH={library_path}\nMODEL_AB_ROOT={root}\nMODEL_AB_BINARY={binary / "audiocpp_cli"}\n')
+          pathlib.Path('results/environment/BUILD.json').write_text(json.dumps(build, indent=2))
+          for name, command in [('version', [str(binary / 'audiocpp_cli'), '--version']),
+                                ('devices', [str(binary / 'audiocpp_cli'), '--list-devices']),
+                                ('cpu', ['lscpu']), ('disk', ['df', '-h']), ('memory', ['free', '-h']),
+                                ('libraries', ['ldd', str(binary / 'audiocpp_cli')])]:
+              with open(f'results/environment/{name}.log', 'wb') as output:
+                  subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, check=True, env=os.environ)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: optimized-hip-environment
+          path: results/environment/
+          retention-days: 7
+      - name: Chatterbox raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'chatterbox') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model chatterbox --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-chatterbox
+          path: results/chatterbox/
+          retention-days: 7
+      - name: Fish Audio raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'fish_audio') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model fish_audio --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-fish_audio
+          path: results/fish_audio/
+          retention-days: 7
+      - name: Higgs Audio raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'higgs_audio_tts') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model higgs_audio_tts --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-higgs_audio_tts
+          path: results/higgs_audio_tts/
+          retention-days: 7
+      - name: IndexTTS 2.5 raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'index_tts2_5') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model index_tts2_5 --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-index_tts2_5
+          path: results/index_tts2_5/
+          retention-days: 7
+      - name: PocketTTS raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'pocket_tts') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model pocket_tts --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-pocket_tts
+          path: results/pocket_tts/
+          retention-days: 7
+      - name: VibeVoice raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'vibevoice') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model vibevoice --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-vibevoice
+          path: results/vibevoice/
+          retention-days: 7
+      - name: YuE2 raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'yue2') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model yue2 --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-yue2
+          path: results/yue2/
+          retention-days: 7
+      - name: ACE-Step Turbo raw A-B
+        if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'ace_step_turbo') }}
+        continue-on-error: true
+        run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model ace_step_turbo --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-ab-ace_step_turbo
+          path: results/ace_step_turbo/
+          retention-days: 7

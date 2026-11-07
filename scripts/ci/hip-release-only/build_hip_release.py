@@ -20,6 +20,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--optimized-test', action='store_true',
+                        help='Linux-only native-CPU/OpenMP test package; never a published release')
     args = parser.parse_args()
     source = args.source.resolve()
     output = args.output.resolve()
@@ -27,6 +29,8 @@ def main():
     logs = output / 'logs'
     logs.mkdir(exist_ok=True)
     windows = platform.system() == 'Windows'
+    if args.optimized_test and windows:
+        raise ValueError('--optimized-test is currently Linux-only')
     version = os.environ['RELEASE_VERSION']
     if not version or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_' for c in version):
         raise ValueError('version must be an archive-safe version string')
@@ -75,9 +79,10 @@ def main():
     command = ['cmake', '-S', source, '-B', build, '-G', 'Ninja',
                '-DCMAKE_BUILD_TYPE=Release', '-DENGINE_ENABLE_HIP=ON',
                '-DENGINE_ENABLE_CUDA=OFF', '-DENGINE_ENABLE_VULKAN=OFF',
-               '-DENGINE_ENABLE_NATIVE_CPU=OFF',
+               f'-DENGINE_ENABLE_NATIVE_CPU={"ON" if args.optimized_test else "OFF"}',
                f'-DENGINE_ENABLE_CPU_ALL_VARIANTS={"ON" if windows else "OFF"}',
-               '-DENGINE_ENABLE_OPENMP=OFF', '-DGGML_OPENMP=OFF',
+               f'-DENGINE_ENABLE_OPENMP={"ON" if args.optimized_test else "OFF"}',
+               f'-DGGML_OPENMP={"ON" if args.optimized_test else "OFF"}',
                '-DAUDIOCPP_DEPLOYMENT_BUILD=ON', '-DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON',
                '-DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF', '-DAUDIOCPP_MODEL_SET=full',
                '-DAUDIOCPP_BUILD_C_API=OFF', '-DAUDIOCPP_USE_SYSTEM_OPENSSL=OFF',
@@ -138,7 +143,8 @@ def main():
     manifest = dict(source_repository=os.environ.get('SOURCE_REPOSITORY', '0xShug0/audio.cpp'),
                     source_sha=subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip(),
                     rocm_version=rocm_version, gpu_targets=targets.split(';'),
-                    cpu='runtime dispatch' if windows else 'AVX2/FMA/F16C',
+                    cpu='native' if args.optimized_test else 'runtime dispatch' if windows else 'AVX2/FMA/F16C',
+                    openmp=args.optimized_test, optimized_test=args.optimized_test,
                     hip_backend='dynamic' if windows else 'linked', deployment=True, full_model_build=True)
     (stage / 'BUILD.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     readme = Path(__file__).with_name('hip_release_README.md').read_text(encoding='utf-8')
