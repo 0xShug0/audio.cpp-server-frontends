@@ -26,6 +26,10 @@ on:
         description: Build with the experimental gfx1151 Q4_0 pair kernel
         type: boolean
         default: false
+      q4_pair_control:
+        description: Compare previous and new gfx1151 Q4 dispatch in the same binary
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -80,8 +84,11 @@ jobs:
         if: inputs.decode_profile
         run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-decode-profile.patch"
       - name: Apply isolated gfx1151 Q4 pair experiment
-        if: inputs.q4_pair
+        if: inputs.q4_pair && !inputs.q4_pair_control
         run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-q4-pair.patch"
+      - name: Apply test-only Q4 dispatch control
+        if: inputs.q4_pair_control
+        run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-q4-pair-control.patch"
       - name: Build optimized testing prebuilt, never publish
         run: python scripts/ci/hip-release-only/build_hip_release.py --source source --output dist --optimized-test
       - uses: actions/upload-artifact@v4
@@ -233,6 +240,7 @@ jobs:
       - name: YuE2 raw A-B
         env:
           AUDIOCPP_HIP_TRACE_SHAPES: ${{ inputs.decode_profile && '1' || '' }}
+          AUDIOCPP_HIP_COMPARE_Q4_PAIR: ${{ inputs.q4_pair_control && '1' || '' }}
         if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'yue2') }}
         continue-on-error: true
         run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model yue2 --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results

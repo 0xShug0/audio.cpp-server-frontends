@@ -133,6 +133,13 @@ def collect(args):
         shutil.copy2(sequence, results / 'requests.json')
         shutil.copy2(args.manifest, results / 'campaign-manifest.json')
         for label, implementation in ORDER:
+            variant_env = env.copy()
+            if env.get('AUDIOCPP_HIP_COMPARE_Q4_PAIR'):
+                implementation = 'gfx1151_v1'
+                if label.startswith('a'):
+                    variant_env['AUDIOCPP_HIP_Q4_PAIR_CONTROL'] = '1'
+                else:
+                    variant_env.pop('AUDIOCPP_HIP_Q4_PAIR_CONTROL', None)
             output = results / label
             command = [args.binary, '--task', task, '--family', model['family'], '--mode', 'offline',
                        '--model', model_path, '--backend', 'hip', '--threads', manifest['threads'],
@@ -140,10 +147,11 @@ def collect(args):
             if implementation:
                 command += ['--backend-impl', implementation]
             try:
-                variant = run_raw(command, results / label, env, args.binary.parent, args.timeout)
+                variant = run_raw(command, results / label, variant_env, args.binary.parent, args.timeout)
             except Exception as error:
                 variant = {'exit_code': 'harness_error', 'error': str(error)}
             variant.update(label=label, implementation=implementation or 'default',
+                           q4_pair_control='AUDIOCPP_HIP_Q4_PAIR_CONTROL' in variant_env,
                            outputs=[{'path': str(p.relative_to(results)), 'bytes': p.stat().st_size}
                                     for p in output.rglob('*') if p.is_file()] if output.exists() else [])
             status['variants'].append(variant)
