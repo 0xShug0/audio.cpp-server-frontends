@@ -1,0 +1,87 @@
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 7eb7e81e..26c6f829 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2768,6 +2768,14 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
+ #ifdef GGML_USE_HIP
++    static const bool trace_shapes = getenv("AUDIOCPP_HIP_TRACE_SHAPES") != nullptr;
++    if (trace_shapes) {
++        fprintf(stderr, "[HIP_SHAPE] %s %s %s k=%lld m=%lld n=%lld a2=%lld a3=%lld b2=%lld b3=%lld a_stride=%zu b_stride=%zu lowering=%d\n",
++                dst->name, src0->name, ggml_type_name(src0->type),
++                (long long) src0->ne[0], (long long) src0->ne[1], (long long) src1->ne[1],
++                (long long) src0->ne[2], (long long) src0->ne[3], (long long) src1->ne[2], (long long) src1->ne[3],
++                src0->nb[1], src1->nb[1], ggml_get_op_params_i32(dst, 1));
++    }
+     if (ctx.impl && ctx.impl->mul_mat) {
+         const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
+         if (ggml_backend_buffer_get_type(src0->buffer) == buft &&
+diff --git a/src/models/vibevoice/generator.cpp b/src/models/vibevoice/generator.cpp
+index e9867780..b225e10a 100644
+--- a/src/models/vibevoice/generator.cpp
++++ b/src/models/vibevoice/generator.cpp
+@@ -570,6 +570,7 @@ VibeVoiceResult generate_vibevoice(
+     std::mt19937 sampler_rng(request.generation.seed);
+ 
+     auto current = std::move(positive.result);
++    double diffusion_ms = 0, acoustic_ms = 0, semantic_ms = 0, connector_ms = 0, decoder_ms = 0;
+     for (int64_t step = 0; step < max_steps; ++step) {
+         const int32_t token = select_vibevoice_constrained_token(
+             current.logits,
+@@ -609,7 +610,9 @@ VibeVoiceResult generate_vibevoice(
+             diffusion_input.latent_size = latent_size;
+             diffusion_input.inference_steps = request.generation.num_inference_steps;
+             diffusion_input.guidance_scale = request.generation.guidance_scale;
++            auto phase_start = std::chrono::steady_clock::now();
+             auto speech_latents = sample_vibevoice_speech_latents(diffusion_head, diffusion_scheduler, diffusion_input);
++            diffusion_ms += engine::debug::elapsed_ms(phase_start);
+             if (speech_latents.size() != 1) {
+                 throw std::runtime_error("VibeVoice diffusion sampler returned unexpected batch size");
+             }
+@@ -618,10 +621,15 @@ VibeVoiceResult generate_vibevoice(
+                 speech_latents.front(),
+                 audio_tokenizer.assets().speech_scaling_factor,
+                 audio_tokenizer.assets().speech_bias_factor);
++            phase_start = std::chrono::steady_clock::now();
+             auto chunk = audio_tokenizer.decode_acoustic_streaming(decoder_latents, acoustic_streaming_state);
++            acoustic_ms += engine::debug::elapsed_ms(phase_start);
+             append_audio(audio_samples, chunk);
+             if (on_audio) on_audio(chunk);
++            phase_start = std::chrono::steady_clock::now();
+             auto semantic_features = audio_tokenizer.encode_semantic_streaming(chunk, semantic_streaming_state);
++            semantic_ms += engine::debug::elapsed_ms(phase_start);
++            phase_start = std::chrono::steady_clock::now();
+             auto acoustic_embedding = connector.project_acoustic(
+                 speech_latents.front().values,
+                 speech_latents.front().frames,
+@@ -631,6 +639,7 @@ VibeVoiceResult generate_vibevoice(
+                 semantic_features.frames,
+                 semantic_features.dim);
+             next_embedding = add_embeddings(acoustic_embedding, semantic_embedding);
++            connector_ms += engine::debug::elapsed_ms(phase_start);
+             if (static_cast<int64_t>(next_embedding.size()) != prompt.hidden_size) {
+                 throw std::runtime_error("VibeVoice generated diffusion embedding shape mismatch");
+             }
+@@ -638,6 +647,7 @@ VibeVoiceResult generate_vibevoice(
+             next_embedding = single_token_embedding(decoder, token, prompt.hidden_size);
+         }
+ 
++        const auto decoder_start = std::chrono::steady_clock::now();
+         if (token == text_tokenizer.speech_diffusion_id()) {
+             negative.result = decoder.cached_step(
+                 next_embedding,
+@@ -648,7 +658,13 @@ VibeVoiceResult generate_vibevoice(
+             next_embedding,
+             positive_cache,
+             prompt.steps + step + 1);
++        decoder_ms += engine::debug::elapsed_ms(decoder_start);
+     }
++    engine::debug::timing_log_scalar("vibevoice.profile.diffusion_ms", diffusion_ms);
++    engine::debug::timing_log_scalar("vibevoice.profile.acoustic_decode_ms", acoustic_ms);
++    engine::debug::timing_log_scalar("vibevoice.profile.semantic_encode_ms", semantic_ms);
++    engine::debug::timing_log_scalar("vibevoice.profile.connector_ms", connector_ms);
++    engine::debug::timing_log_scalar("vibevoice.profile.decoder_ms", decoder_ms);
+ 
+     if (audio_samples.empty()) {
+         throw std::runtime_error("VibeVoice generation produced no audio");

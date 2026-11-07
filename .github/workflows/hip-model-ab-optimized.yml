@@ -18,6 +18,10 @@ on:
         description: JSON array of models already validated outside the runner; never rerun these
         type: string
         default: '[]'
+      decode_profile:
+        description: Build and run the diagnostic YuE2 and VibeVoice profile
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,6 +72,9 @@ jobs:
           python-version: '3.12'
       - name: Install build tools (no GitHub caches)
         run: python -m pip install --no-cache-dir cmake ninja patchelf
+      - name: Apply diagnostic-only instrumentation
+        if: inputs.decode_profile
+        run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-decode-profile.patch"
       - name: Build optimized testing prebuilt, never publish
         run: python scripts/ci/hip-release-only/build_hip_release.py --source source --output dist --optimized-test
       - uses: actions/upload-artifact@v4
@@ -217,6 +224,8 @@ jobs:
           path: results/vibevoice/
           retention-days: 7
       - name: YuE2 raw A-B
+        env:
+          AUDIOCPP_HIP_TRACE_SHAPES: ${{ inputs.decode_profile && '1' || '' }}
         if: ${{ always() && steps.setup.outcome == 'success' && !contains(fromJSON(inputs.completed_models || '[]'), 'yue2') }}
         continue-on-error: true
         run: python scripts/ci/collect_hip_model_ab.py --manifest scripts/ci/hip_model_ab_manifest.json --model yue2 --binary "$MODEL_AB_BINARY" --workspace "$MODEL_AB_ROOT" --results results
