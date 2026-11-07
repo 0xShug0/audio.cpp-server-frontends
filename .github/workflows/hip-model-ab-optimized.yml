@@ -110,8 +110,12 @@ jobs:
           github-token: ${{ github.token }}
       - name: Install runtime and direct-download client (no model caches)
         run: |
+          python -m venv "$RUNNER_TEMP/hip-ab-python"
+          export PATH="$RUNNER_TEMP/hip-ab-python/bin:$PATH"
+          echo "$RUNNER_TEMP/hip-ab-python/bin" >> "$GITHUB_PATH"
           python -m pip install --no-cache-dir huggingface_hub
           python -m pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,device-gfx1151]==10.0.0'
+          python -c 'from huggingface_hub import snapshot_download; import rocm_sdk'
       - name: Extract exact prebuilt and retain environment evidence
         id: setup
         run: |
