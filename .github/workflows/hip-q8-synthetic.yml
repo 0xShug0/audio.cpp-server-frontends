@@ -1,0 +1,54 @@
+name: Synthetic HIP Q8 A-B
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 30
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci/hip-q8-synthetic
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: 04a587779625f334b666b26f2ec92827f4cbfad7
+          path: source
+          sparse-checkout: external/ggml
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build GGML and run generated tensor benchmark
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          exec > >(tee results/run.log) 2>&1
+          python -m venv "$RUNNER_TEMP/q8-hip-sdk"
+          export PATH="$RUNNER_TEMP/q8-hip-sdk/bin:$PATH"
+          python -m pip install --no-cache-dir cmake ninja
+          python -m pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,devel]==10.0.0'
+          rocm-sdk init
+          export ROCM_PATH="$(rocm-sdk path --root)"
+          export HIP_PATH="$ROCM_PATH"
+          export PATH="$(rocm-sdk path --bin):$PATH"
+          export LD_LIBRARY_PATH="$ROCM_PATH/lib:${LD_LIBRARY_PATH:-}"
+          cmake -S scripts/ci/hip-q8-synthetic -B build-q8 -G Ninja \
+            -DGGML_SOURCE="$PWD/source/external/ggml" -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGPU_TARGETS=gfx1151 \
+            -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF \
+            -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" \
+            -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang"
+          cmake --build build-q8 -j 8 --target hip_q8_synthetic
+          build-q8/hip_q8_synthetic | tee results/q8.csv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-hip-q8
+          path: results/
+          retention-days: 7

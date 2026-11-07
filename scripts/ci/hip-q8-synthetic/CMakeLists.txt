@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.21)
+project(hip_q8_synthetic LANGUAGES C CXX)
+add_subdirectory("${GGML_SOURCE}" ggml)
+add_executable(hip_q8_synthetic bench.cpp)
+target_compile_features(hip_q8_synthetic PRIVATE cxx_std_17)
+target_link_libraries(hip_q8_synthetic PRIVATE ggml)
