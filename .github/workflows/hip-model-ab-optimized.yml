@@ -60,6 +60,7 @@ jobs:
             tools
             scripts
             tests/perf
+            tests/soulx_flashhead
             webui/native/dist
             webui/native/demo_voices
       - uses: actions/setup-python@v5
