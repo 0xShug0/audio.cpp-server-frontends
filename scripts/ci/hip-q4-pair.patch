@@ -48,10 +48,10 @@ index 206d4a69..01d7f474 100644
  bool ggml_hip_gfx1151_v1_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
 +bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor *, const void *, int64_t, ggml_tensor *, hipStream_t, int cc);
 diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu b/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
-index 29df0bc8..8414e8c0 100644
+index 29df0bc8..683b289d 100644
 --- a/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
 +++ b/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
-@@ -1,10 +1,37 @@
+@@ -1,10 +1,50 @@
  #include "gfx1151_v1.cuh"
  #include "ggml-cuda/convert.cuh"
  #include "ggml-cuda/mma.cuh"
@@ -75,8 +75,21 @@ index 29df0bc8..8414e8c0 100644
 +    float sum0 = 0.0f;
 +    float sum1 = 0.0f;
 +    for (int k = lane / lanes_per_block; k < blocks; k += 32 / lanes_per_block) {
-+        sum0 += vec_dot_q4_0_q8_1(weights, b + k, k, iqs);
-+        sum1 += vec_dot_q4_0_q8_1(weights, b + b_stride + k, k, iqs);
++        constexpr int vdr = VDR_Q4_0_Q8_1_MMVQ;
++        int v[vdr], u0[2*vdr], u1[2*vdr];
++        const auto & w = weights[k];
++        const auto & x0 = b[k];
++        const auto & x1 = b[b_stride + k];
++#pragma unroll
++        for (int i = 0; i < vdr; ++i) {
++            v[i] = get_int_b2(w.qs, iqs + i);
++            u0[2*i] = get_int_b4(x0.qs, iqs + i);
++            u0[2*i + 1] = get_int_b4(x0.qs, iqs + i + QI4_0);
++            u1[2*i] = get_int_b4(x1.qs, iqs + i);
++            u1[2*i + 1] = get_int_b4(x1.qs, iqs + i + QI4_0);
++        }
++        sum0 += vec_dot_q4_0_q8_1_impl<vdr>(v, u0, w.d, x0.ds);
++        sum1 += vec_dot_q4_0_q8_1_impl<vdr>(v, u1, w.d, x1.ds);
 +    }
 +    sum0 = warp_reduce_sum<32>(sum0);
 +    sum1 = warp_reduce_sum<32>(sum1);
@@ -89,7 +102,7 @@ index 29df0bc8..8414e8c0 100644
  template<typename pair_type>
  __global__ __launch_bounds__(128) void gfx1151_v1_matmul_tiled(
          const char * a, const float * b, float * c,
-@@ -91,6 +118,22 @@ void launch(const ggml_tensor * a, const ggml_tensor * b, ggml_tensor * out, hip
+@@ -91,6 +131,22 @@ void launch(const ggml_tensor * a, const ggml_tensor * b, ggml_tensor * out, hip
  
  } // namespace
  
