@@ -48,7 +48,7 @@ index 206d4a69..1aeda012 100644
  bool ggml_hip_gfx1151_v1_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
 +bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor *, const void *, int64_t, ggml_tensor *, hipStream_t, int);
 diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu b/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
-index 29df0bc8..6a3c8dd5 100644
+index 29df0bc8..724923ab 100644
 --- a/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
 +++ b/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
 @@ -1,10 +1,52 @@
@@ -67,8 +67,8 @@ index 29df0bc8..6a3c8dd5 100644
 +    const int row = int(blockIdx.x) * 4 + threadIdx.y;
 +    if (row >= rows) return;
 +    const int lane = threadIdx.x;
-+    // Accumulate 16 integer products before applying the block scales.
-+    constexpr int vdr = 4;
++    // Each lane applies the scales once to a full block's integer dot product.
++    constexpr int vdr = QI8_0;
 +    constexpr int lanes_per_block = QI8_0 / vdr;
 +    const int iqs = vdr * (lane % lanes_per_block);
 +    const auto * weights = a + int64_t(row) * blocks;
