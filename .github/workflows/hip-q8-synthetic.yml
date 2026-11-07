@@ -29,6 +29,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Apply opt-in Q8 experiment
+        run: git -C source apply "$GITHUB_WORKSPACE/scripts/ci/hip-q8-synthetic/q8-wave.patch"
       - name: Build GGML and run generated tensor benchmark
         run: |
           set -euo pipefail
