@@ -18,10 +18,17 @@ index 7eb7e81e..26c6f829 100644
          const auto buft = ggml_backend_cuda_buffer_type(ctx.device);
          if (ggml_backend_buffer_get_type(src0->buffer) == buft &&
 diff --git a/src/models/vibevoice/generator.cpp b/src/models/vibevoice/generator.cpp
-index e9867780..b225e10a 100644
+index e9867780..010881fb 100644
 --- a/src/models/vibevoice/generator.cpp
 +++ b/src/models/vibevoice/generator.cpp
-@@ -570,6 +570,7 @@ VibeVoiceResult generate_vibevoice(
+@@ -1,5 +1,6 @@
+ #include "engine/models/vibevoice/generator.h"
+ 
++#include "engine/framework/debug/profiler.h"
+ #include "engine/framework/debug/trace.h"
+ #include "engine/framework/io/binary.h"
+ #include "engine/framework/sampling/torch_random.h"
+@@ -570,6 +571,7 @@ VibeVoiceResult generate_vibevoice(
      std::mt19937 sampler_rng(request.generation.seed);
  
      auto current = std::move(positive.result);
@@ -29,7 +36,7 @@ index e9867780..b225e10a 100644
      for (int64_t step = 0; step < max_steps; ++step) {
          const int32_t token = select_vibevoice_constrained_token(
              current.logits,
-@@ -609,7 +610,9 @@ VibeVoiceResult generate_vibevoice(
+@@ -609,7 +611,9 @@ VibeVoiceResult generate_vibevoice(
              diffusion_input.latent_size = latent_size;
              diffusion_input.inference_steps = request.generation.num_inference_steps;
              diffusion_input.guidance_scale = request.generation.guidance_scale;
@@ -39,7 +46,7 @@ index e9867780..b225e10a 100644
              if (speech_latents.size() != 1) {
                  throw std::runtime_error("VibeVoice diffusion sampler returned unexpected batch size");
              }
-@@ -618,10 +621,15 @@ VibeVoiceResult generate_vibevoice(
+@@ -618,10 +622,15 @@ VibeVoiceResult generate_vibevoice(
                  speech_latents.front(),
                  audio_tokenizer.assets().speech_scaling_factor,
                  audio_tokenizer.assets().speech_bias_factor);
@@ -55,7 +62,7 @@ index e9867780..b225e10a 100644
              auto acoustic_embedding = connector.project_acoustic(
                  speech_latents.front().values,
                  speech_latents.front().frames,
-@@ -631,6 +639,7 @@ VibeVoiceResult generate_vibevoice(
+@@ -631,6 +640,7 @@ VibeVoiceResult generate_vibevoice(
                  semantic_features.frames,
                  semantic_features.dim);
              next_embedding = add_embeddings(acoustic_embedding, semantic_embedding);
@@ -63,7 +70,7 @@ index e9867780..b225e10a 100644
              if (static_cast<int64_t>(next_embedding.size()) != prompt.hidden_size) {
                  throw std::runtime_error("VibeVoice generated diffusion embedding shape mismatch");
              }
-@@ -638,6 +647,7 @@ VibeVoiceResult generate_vibevoice(
+@@ -638,6 +648,7 @@ VibeVoiceResult generate_vibevoice(
              next_embedding = single_token_embedding(decoder, token, prompt.hidden_size);
          }
  
@@ -71,7 +78,7 @@ index e9867780..b225e10a 100644
          if (token == text_tokenizer.speech_diffusion_id()) {
              negative.result = decoder.cached_step(
                  next_embedding,
-@@ -648,7 +658,13 @@ VibeVoiceResult generate_vibevoice(
+@@ -648,7 +659,13 @@ VibeVoiceResult generate_vibevoice(
              next_embedding,
              positive_cache,
              prompt.steps + step + 1);
