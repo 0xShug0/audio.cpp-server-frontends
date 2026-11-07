@@ -1,0 +1,141 @@
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 7eb7e81e..7369d4fc 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -5708,6 +5708,7 @@ static ggml_backend_t ggml_backend_hip_init_with_impl(
+     }
+     static const ggml_hip_impl gfx1151_v1 = {
+         "gfx1151_v1", ggml_hip_gfx1151_v1_mul_mat, ggml_hip_gfx1151_v1_im2col, ggml_hip_gfx1151_v1_cpy,
++        ggml_hip_gfx1151_v1_mmvq,
+     };
+     ggml_backend_t backend = ggml_backend_cuda_device_init_backend(dev, params);
+     if (backend) {
+diff --git a/external/ggml/src/ggml-cuda/mmvq.cu b/external/ggml/src/ggml-cuda/mmvq.cu
+index d629b805..fea45412 100644
+--- a/external/ggml/src/ggml-cuda/mmvq.cu
++++ b/external/ggml/src/ggml-cuda/mmvq.cu
+@@ -2,6 +2,9 @@
+ #include "quantize.cuh"
+ #include "unary.cuh"
+ #include "vecdotq.cuh"
++#ifdef GGML_USE_HIP
++#include "ggml-hip/impl.cuh"
++#endif
+ 
+ #include <cstdint>
+ 
+@@ -1141,6 +1144,13 @@ void ggml_cuda_mul_mat_vec_q(
+ 
+     const int64_t ids_stride = ids ? ids->nb[1] / ggml_type_size(ids->type) : 0;
+ 
++#ifdef GGML_USE_HIP
++    if (ctx.impl && ctx.impl->mmvq && !ids && !fusion &&
++        ctx.impl->mmvq(src0, src1_q8_1.get(), s11, dst, stream, ggml_cuda_info().devices[ctx.device].cc)) {
++        return;
++    }
++#endif
++
+     mul_mat_vec_q_switch_type(
+         src0->data, src0->type, src1_q8_1.get(), ids_d, fusion_local, dst_d, ne00,
+         ne01,              ncols_dst,     s01, stride_col_y,     stride_col_dst,
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+index 206d4a69..1aeda012 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/gfx1151_v1.cuh
+@@ -7,3 +7,4 @@ bool ggml_hip_gfx1151_v1_mul_mat_typed(const ggml_tensor *, const ggml_tensor *,
+ bool ggml_hip_gfx1151_v1_im2col(const ggml_tensor *, ggml_tensor *, hipStream_t, int nsm);
+ 
+ bool ggml_hip_gfx1151_v1_cpy(const ggml_tensor *, ggml_tensor *, hipStream_t);
++bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor *, const void *, int64_t, ggml_tensor *, hipStream_t, int);
+diff --git a/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu b/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
+index 29df0bc8..99420b2e 100644
+--- a/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
++++ b/external/ggml/src/ggml-hip/gfx1151_v1/matmul.cu
+@@ -1,10 +1,52 @@
+ #include "gfx1151_v1.cuh"
+ #include "ggml-cuda/convert.cuh"
+ #include "ggml-cuda/mma.cuh"
++#include "ggml-cuda/vecdotq.cuh"
+ #include <climits>
+ 
+ namespace {
+ 
++template<int cols>
++__global__ __launch_bounds__(128) void gfx1151_v1_q8_wave(
++        const block_q8_0 * a, const block_q8_1 * b, float * out,
++        int rows, int blocks, int64_t b_stride) {
++    const int row = int(blockIdx.x) * 4 + threadIdx.y;
++    if (row >= rows) return;
++    const int lane = threadIdx.x;
++    // Each lane applies the scales once to a full block's integer dot product.
++    constexpr int vdr = QI8_0;
++    constexpr int lanes_per_block = QI8_0 / vdr;
++    const int iqs = vdr * (lane % lanes_per_block);
++    const auto * weights = a + int64_t(row) * blocks;
++    float sums[cols] = {};
++    for (int k = lane / lanes_per_block; k < blocks; k += 32 / lanes_per_block) {
++        int v[vdr];
++        const auto & w = weights[k];
++        // Q8_0 rows are only halfword-aligned; preserve that contract.
++        __builtin_memcpy(v, w.qs + sizeof(int) * iqs, sizeof(v));
++#pragma unroll
++        for (int c = 0; c < cols; ++c) {
++            int u[vdr];
++            const auto & x = b[c * b_stride + k];
++#pragma unroll
++            for (int i = 0; i < vdr; ++i) u[i] = get_int_b4(x.qs, iqs + i);
++            sums[c] += vec_dot_q8_0_q8_1_impl<float, vdr>(v, u, w.d, __low2half(x.ds));
++        }
++    }
++#pragma unroll
++    for (int c = 0; c < cols; ++c) {
++        const float sum = warp_reduce_sum<32>(sums[c]);
++        if (lane == 0) out[int64_t(c) * rows + row] = sum;
++    }
++}
++
++template<int cols>
++void launch_q8(const ggml_tensor * a, const void * b, int64_t b_stride, ggml_tensor * out, hipStream_t stream) {
++    gfx1151_v1_q8_wave<cols><<<(a->ne[1] + 3) / 4, dim3(32, 4), 0, stream>>>(
++        static_cast<const block_q8_0 *>(a->data), static_cast<const block_q8_1 *>(b),
++        static_cast<float *>(out->data), a->ne[1], a->ne[0] / QK8_0, b_stride);
++}
++
+ template<typename pair_type>
+ __global__ __launch_bounds__(128) void gfx1151_v1_matmul_tiled(
+         const char * a, const float * b, float * c,
+@@ -91,6 +133,24 @@ void launch(const ggml_tensor * a, const ggml_tensor * b, ggml_tensor * out, hip
+ 
+ } // namespace
+ 
++bool ggml_hip_gfx1151_v1_mmvq(const ggml_tensor * a, const void * b, int64_t b_stride,
++                             ggml_tensor * out, hipStream_t stream, int cc) {
++    if (cc != GGML_CUDA_CC_OFFSET_AMD + 0x1151 || a->type != GGML_TYPE_Q8_0 ||
++        out->op != GGML_OP_MUL_MAT || ggml_get_op_params_i32(out, 1) != GGML_MUL_MAT_LOWERING_DEFAULT ||
++        !ggml_is_matrix(a) || !ggml_is_matrix(out) ||
++        !ggml_is_contiguous(a) || !ggml_is_contiguous(out) ||
++        a->ne[0] > INT_MAX || a->ne[1] > INT_MAX - 3 || out->ne[0] != a->ne[1]) {
++        return false;
++    }
++    switch (out->ne[1]) {
++        case 1: launch_q8<1>(a, b, b_stride, out, stream); return true;
++        case 2: launch_q8<2>(a, b, b_stride, out, stream); return true;
++        case 4: launch_q8<4>(a, b, b_stride, out, stream); return true;
++        case 8: launch_q8<8>(a, b, b_stride, out, stream); return true;
++        default: return false;
++    }
++}
++
+ bool ggml_hip_gfx1151_v1_mul_mat_typed(const ggml_tensor * a, const ggml_tensor * b,
+                                 ggml_tensor * out, hipStream_t stream) {
+     if (out->op != GGML_OP_MUL_MAT ||
+diff --git a/external/ggml/src/ggml-hip/impl.cuh b/external/ggml/src/ggml-hip/impl.cuh
+index 8c0901d8..4bd7c3b7 100644
+--- a/external/ggml/src/ggml-hip/impl.cuh
++++ b/external/ggml/src/ggml-hip/impl.cuh
+@@ -9,4 +9,5 @@ struct ggml_hip_impl {
+     bool (*mul_mat)(const ggml_tensor *, const ggml_tensor *, ggml_tensor *, hipStream_t, int cc);
+     bool (*im2col)(const ggml_tensor *, ggml_tensor *, hipStream_t, int nsm);
+     bool (*cpy)(const ggml_tensor *, ggml_tensor *, hipStream_t);
++    bool (*mmvq)(const ggml_tensor *, const void *, int64_t, ggml_tensor *, hipStream_t, int);
+ };
