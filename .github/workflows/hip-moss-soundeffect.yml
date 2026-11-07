@@ -1,0 +1,87 @@
+name: MOSS SoundEffect Q8 HIP
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-moss-soundeffect.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  generation:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 45
+    env:
+      SOURCE_REF: 66c0a4c45257563eb9d863e1dd705495131cecc7
+      MODEL_REF: 73ce4162f6cce370dd533c6782b772135c1b2a8e
+      GIT_LFS_SKIP_SMUDGE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout pinned audio.cpp without frontends
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source models
+          curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          printf '\n/tests/soulx_flashhead/components.cpp\n/tests/soulx_flashhead/session_test.cpp\n' >> results/source.sparse
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE_REF"
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+          } 2>&1 | tee results/source-download.log
+          curl -fLsS --retry 2 --max-time 900 -o models/moss-soundeffect-v2-q8_0.gguf \
+            "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/$MODEL_REF/MOSS-SoundEffect-v2-GGUF/moss-soundeffect-v2-q8_0.gguf"
+          printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
+      - name: Build Debug HIP CLI with MOSS only
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          printf 'arch=%s\n' "$arch" | tee -a results/environment.log
+          lscpu >> results/environment.log
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=moss_soundeffect \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+            -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            2>&1 | tee results/configure.log
+          cmake --build source/build/debug --target audiocpp_cli --parallel 16 \
+            2>&1 | tee results/build.log
+      - name: Generate one ten-second sound effect
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          /usr/bin/time -v timeout 1200 source/build/debug/bin/audiocpp_cli \
+            --model "$PWD/models/moss-soundeffect-v2-q8_0.gguf" \
+            --family moss_soundeffect --task gen --backend hip --threads 8 \
+            --text 'Birds chirping and singing in a quiet forest, with a gentle breeze rustling leaves.' \
+            --request-option duration_sec=10 --request-option seed=42 \
+            --out results/birds.wav --log --log-file results/framework.log \
+            2>&1 | tee results/generation.log
+      - name: Upload logs and WAV outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-soundeffect-q8-hip
+          path: results/
+          retention-days: 1
