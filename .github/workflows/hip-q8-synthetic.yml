@@ -1,6 +1,11 @@
 name: Synthetic HIP Q8 A-B
 on:
   workflow_dispatch:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-q8-synthetic.yml
+      - scripts/ci/hip-q8-synthetic/**
 permissions:
   contents: read
 jobs:
