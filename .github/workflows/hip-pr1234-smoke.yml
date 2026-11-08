@@ -1,0 +1,110 @@
+name: PR 1234 HIP smoke
+
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-pr1234-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 60
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+      OMP_NUM_THREADS: '8'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: 31c825eae49d6f252ccbd67466d8f4c3f4a84b02
+          path: source
+          persist-credentials: false
+          sparse-checkout: |
+            app
+            include
+            src
+            external
+            model_specs
+            tools
+            scripts
+            assets/resources
+            tests/perf
+            tests/soulx_flashhead
+            webui/native/dist
+            webui/native/demo_voices
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build HIP CLI from pinned PR head
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          exec > >(tee results/build.log) 2>&1
+          python -m venv "$RUNNER_TEMP/pr1234-sdk"
+          export PATH="$RUNNER_TEMP/pr1234-sdk/bin:$PATH"
+          python -m pip install --no-cache-dir cmake ninja
+          python -m pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,devel]==10.0.0'
+          rocm-sdk init
+          export ROCM_PATH="$(rocm-sdk path --root)"
+          export HIP_PATH="$ROCM_PATH"
+          export PATH="$(rocm-sdk path --bin):$PATH"
+          export LD_LIBRARY_PATH="$ROCM_PATH/lib:${LD_LIBRARY_PATH:-}"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          git -C source rev-parse HEAD > results/source.txt
+          cmake -S source -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_HIP=ON \
+            -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON -DGPU_TARGETS=gfx1151 \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=fish_drama3,nemotron_transcribe \
+            -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang"
+          cmake --build build --target audiocpp_cli -j 8
+          build/bin/audiocpp_cli --list-devices > results/devices.log 2>&1
+      - name: Drama3 staged HIP
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d "$RUNNER_TEMP/pr1234-drama.XXXXXX")"
+          trap 'rm -rf "$dir"' EXIT
+          file=drama-3-backbone-8bit-experts-Q2_K.gguf
+          curl -fL --retry 3 --connect-timeout 30 --max-time 1500 \
+            "https://huggingface.co/Jmica/Drama-3-GGUF/resolve/original-2026-10-13/$file?download=true" \
+            -o "$dir/$file" > results/drama-download.log 2>&1
+          rc=0
+          timeout 600 build/bin/audiocpp_cli --task tts --family fish_drama3 --backend hip --threads 8 \
+            --model "$dir/$file" --text 'The report is due on Thursday.' --seed 42 \
+            --session-option fish_drama3.disk_experts=true --session-option fish_drama3.expert_cache_size=8 \
+            --session-option fish_drama3.cpu_expert_layers=0 --out results/drama.wav --log --metrics \
+            > results/drama.log 2>&1 || rc=$?
+          printf '%s\n' "$rc" > results/drama.exit
+          exit "$rc"
+      - name: Nemotron Transcribe staged HIP
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d "$RUNNER_TEMP/pr1234-nemotron.XXXXXX")"
+          trap 'rm -rf "$dir"' EXIT
+          model=nemotron-transcribe-30b-a4b-experts-Q2_K.gguf
+          encoder=mmproj-NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-Encoder-F16.gguf
+          for file in "$model" "$encoder"; do
+            curl -fL --retry 3 --connect-timeout 30 --max-time 1500 \
+              "https://huggingface.co/Jmica/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-GGUF/resolve/304032f14e1e9e4042f5491d2d0194c044710bb7/$file?download=true" \
+              -o "$dir/$file" >> results/nemotron-download.log 2>&1
+          done
+          rc=0
+          timeout 600 build/bin/audiocpp_cli --task asr --family nemotron_transcribe --backend hip --threads 8 \
+            --model "$dir/$model" --audio source/assets/resources/a.wav \
+            --session-option nemotron_transcribe.disk_experts=true --text-out results/nemotron.txt --log --metrics \
+            > results/nemotron.log 2>&1 || rc=$?
+          printf '%s\n' "$rc" > results/nemotron.exit
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr1234-hip-raw
+          path: results/
+          retention-days: 7
