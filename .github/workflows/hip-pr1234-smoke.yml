@@ -48,18 +48,21 @@ jobs:
           python -m venv "$RUNNER_TEMP/pr1234-sdk"
           export PATH="$RUNNER_TEMP/pr1234-sdk/bin:$PATH"
           python -m pip install --no-cache-dir cmake ninja
-          python -m pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,devel]==10.0.0'
+          python -m pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ 'rocm[libraries,devel,device-gfx1151]==10.0.0'
           rocm-sdk init
           export ROCM_PATH="$(rocm-sdk path --root)"
           export HIP_PATH="$ROCM_PATH"
           export PATH="$(rocm-sdk path --bin):$PATH"
           export LD_LIBRARY_PATH="$ROCM_PATH/lib:${LD_LIBRARY_PATH:-}"
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          tensile="$(find "$RUNNER_TEMP/pr1234-sdk" -type f -path '*/hipblaslt/*' -name 'TensileLibrary_lazy_gfx1151.dat*' -print -quit)"
+          test -n "$tensile"
+          export HIPBLASLT_TENSILE_LIBPATH="$(dirname "$tensile")"
+          echo "HIPBLASLT_TENSILE_LIBPATH=$HIPBLASLT_TENSILE_LIBPATH" >> "$GITHUB_ENV"
           git -C source rev-parse HEAD > results/source.txt
           cmake -S source -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_HIP=ON \
             -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON -DGPU_TARGETS=gfx1151 \
-            -DGGML_HIP_HIPBLASLT=OFF \
             -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
             -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=fish_drama3,nemotron_transcribe \
             -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang"
