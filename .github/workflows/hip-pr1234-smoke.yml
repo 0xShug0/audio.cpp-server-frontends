@@ -59,6 +59,7 @@ jobs:
           cmake -S source -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_HIP=ON \
             -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON -DGPU_TARGETS=gfx1151 \
+            -DGGML_HIP_HIPBLASLT=OFF \
             -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
             -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=fish_drama3,nemotron_transcribe \
             -DCMAKE_PREFIX_PATH="$(rocm-sdk path --cmake)" -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang"
@@ -98,6 +99,7 @@ jobs:
           rc=0
           timeout 600 build/bin/audiocpp_cli --task asr --family nemotron_transcribe --backend hip --threads 8 \
             --model "$dir/$model" --audio source/assets/resources/a.wav \
+            --model-spec-override source/model_specs/nemotron_transcribe.json \
             --session-option nemotron_transcribe.disk_experts=true --text-out results/nemotron.txt --log --metrics \
             > results/nemotron.log 2>&1 || rc=$?
           printf '%s\n' "$rc" > results/nemotron.exit
