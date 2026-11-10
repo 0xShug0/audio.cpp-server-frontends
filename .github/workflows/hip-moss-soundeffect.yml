@@ -1,11 +1,9 @@
-name: MOSS SoundEffect Q8 HIP fusion A-B
+name: PR 1254 default DiT paths on HIP
 on:
   push:
     branches: [hip-test]
     paths:
       - .github/workflows/hip-moss-soundeffect.yml
-      - .github/tests/moss-hip-fusions.patch
-      - .github/tests/moss-hip-requests.json
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,7 +12,7 @@ jobs:
     runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
     timeout-minutes: 45
     env:
-      SOURCE_REF: 92550bc3b9de6f180689facb25216726940cfdff
+      SOURCE_REF: d15f2983d781b307a86cf41d4018717c14d593ad
       MODEL_REF: 73ce4162f6cce370dd533c6782b772135c1b2a8e
       GIT_LFS_SKIP_SMUDGE: '1'
     defaults:
@@ -28,7 +26,7 @@ jobs:
           mkdir -p results source models
           curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
             "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
-          printf '\n/tests/\n' >> results/source.sparse
+          printf '\n/tests/\n/assets/resources/a.wav\n' >> results/source.sparse
           {
             git init source
             git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
@@ -40,17 +38,7 @@ jobs:
             timeout 600 git -C source checkout --detach FETCH_HEAD
             test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
           } 2>&1 | tee results/source-download.log
-          curl -fLsS --retry 2 --max-time 900 -o models/moss-soundeffect-v2-q8_0.gguf \
-            "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/$MODEL_REF/MOSS-SoundEffect-v2-GGUF/moss-soundeffect-v2-q8_0.gguf"
-          printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
-          curl -fLsS --retry 2 --max-time 60 -o results/hip-fusions.patch \
-            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/moss-hip-fusions.patch"
-          git -C source apply --check "$PWD/results/hip-fusions.patch"
-          git -C source apply "$PWD/results/hip-fusions.patch"
-          git -C source diff --check
-          curl -fLsS --retry 2 --max-time 60 -o results/requests.json \
-            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/moss-hip-requests.json"
-      - name: Build Debug HIP CLI with MOSS only
+      - name: Build Debug HIP CLI with the four model families
         id: build
         run: |
           set -euo pipefail
@@ -70,53 +58,84 @@ jobs:
             -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
             -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
             -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
-            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=moss_soundeffect \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=cosyvoice3,moss_soundeffect,stable_audio,dots_tts \
             -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_EXTENDED_TESTS=OFF \
             -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
             -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
             2>&1 | tee results/configure.log
-          cmake --build source/build/debug --target audiocpp_cli device_denoiser_runtime_test --parallel 16 \
+          cmake --build source/build/debug --target audiocpp_cli --parallel 16 \
             2>&1 | tee results/build.log
-      - name: Fusion correctness on HIP
-        id: correctness
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          ulimit -c 0
-          timeout 180 source/build/debug/bin/device_denoiser_runtime_test \
-            --log results/unit-framework.log --backend hip \
-            > results/unit.log 2>&1
-      - name: Warmed fusion off-on-on-off requests
+      - name: Run all default HIP paths independently
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           set -uo pipefail
           ulimit -c 0
+          printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
           failed=0
-          for block in off-1 on-1 on-2 off-2; do
-            enabled=true
-            if [[ "$block" == off-* ]]; then enabled=false; fi
-            mkdir -p "results/$block"
-            /usr/bin/time -v timeout 1200 source/build/debug/bin/audiocpp_cli \
-              --model "$PWD/models/moss-soundeffect-v2-q8_0.gguf" \
-              --model-spec-override "$PWD/source/model_specs/moss_soundeffect.json" \
-              --family moss_soundeffect --task gen --backend hip --threads 8 \
-              --session-option "moss_soundeffect.fused_epilogues=$enabled" \
-              --request-sequence "$PWD/results/requests.json" \
-              --out-dir "results/$block" --metrics \
-              --log --log-file "results/$block/framework.log" \
-              > "results/$block/generation.log" 2>&1
-            status=$?
-            printf '%s\n' "$status" > "results/$block/exit-code.txt"
-            if [[ "$status" != 0 ]]; then failed=1; fi
+          for case_id in cosyvoice3 moss stable_small stable_medium dots_rf dots_mf; do
+            dir="results/$case_id"
+            mkdir -p "$dir"
+            extra=()
+            case "$case_id" in
+              cosyvoice3)
+                family=cosyvoice3; task=clon
+                package=CosyVoice3-GGUF/cosyvoice3-q8_0.gguf
+                text='八百标兵奔北坡，北坡炮兵并排跑，炮兵怕把标兵碰，标兵怕碰炮兵炮。'
+                extra=(--voice-ref "$PWD/models/cosy-reference.wav" --reference-text 'You are a helpful assistant.<|endofprompt|>希望你以后能够做的比我还好呦。')
+                ;;
+              moss)
+                family=moss_soundeffect; task=gen
+                package=MOSS-SoundEffect-v2-GGUF/moss-soundeffect-v2-q8_0.gguf
+                text='Steady rain pattering on a wooden roof, with distant thunder.'
+                extra=(--duration-seconds 10)
+                ;;
+              stable_small)
+                family=stable_audio; task=gen
+                package=Stable-Audio-3-Small-SFX-GGUF/stable-audio-3-small-sfx-q8_0.gguf
+                text='Footsteps on gravel, steady walking pace, close perspective, crisp natural stone texture.'
+                extra=(--duration-seconds 8)
+                ;;
+              stable_medium)
+                family=stable_audio; task=gen
+                package=Stable-Audio-3-Medium-GGUF/stable-audio-3-medium-q8_0.gguf
+                text='An anthemic Pop Rock instrumental that fills your head with nostalgic thoughtfulness'
+                extra=(--duration-seconds 30)
+                ;;
+              dots_rf|dots_mf)
+                family=dots_tts; task=tts
+                package=DotTTS-SOAR-GGUF/dots-tts-soar-q8_0.gguf
+                if [[ "$case_id" == dots_mf ]]; then package=DotTTS-MF-GGUF/dots-tts-mf-q8_0.gguf; fi
+                text='Our field team finished the morning inspection, logged the sensor readings, and prepared a concise update for the afternoon review.'
+                extra=(--voice-ref "$PWD/source/assets/resources/a.wav" --reference-text 'This little work was finished in the year eighteen o three, and intended for immediate publication.')
+                ;;
+            esac
+            model="$PWD/models/${package##*/}"
+            rc=0
+            curl -fLsS --retry 2 --connect-timeout 30 --max-time 1500 \
+              -o "$model" "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/$MODEL_REF/$package" \
+              > "$dir/download.log" 2>&1 || rc=$?
+            if [[ "$case_id" == cosyvoice3 && "$rc" == 0 ]]; then
+              curl -fLsS --retry 2 --max-time 120 -o models/cosy-reference.wav \
+                https://raw.githubusercontent.com/FunAudioLLM/CosyVoice/main/asset/zero_shot_prompt.wav \
+                >> "$dir/download.log" 2>&1 || rc=$?
+            fi
+            if [[ "$rc" == 0 ]]; then
+              /usr/bin/time -v timeout 900 source/build/debug/bin/audiocpp_cli \
+                --model "$model" --model-spec-override "$PWD/source/model_specs/$family.json" \
+                --family "$family" --task "$task" --backend hip --threads 8 \
+                --text "$text" --seed 42 "${extra[@]}" --out "$dir/output.wav" --metrics \
+                --log --log-file "$dir/framework.log" > "$dir/generation.log" 2>&1 || rc=$?
+            fi
+            printf '%s\n' "$rc" > "$dir/exit-code.txt"
+            printf '%s\t%s\n' "$case_id" "$rc" | tee -a results/exit-codes.tsv
+            if [[ "$rc" != 0 ]]; then failed=1; fi
+            rm -f "$model"
           done
           exit "$failed"
-      - name: Preserve correctness failure after collecting all blocks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: test '${{ steps.correctness.outcome }}' = success
       - name: Upload logs and WAV outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: moss-soundeffect-q8-hip
+          name: pr1254-default-hip-paths
           path: results/
           retention-days: 1
