@@ -1,0 +1,153 @@
+diff --git a/external/ggml/src/ggml-cuda/common.cuh b/external/ggml/src/ggml-cuda/common.cuh
+index ed2a4f62a..d9181cd9f 100644
+--- a/external/ggml/src/ggml-cuda/common.cuh
++++ b/external/ggml/src/ggml-cuda/common.cuh
+@@ -1390,7 +1390,7 @@ struct ggml_backend_cuda_context {
+     int device;
+     std::string name;
+     cudaEvent_t copy_event = nullptr;
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+     std::unordered_map<const ggml_cgraph *, uint32_t> graph_fusions;
+     uint32_t active_graph_fusions = 0;
+ #endif
+diff --git a/external/ggml/src/ggml-cuda/ggml-cuda.cu b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+index 765deb9fe..3961293fa 100644
+--- a/external/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/external/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -4247,6 +4247,14 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
+     return false;
+ }
+ 
++#if !defined(GGML_USE_MUSA)
++static bool ggml_cuda_ranges_overlap(const ggml_tensor * a, const ggml_tensor * b) {
++    const uintptr_t a0 = reinterpret_cast<uintptr_t>(a->data);
++    const uintptr_t b0 = reinterpret_cast<uintptr_t>(b->data);
++    return a0 < b0 + ggml_nbytes(b) && b0 < a0 + ggml_nbytes(a);
++}
++#endif
++
+ #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+ static bool ggml_cuda_safe_bias_fusion(const ggml_cgraph * graph, int i) {
+     const auto * add = graph->nodes[i];
+@@ -4292,12 +4300,6 @@ static bool ggml_cuda_is_elidable(const ggml_cgraph * cgraph, int idx) {
+     return (cgraph->nodes[idx]->flags & GGML_TENSOR_FLAG_COMPUTE) && ggml_node_has_n_uses(cgraph, idx, 1);
+ }
+ 
+-static bool ggml_cuda_ranges_overlap(const ggml_tensor * a, const ggml_tensor * b) {
+-    const uintptr_t a0 = reinterpret_cast<uintptr_t>(a->data);
+-    const uintptr_t b0 = reinterpret_cast<uintptr_t>(b->data);
+-    return a0 < b0 + ggml_nbytes(b) && b0 < a0 + ggml_nbytes(a);
+-}
+-
+ // ROUND(gate) -> SILU -> ROUND, [VIEW up], ROUND(up) -> MUL -> ROUND starting at node i.
+ static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int i) {
+     if (i + 6 >= cgraph->n_nodes) {
+@@ -4337,7 +4339,7 @@ static bool ggml_cuda_can_fuse_swiglu_round_bf16(const ggml_cgraph * cgraph, int
+ #endif
+ 
+ // try and fuse nodes and return the number of nodes to skip
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+ static int ggml_cuda_fuse_pointwise(ggml_backend_cuda_context * ctx, ggml_cgraph * graph, int start) {
+     const auto m = ggml_match_pointwise(graph, start, ctx->active_graph_fusions, false);
+     if (!m.count || !ggml_is_contiguous(m.x) || !ggml_is_contiguous(m.dst) ||
+@@ -4391,11 +4393,14 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+ 
+     ggml_tensor * node = cgraph->nodes[i];
+ 
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+     if (cuda_ctx->active_graph_fusions) {
+         const int skipped = ggml_cuda_fuse_pointwise(cuda_ctx, cgraph, i);
+         if (skipped) return skipped;
+     }
++#endif
++
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+     // Linear modules bridge their bias addition and activation with a reshape.
+     // Fuse the elementwise work without materializing that large intermediate.
+     if (node->op == GGML_OP_ADD && i + 2 < cgraph->n_nodes) {
+@@ -5122,7 +5127,7 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
+ 
+ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+     cuda_ctx->active_graph_fusions = 0;
+     if (!cuda_ctx->graph_fusions.empty()) {
+         const auto policy = cuda_ctx->graph_fusions.find(cgraph);
+@@ -6391,7 +6396,7 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t
+     GGML_UNUSED(reg);
+ }
+ 
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+ static uint32_t ggml_backend_cuda_set_graph_fusions(ggml_backend_t backend, ggml_cgraph * graph, uint32_t mask) {
+     auto * ctx = static_cast<ggml_backend_cuda_context *>(backend->context);
+     mask &= GGML_BACKEND_GRAPH_FUSION_NORM_AFFINE | GGML_BACKEND_GRAPH_FUSION_BIAS_ACTIVATION |
+@@ -6408,7 +6413,7 @@ static uint32_t ggml_backend_cuda_set_graph_fusions(ggml_backend_t backend, ggml
+ 
+ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+     GGML_UNUSED(reg);
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+     if (strcmp(name, "ggml_backend_set_graph_fusions") == 0)
+         return reinterpret_cast<void *>(ggml_backend_cuda_set_graph_fusions);
+ #endif
+diff --git a/external/ggml/src/ggml-cuda/pointwise.cu b/external/ggml/src/ggml-cuda/pointwise.cu
+index c0259eef8..f773e7d25 100644
+--- a/external/ggml/src/ggml-cuda/pointwise.cu
++++ b/external/ggml/src/ggml-cuda/pointwise.cu
+@@ -1,5 +1,5 @@
+ #include "pointwise.cuh"
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++#if !defined(GGML_USE_MUSA)
+ #include "unary.cuh"
+ #include <climits>
+ #include <type_traits>
+diff --git a/tests/unittests/test_device_denoiser_runtime.cpp b/tests/unittests/test_device_denoiser_runtime.cpp
+index de689b38e..cfcd6edd4 100644
+--- a/tests/unittests/test_device_denoiser_runtime.cpp
++++ b/tests/unittests/test_device_denoiser_runtime.cpp
+@@ -516,16 +516,23 @@ int main(int argc, char ** argv) {
+     try {
+         if ((argc != 3 && argc != 5) || std::string(argv[1]) != "--log" ||
+             (argc == 5 && (std::string(argv[3]) != "--backend" ||
+-                (std::string(argv[4]) != "cuda" && std::string(argv[4]) != "vulkan"))))
++                (std::string(argv[4]) != "cuda" && std::string(argv[4]) != "vulkan" && std::string(argv[4]) != "hip"))))
+             throw std::runtime_error("Usage: test_device_denoiser_runtime --log PATH");
+         debug::LoggingConfig logging;
+         logging.enabled = true;
+         logging.file_path = argv[2];
+         debug::configure_logging(logging);
++        const bool hip = argc == 5 && std::string(argv[4]) == "hip";
+         const bool cuda = argc == 5 && std::string(argv[4]) == "cuda";
+         const bool vulkan = argc == 5 && std::string(argv[4]) == "vulkan";
+-        core::ExecutionContext execution({cuda ? core::BackendType::Cuda :
++        core::ExecutionContext execution({hip ? core::BackendType::Hip : cuda ? core::BackendType::Cuda :
+             vulkan ? core::BackendType::Vulkan : core::BackendType::Cpu, 0, 8});
++        if (hip) {
++            const auto device = ggml_backend_get_device(execution.backend());
++            if (!ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(device),
++                    "ggml_backend_set_graph_fusions"))
++                throw std::runtime_error("HIP graph fusion extension is not available");
++        }
+         check_device_denoiser(execution);
+         check_denoiser_phases(execution);
+         check_private_view_preparation(execution);
+@@ -545,12 +552,12 @@ int main(int argc, char ** argv) {
+                         check_denoiser_fusions(execution, width, epilogue, per_batch, false, true, true);
+                 check_denoiser_fusions(execution, width, DenoiserEpilogue::GatedResidual, true, false, true, true);
+             }
+-            if (cuda) {
++            if (cuda || hip) {
+                 check_denoiser_fusions(execution, width, DenoiserEpilogue::BiasGelu, false, true);
+                 check_denoiser_fusions(execution, width, DenoiserEpilogue::LayerAffine, false, true);
+                 check_denoiser_fusions(execution, width, DenoiserEpilogue::GatedResidual, false, true);
+                 check_denoiser_fusions(execution, width, DenoiserEpilogue::ReshapedGatedResidual, false, true);
+-                if (cuda) check_denoiser_fusions(execution, width, DenoiserEpilogue::GatedResidual,
++                if (cuda || hip) check_denoiser_fusions(execution, width, DenoiserEpilogue::GatedResidual,
+                     false, true, false, false, false);
+             }
+         }

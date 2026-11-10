@@ -1,0 +1,42 @@
+[
+  {
+    "id": "warm",
+    "text": "A door closes in a quiet room.",
+    "options": {
+      "seed": "0",
+      "guidance_scale": "4",
+      "num_steps": "50",
+      "duration_sec": "2"
+    }
+  },
+  {
+    "id": "rain",
+    "text": "Steady rain pattering on a wooden roof, with distant thunder.",
+    "options": {
+      "seed": "42",
+      "guidance_scale": "4",
+      "num_steps": "50",
+      "duration_sec": "10"
+    }
+  },
+  {
+    "id": "birds",
+    "text": "Birds chirping and singing in a quiet forest, with a gentle breeze rustling leaves.",
+    "options": {
+      "seed": "2026",
+      "guidance_scale": "4",
+      "num_steps": "50",
+      "duration_sec": "10"
+    }
+  },
+  {
+    "id": "rain_repeat",
+    "text": "Steady rain pattering on a wooden roof, with distant thunder.",
+    "options": {
+      "seed": "42",
+      "guidance_scale": "4",
+      "num_steps": "50",
+      "duration_sec": "10"
+    }
+  }
+]
