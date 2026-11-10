@@ -1,4 +1,4 @@
-name: PR 1254 default DiT paths on HIP
+name: PR 1254 MOSS dog barking on HIP
 on:
   push:
     branches: [hip-test]
@@ -38,7 +38,7 @@ jobs:
             timeout 600 git -C source checkout --detach FETCH_HEAD
             test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
           } 2>&1 | tee results/source-download.log
-      - name: Build Debug HIP CLI with the four model families
+      - name: Build Debug HIP CLI with MOSS only
         id: build
         run: |
           set -euo pipefail
@@ -58,21 +58,21 @@ jobs:
             -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
             -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
             -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
-            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=cosyvoice3,moss_soundeffect,stable_audio,dots_tts \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=moss_soundeffect \
             -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_EXTENDED_TESTS=OFF \
             -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
             -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
             2>&1 | tee results/configure.log
           cmake --build source/build/debug --target audiocpp_cli --parallel 16 \
             2>&1 | tee results/build.log
-      - name: Run all default HIP paths independently
+      - name: Generate dog barking with default HIP
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           set -uo pipefail
           ulimit -c 0
           printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
           failed=0
-          for case_id in cosyvoice3 moss stable_small stable_medium dots_rf dots_mf; do
+          for case_id in moss; do
             dir="results/$case_id"
             mkdir -p "$dir"
             extra=()
@@ -86,7 +86,7 @@ jobs:
               moss)
                 family=moss_soundeffect; task=gen
                 package=MOSS-SoundEffect-v2-GGUF/moss-soundeffect-v2-q8_0.gguf
-                text='Steady rain pattering on a wooden roof, with distant thunder.'
+                text='A large dog gives three distinct loud barks, pauses, then barks twice more. Close clear recording in a quiet room, with no music.'
                 extra=(--duration-seconds 10)
                 ;;
               stable_small)
@@ -136,6 +136,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr1254-default-hip-paths
+          name: pr1254-moss-dog-hip
           path: results/
           retention-days: 1
