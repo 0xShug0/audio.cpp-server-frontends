@@ -1,0 +1,78 @@
+name: PR 1267 HIP compile
+'on':
+  push:
+    branches:
+    - hip-test
+    paths:
+    - .github/workflows/hip-build-pr1267.yml
+  workflow_dispatch: null
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on:
+    - self-hosted
+    - linux
+    - devlab-dispatch
+    - strix-halo
+    timeout-minutes: 40
+    env:
+      SOURCE_REF: 521c8c19167dc5186473e30e868712f0a766d379
+      GIT_LFS_SKIP_SMUDGE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Sparse checkout pinned audio.cpp without frontends
+      timeout-minutes: 12
+      run: |
+        set -euo pipefail
+        mkdir -p results source models
+        curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
+          "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+        printf '\n/tests/\n/assets/resources/a.wav\n' >> results/source.sparse
+        {
+          git init source
+          git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+          git -C source config http.version HTTP/1.1
+          git -C source config remote.origin.promisor true
+          git -C source config remote.origin.partialclonefilter blob:none
+          timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE_REF"
+          git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+          timeout 600 git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+        } 2>&1 | tee results/source-download.log
+    - name: Compile PR 1267 Debug HIP CLI
+      id: build
+      run: |
+        set -euo pipefail
+        ulimit -c 0
+        rocm="${ROCM_PATH:-/opt/rocm}"
+        if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+        "$rocm/bin/hipcc" --version | tee results/environment.log
+        arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+        printf 'arch=%s\n' "$arch" | tee -a results/environment.log
+        lscpu >> results/environment.log
+        cmake -S source -B source/build/debug -G Ninja \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+          -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+          -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+          -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+          -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+          -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+          -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+          -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=firered_audio,index_echo,yue2 \
+          -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+          -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
+          -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+          2>&1 | tee results/configure.log
+        cmake --build source/build/debug --target audiocpp_cli --parallel 16 \
+          2>&1 | tee results/build.log
+    - name: Upload compile logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: pr1267-hip-compile
+        path: results/
+        retention-days: 1
