@@ -1,0 +1,115 @@
+name: MuLaCover Q8 HIP validation
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-mulacover.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  generation:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 45
+    env:
+      SOURCE_REF: eb8281c9a16d39fe9ac9d07fd3e50d8be606dfaa
+      MODEL_REF: 73ce4162f6cce370dd533c6782b772135c1b2a8e
+      GIT_LFS_SKIP_SMUDGE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout pinned audio.cpp without frontends
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source models
+          curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          printf '\n/tests/\n/assets/resources/a.wav\n' >> results/source.sparse
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE_REF"
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+          } 2>&1 | tee results/source-download.log
+      - name: Build Debug HIP CLI with MuLaCover only
+        id: build
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          printf 'arch=%s\n' "$arch" | tee -a results/environment.log
+          lscpu >> results/environment.log
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=mulacover \
+            -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+            -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            2>&1 | tee results/configure.log
+          cmake --build source/build/debug --target audiocpp_cli --parallel 16 \
+            2>&1 | tee results/build.log
+      - name: Download Q8 package and tested MIDI inputs
+        id: download
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          mkdir -p inputs
+          printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
+          curl -fLsS --retry 2 --connect-timeout 30 --max-time 1500 \
+            -o models/mulacover-q8_0.gguf \
+            "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/$MODEL_REF/MuLaCover-GGUF/mulacover-q8_0.gguf" \
+            > results/model-download.log 2>&1
+          for file in melody.mid chord.mid drums.mid requests-1234.json requests-2026.json; do
+            curl -fLsS --retry 2 --max-time 120 -o "inputs/$file" \
+              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/mulacover/$file" \
+              >> results/input-download.log 2>&1
+          done
+      - name: Generate two MIDI-conditioned covers with default HIP
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          ulimit -c 0
+          export OMP_NUM_THREADS=8
+          failed=0
+          for seed in 1234 2026; do
+            dir="results/seed-$seed"
+            mkdir -p "$dir"
+            sed "s|@INPUTS@|$PWD/inputs|g" "inputs/requests-$seed.json" > "$dir/requests.json"
+            rc=0
+            /usr/bin/time -v timeout 900 source/build/debug/bin/audiocpp_cli \
+              --model "$PWD/models/mulacover-q8_0.gguf" \
+              --model-spec-override "$PWD/source/model_specs/mulacover.json" \
+              --family mulacover --task gen --backend hip --threads 8 \
+              --request-sequence "$dir/requests.json" --out-dir "$dir" --metrics \
+              --log --log-file "$dir/framework.log" > "$dir/generation.log" 2>&1 || rc=$?
+            printf '%s\n' "$rc" > "$dir/exit-code.txt"
+            printf '%s\t%s\n' "$seed" "$rc" | tee -a results/exit-codes.tsv
+            if [[ "$rc" != 0 ]]; then failed=1; fi
+          done
+          rm -f models/mulacover-q8_0.gguf
+          exit "$failed"
+      - name: Upload logs and WAV outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mulacover-q8-hip
+          path: results/
+          retention-days: 1

@@ -1,0 +1,28 @@
+{
+  "requests": [
+    {
+      "id": "warmup",
+      "text": "[Verse] A morning light across the sea.",
+      "options": {
+        "melody_file": "@INPUTS@/melody.mid",
+        "chord_file": "@INPUTS@/chord.mid",
+        "drum_file": "@INPUTS@/drums.mid",
+        "tags": "topic:[Longing]; genre:[country]; instrument:[Strings,acoustic guitar]; mood:[hopeful]",
+        "seed": 1234,
+        "duration_sec": 1.6
+      }
+    },
+    {
+      "id": "song",
+      "text": "[Intro]\n\n[Verse]\n终于松开紧握过去\n不再回头看那阴影\n只要眼中倒映我身影\n我愿意穿过人海向你奔去\n我知道路途不平静\n我一直练习呼唤你的姓名\n最怕你沉默转身远去\n\n[Chorus]\n追梦也需要决心\n冲破所有不确定\n只要你一点头我坚信\n这条路往天明\n\n[Chorus]\n我们都需要决心\n去拥抱彼此相信\n人潮退去我能看清你\n刻在我目光里\n你的坚定\n\n[Interlude]\n\n[Verse]\n终于松开紧握过去\n不再回头看那阴影\n只要眼中倒映我身影\n我愿意穿过人海向你奔去\n我知道路途不平静\n我一直练习呼唤你的姓名\n最怕你沉默转身远去\n\n[Chorus]\n追梦也需要决心\n冲破所有不确定\n只要你一点头我坚信\n这条路往天明\n\n[Chorus]\n我们都需要决心\n去拥抱彼此相信\n人潮退去我能看清你\n刻在我目光里\n你的坚定\n\n[Bridge]\n如果我的固执任性\n不经意划破了宁静\n能不能别急着否定\n我虽然走很快\n更想与你同行\n\n[Chorus]\n追梦也需要决心\n冲破所有不确定\n只要你一点头我坚信\n这条路往天明\n\n[Chorus]\n我们都需要决心\n去拥抱彼此相信\n人潮退去我能看清你\n刻在我目光里\n你的坚定\n\n[Outro]\n",
+      "options": {
+        "melody_file": "@INPUTS@/melody.mid",
+        "chord_file": "@INPUTS@/chord.mid",
+        "drum_file": "@INPUTS@/drums.mid",
+        "tags": "topic:[Longing]; genre:[country]; instrument:[Strings,acoustic guitar]; mood:[hopeful]",
+        "seed": 2026,
+        "duration_sec": 30
+      }
+    }
+  ]
+}
