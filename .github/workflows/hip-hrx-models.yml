@@ -1,0 +1,144 @@
+name: HIP and HRX model comparison
+
+on:
+  push:
+    branches: [hip-test]
+    paths: [.github/workflows/hip-hrx-models.yml]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact audio.cpp hip-test commit
+        type: string
+        required: true
+      models:
+        description: Comma-separated models to collect
+        type: string
+        default: irodori,breeze,ming3,omnivoice,qwen3_tts,qwen3_asr
+      backends:
+        description: Backends to collect; skip already completed cases
+        type: string
+        default: hip,gfx1151_v1,hrx
+      blocks:
+        description: Blocks in A-B-C-C-B-A order
+        type: string
+        default: a1,b1,c1,c2,b2,a2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hip-hrx-model-comparison
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 360
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+      OMP_NUM_THREADS: '8'
+      OPENBLAS_NUM_THREADS: '8'
+      CMAKE_BUILD_PARALLEL_LEVEL: '16'
+      SOURCE_REF: ${{ inputs.source_ref }}
+      MODELS: ${{ inputs.models }}
+      BACKENDS: ${{ inputs.backends }}
+      BLOCKS: ${{ inputs.blocks }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: ${{ inputs.source_ref }}
+          path: source
+          persist-credentials: false
+          sparse-checkout: |
+            app
+            include
+            src
+            external
+            model_specs
+            tools
+            tests/perf
+            assets/resources
+            webui/native/demo_voices
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare established build environment
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          python -m pip install --no-cache-dir cmake ninja
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          lscpu >> results/environment.log
+          free -h >> results/environment.log
+          df -h >> results/environment.log
+          echo "ROCM_PATH=$rocm" >> "$GITHUB_ENV"
+          git -C source rev-parse HEAD > results/source-sha.txt
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+      - name: Build Debug HIP and baseline implementations
+        id: hip
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DGPU_TARGETS=gfx1151 \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_HRX=OFF -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_WEBGPU=OFF -DENGINE_ENABLE_SYCL=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
+            -DAUDIOCPP_MODEL_SET=custom \
+            '-DAUDIOCPP_MODELS=irodori_tts;breeze_tts;ming3_tts;omnivoice;qwen3_tts;qwen3_asr' \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
+            -DAUDIOCPP_BUILD_C_API=OFF -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
+            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF 2>&1 | tee results/configure-hip.log
+          cmake --build source/build/debug --target audiocpp_cli --parallel 16 2>&1 | tee results/build-hip.log
+      - name: Build HRX and Loom alongside HIP
+        id: hrx
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/hrx-system"
+          git -C "$RUNNER_TEMP/hrx-system" remote add origin https://github.com/ROCm/hrx-system.git
+          git -C "$RUNNER_TEMP/hrx-system" fetch --depth=1 origin 32d0c76a600f9c8009bb61e25f594570f2b0658a
+          git -C "$RUNNER_TEMP/hrx-system" checkout --detach FETCH_HEAD
+          git -C "$RUNNER_TEMP/hrx-system" rev-parse HEAD > results/hrx-sha.txt
+          cmake -S source -B source/build/debug -DENGINE_ENABLE_HRX=ON \
+            -DHRX_SOURCE_DIR="$RUNNER_TEMP/hrx-system" \
+            -DGGML_HRX_KERNEL_CORPUS_SOURCE_FORMAT=text 2>&1 | tee results/configure-hrx.log
+          cmake --build source/build/debug --target audiocpp_cli --parallel 16 2>&1 | tee results/build-hrx.log
+      - name: Collect each model independently and sequentially
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          ulimit -c 0
+          failed=0
+          IFS=',' read -ra models <<< "$MODELS"
+          for model in "${models[@]}"; do
+            python scripts/ci/collect_hrx_models.py --source source --model "$model" \
+              --results results --backends "$BACKENDS" --blocks "$BLOCKS" || failed=1
+          done
+          exit "$failed"
+      - name: Upload raw logs and outputs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-model-results
+          path: results/
+          retention-days: 1
+          compression-level: 1
