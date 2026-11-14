@@ -52,6 +52,7 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--results', type=Path, required=True)
     parser.add_argument('--backends', default='hip,gfx1151_v1,hrx')
+    parser.add_argument('--hip-models', default='')
     parser.add_argument('--blocks', default='a1,b1,c1,c2,b2,a2')
     args = parser.parse_args()
     source, results = args.source.resolve(), (args.results / args.model).resolve()
@@ -93,14 +94,23 @@ def main():
                              language='ja' if args.model == 'irodori' else 'en', seed=2026, options=options),
                         dict(id='repeat', text=ja if args.model == 'irodori' else en,
                              language='ja' if args.model == 'irodori' else 'en', seed=2026, options=options)]
+        if args.model == 'breeze':
+            for request in requests:
+                request.pop('language', None)
         sequence = results / 'requests.json'
         sequence.write_text(json.dumps(requests, ensure_ascii=False, indent=2) + '\n')
         selected = set(args.backends.split(','))
+        if args.model in args.hip_models.split(','):
+            selected.update(['hip', 'gfx1151_v1'])
+        failed_backends = set()
         for label, backend, impl in ORDER:
             if label not in args.blocks.split(',') or (impl or backend) not in selected:
                 continue
             status_path = results / f'{label}.status.json'
             if status_path.exists() and json.loads(status_path.read_text())['exit_code'] == 0:
+                continue
+            if (backend, impl) in failed_backends:
+                print(f'{args.model} {label}: skipped after this backend already failed; see its first log', flush=True)
                 continue
             command = [source / 'build/debug/bin/audiocpp_cli', '--family', family,
                        '--task', 'asr' if args.model == 'qwen3_asr' else 'tts', '--mode', 'offline',
@@ -112,6 +122,8 @@ def main():
             record.update(backend=backend, implementation=impl or 'default')
             status_path.write_text(json.dumps(record, indent=2) + '\n')
             status['runs'].append(record)
+            if record['exit_code'] != 0:
+                failed_backends.add((backend, impl))
             print(f'{args.model} {label}: {record["exit_code"]}', flush=True)
     finally:
         (results / 'collection.json').write_text(json.dumps(status, indent=2) + '\n')

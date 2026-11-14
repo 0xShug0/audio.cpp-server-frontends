@@ -22,6 +22,14 @@ on:
         description: Blocks in A-B-C-C-B-A order
         type: string
         default: a1,b1,c1,c2,b2,a2
+      hip_models:
+        description: Models also requiring the HIP baseline pair in this run
+        type: string
+        default: ''
+      operators:
+        description: Optional comma-separated new HRX operators to check against GGML CPU
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -44,6 +52,8 @@ jobs:
       MODELS: ${{ inputs.models }}
       BACKENDS: ${{ inputs.backends }}
       BLOCKS: ${{ inputs.blocks }}
+      HIP_MODELS: ${{ inputs.hip_models }}
+      OPERATORS: ${{ inputs.operators }}
     defaults:
       run:
         shell: bash
@@ -121,25 +131,128 @@ jobs:
           git -C "$RUNNER_TEMP/hrx-system" rev-parse HEAD > results/hrx-sha.txt
           cmake -S source -B source/build/debug -DENGINE_ENABLE_HRX=ON \
             -DHRX_SOURCE_DIR="$RUNNER_TEMP/hrx-system" \
+            -DGGML_HRX_BUILD_TESTS=ON \
             -DGGML_HRX_KERNEL_CORPUS_SOURCE_FORMAT=text 2>&1 | tee results/configure-hrx.log
-          cmake --build source/build/debug --target audiocpp_cli --parallel 16 2>&1 | tee results/build-hrx.log
-      - name: Collect each model independently and sequentially
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' }}
+          cmake --build source/build/debug --target audiocpp_cli test-hrx-ops --parallel 16 2>&1 | tee results/build-hrx.log
+      - name: Check requested new HRX operators against CPU
+        id: operators
+        if: ${{ !cancelled() && steps.hrx.outcome == 'success' && inputs.operators != '' }}
+        continue-on-error: true
         run: |
-          set -uo pipefail
-          ulimit -c 0
-          failed=0
-          IFS=',' read -ra models <<< "$MODELS"
-          for model in "${models[@]}"; do
-            python scripts/ci/collect_hrx_models.py --source source --model "$model" \
-              --results results --backends "$BACKENDS" --blocks "$BLOCKS" || failed=1
-          done
-          exit "$failed"
-      - name: Upload raw logs and outputs only
+          set -euo pipefail
+          source/build/debug/bin/test-hrx-ops test -b HRX0 -o "$OPERATORS" 2>&1 | tee results/operators.log
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hip-hrx-model-results
-          path: results/
+          name: hip-hrx-build-logs
+          path: |
+            results/*.log
+            results/*sha.txt
           retention-days: 1
           compression-level: 1
+      - name: Collect irodori
+        id: irodori
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',irodori,') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python scripts/ci/collect_hrx_models.py --source source --model irodori \
+            --results results --backends "$BACKENDS" --blocks "$BLOCKS" --hip-models "$HIP_MODELS"
+      - name: Upload irodori raw logs and outputs
+        if: ${{ always() && steps.irodori.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-irodori
+          path: results/irodori/
+          retention-days: 1
+          compression-level: 1
+      - name: Collect breeze
+        id: breeze
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',breeze,') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python scripts/ci/collect_hrx_models.py --source source --model breeze \
+            --results results --backends "$BACKENDS" --blocks "$BLOCKS" --hip-models "$HIP_MODELS"
+      - name: Upload breeze raw logs and outputs
+        if: ${{ always() && steps.breeze.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-breeze
+          path: results/breeze/
+          retention-days: 1
+          compression-level: 1
+      - name: Collect ming3
+        id: ming3
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',ming3,') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python scripts/ci/collect_hrx_models.py --source source --model ming3 \
+            --results results --backends "$BACKENDS" --blocks "$BLOCKS" --hip-models "$HIP_MODELS"
+      - name: Upload ming3 raw logs and outputs
+        if: ${{ always() && steps.ming3.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-ming3
+          path: results/ming3/
+          retention-days: 1
+          compression-level: 1
+      - name: Collect omnivoice
+        id: omnivoice
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',omnivoice,') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python scripts/ci/collect_hrx_models.py --source source --model omnivoice \
+            --results results --backends "$BACKENDS" --blocks "$BLOCKS" --hip-models "$HIP_MODELS"
+      - name: Upload omnivoice raw logs and outputs
+        if: ${{ always() && steps.omnivoice.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-omnivoice
+          path: results/omnivoice/
+          retention-days: 1
+          compression-level: 1
+      - name: Collect qwen3_tts
+        id: qwen3_tts
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',qwen3_tts,') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python scripts/ci/collect_hrx_models.py --source source --model qwen3_tts \
+            --results results --backends "$BACKENDS" --blocks "$BLOCKS" --hip-models "$HIP_MODELS"
+      - name: Upload qwen3_tts raw logs and outputs
+        if: ${{ always() && steps.qwen3_tts.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-qwen3_tts
+          path: results/qwen3_tts/
+          retention-days: 1
+          compression-level: 1
+      - name: Collect qwen3_asr
+        id: qwen3_asr
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',qwen3_asr,') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          python scripts/ci/collect_hrx_models.py --source source --model qwen3_asr \
+            --results results --backends "$BACKENDS" --blocks "$BLOCKS" --hip-models "$HIP_MODELS"
+      - name: Upload qwen3_asr raw logs and outputs
+        if: ${{ always() && steps.qwen3_asr.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-hrx-qwen3_asr
+          path: results/qwen3_asr/
+          retention-days: 1
+          compression-level: 1
+      - name: Report collection failures after preserving every model
+        if: ${{ always() && (steps.hrx.outcome == 'failure' || steps.operators.outcome == 'failure' || steps.irodori.outcome == 'failure' || steps.breeze.outcome == 'failure' || steps.ming3.outcome == 'failure' || steps.omnivoice.outcome == 'failure' || steps.qwen3_tts.outcome == 'failure' || steps.qwen3_asr.outcome == 'failure') }}
+        run: exit 1
