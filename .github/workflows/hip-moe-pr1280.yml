@@ -1,5 +1,10 @@
 name: HIP MoE PR 1280 A-B
-on: workflow_dispatch
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-moe-pr1280.yml
+      - .github/tests/hip-moe-pr1280.sh
 permissions:
   contents: read
 jobs:
