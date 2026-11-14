@@ -26,6 +26,10 @@ on:
         description: Models also requiring the HIP baseline pair in this run
         type: string
         default: ''
+      operator_params:
+        description: Optional existing GGML test parameter filter
+        type: string
+        default: ''
       operators:
         description: Optional comma-separated new HRX operators to check against GGML CPU
         type: string
@@ -53,6 +57,7 @@ jobs:
       BACKENDS: ${{ inputs.backends }}
       BLOCKS: ${{ inputs.blocks }}
       HIP_MODELS: ${{ inputs.hip_models }}
+      OPERATOR_PARAMS: ${{ inputs.operator_params }}
       OPERATORS: ${{ inputs.operators }}
     defaults:
       run:
@@ -140,7 +145,9 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          source/build/debug/bin/test-hrx-ops test -b HRX0 -o "$OPERATORS" 2>&1 | tee results/operators.log
+          extra=()
+          if [[ -n "$OPERATOR_PARAMS" ]]; then extra+=(-p "$OPERATOR_PARAMS"); fi
+          source/build/debug/bin/test-hrx-ops test -b HRX0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators.log
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
