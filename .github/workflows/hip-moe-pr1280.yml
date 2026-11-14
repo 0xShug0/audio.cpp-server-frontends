@@ -1,0 +1,21 @@
+name: HIP MoE PR 1280 A-B
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned base and PR
+        run: bash .github/tests/hip-moe-pr1280.sh build
+      - name: Run matched model requests
+        run: bash .github/tests/hip-moe-pr1280.sh run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-moe-pr1280-results
+          path: results/
+          compression-level: 0
+          retention-days: 3
