@@ -66,6 +66,7 @@ jobs:
             model_specs
             tools
             tests/perf
+            tests/soulx_flashhead
             assets/resources
             webui/native/demo_voices
       - uses: actions/setup-python@v5
