@@ -39,7 +39,7 @@ jobs:
           }
           Get-FileHash source/src/framework/package_manager/xet.cpp, source/src/framework/package_manager/manager.cpp |
             Format-Table -AutoSize | Out-File results/source-hashes.txt
-          cmake -S source -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' '-DCMAKE_C_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG /INCREMENTAL:NO' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DENGINE_BUILD_TESTS=ON
+          cmake -S source -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' '-DCMAKE_C_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG /INCREMENTAL:NO' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_EXTENDED_TESTS=ON
           if ($LASTEXITCODE) { throw 'Configure failed' }
           cmake --build build/debug --target audiocpp_server package_manager_xet_test package_manager_http_test -j 4
           if ($LASTEXITCODE) { throw 'Build failed' }
@@ -83,14 +83,24 @@ jobs:
                 if (!$ready) { throw 'Server did not start' }
                 Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
                 $job = $null
-                for ($i=0; $i -lt 180; $i++) {
+                $lastMessage = ''
+                $usedXet = $false
+                $fellBack = $false
+                for ($i=0; $i -lt 1800; $i++) {
                   $job = (Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status).data | Where-Object id -eq $package
+                  if ($job -and $job.message -ne $lastMessage) {
+                    $lastMessage = $job.message
+                    $lastMessage | Add-Content "$log.progress"
+                    if ($lastMessage -match '\(Xet\)') { $usedXet = $true }
+                    if ($lastMessage -match 'Xet unavailable|using HTTP') { $fellBack = $true }
+                  }
                   if ($job.state -in 'complete','completed','failed','cancelled','succeeded','done','success') { break }
-                  Start-Sleep 1
+                  Start-Sleep -Milliseconds 100
                 }
                 $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
                 "$mode $package $($job.state): $($job.message)" | Tee-Object -FilePath results/status.txt -Append
                 if ($job.state -ne 'complete') { throw "Install did not complete: $($job.message)" }
+                if ($mode -ne 'http' -and (!$usedXet -or $fellBack)) { throw 'Xet transport was not verified without HTTP fallback' }
                 $gguf = Get-ChildItem $dir -Recurse -File -Filter '*.gguf' | Select-Object -First 1
                 $expected = if ($package -eq 'htdemucs_f16') { 'f8c54ba35df95aafea7881eac214b58ec18a73cbcb6ff5a90f4b762631a286b6' } else { 'b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388' }
                 if (!$gguf -or (Get-FileHash $gguf.FullName).Hash -ne $expected) { throw 'Independent checksum failed' }
