@@ -11,7 +11,7 @@ on:
         type: string
         required: true
       models:
-        description: Comma-separated models to collect
+        description: Comma-separated models to collect; none for operators only
         type: string
         default: irodori,breeze,ming3,omnivoice,qwen3_tts,qwen3_asr
       backends:
@@ -128,7 +128,7 @@ jobs:
             -DAUDIOCPP_BUILD_C_API=OFF -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
             -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF 2>&1 | tee results/configure-hip.log
           target=ggml
-          if [[ -n "$MODELS" ]]; then target=audiocpp_cli; fi
+          if [[ -n "$MODELS" && "$MODELS" != "none" ]]; then target=audiocpp_cli; fi
           cmake --build source/build/debug --target "$target" --parallel 16 2>&1 | tee results/build-hip.log
       - name: Build HRX and Loom alongside HIP
         id: hrx
@@ -146,7 +146,7 @@ jobs:
             -DGGML_HRX_BUILD_TESTS=ON \
             -DGGML_HRX_KERNEL_CORPUS_SOURCE_FORMAT=text 2>&1 | tee results/configure-hrx.log
           targets=(test-hrx-ops)
-          if [[ -n "$MODELS" ]]; then targets+=(audiocpp_cli); fi
+          if [[ -n "$MODELS" && "$MODELS" != "none" ]]; then targets+=(audiocpp_cli); fi
           cmake --build source/build/debug --target "${targets[@]}" --parallel 16 2>&1 | tee results/build-hrx.log
       - name: Check requested new HRX operators against CPU
         id: operators
@@ -154,6 +154,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          ulimit -c 0
           extra=()
           if [[ -n "$OPERATOR_PARAMS" ]]; then extra+=(-p "$OPERATOR_PARAMS"); fi
           source/build/debug/bin/test-hrx-ops test -b HRX0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators.log
@@ -161,6 +162,7 @@ jobs:
         if: ${{ !cancelled() && steps.operators.outcome == 'success' && inputs.operator_perf }}
         run: |
           set -euo pipefail
+          ulimit -c 0
           extra=()
           if [[ -n "$OPERATOR_PARAMS" ]]; then extra+=(-p "$OPERATOR_PARAMS"); fi
           source/build/debug/bin/test-hrx-ops perf -b ROCm0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hip-perf.log
@@ -177,7 +179,7 @@ jobs:
           compression-level: 1
       - name: Collect irodori
         id: irodori
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',irodori,') }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && (inputs.operators == '' || steps.operators.outcome == 'success') && contains(format(',{0},', inputs.models), ',irodori,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -194,7 +196,7 @@ jobs:
           compression-level: 1
       - name: Collect breeze
         id: breeze
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',breeze,') }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && (inputs.operators == '' || steps.operators.outcome == 'success') && contains(format(',{0},', inputs.models), ',breeze,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -211,7 +213,7 @@ jobs:
           compression-level: 1
       - name: Collect ming3
         id: ming3
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',ming3,') }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && (inputs.operators == '' || steps.operators.outcome == 'success') && contains(format(',{0},', inputs.models), ',ming3,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -228,7 +230,7 @@ jobs:
           compression-level: 1
       - name: Collect omnivoice
         id: omnivoice
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',omnivoice,') }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && (inputs.operators == '' || steps.operators.outcome == 'success') && contains(format(',{0},', inputs.models), ',omnivoice,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -245,7 +247,7 @@ jobs:
           compression-level: 1
       - name: Collect qwen3_tts
         id: qwen3_tts
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',qwen3_tts,') }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && (inputs.operators == '' || steps.operators.outcome == 'success') && contains(format(',{0},', inputs.models), ',qwen3_tts,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -262,7 +264,7 @@ jobs:
           compression-level: 1
       - name: Collect qwen3_asr
         id: qwen3_asr
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.models), ',qwen3_asr,') }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && (inputs.operators == '' || steps.operators.outcome == 'success') && contains(format(',{0},', inputs.models), ',qwen3_asr,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
