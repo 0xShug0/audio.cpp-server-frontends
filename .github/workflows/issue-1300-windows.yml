@@ -1,4 +1,4 @@
-name: HTDemucs Windows Xet reproduction
+name: Validate package downloads with PRs 1301 and 1305
 on:
   push:
     branches: [test/issue-1300-windows]
@@ -8,56 +8,63 @@ permissions:
 jobs:
   reproduce:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Build Windows verification fix
+      - name: Build exact PRs together (Debug and ASan)
+        id: build
         shell: pwsh
         run: |
-          curl.exe -fLsS https://codeload.github.com/0xShug0/audio.cpp/tar.gz/83b1354b -o source.tar.gz
+          New-Item -ItemType Directory results | Out-Null
+          $base = 'da95c6a094b5a7655c3e735988b77e4ef5428a77'
+          curl.exe -fLsS "https://codeload.github.com/0xShug0/audio.cpp/tar.gz/$base" -o source.tar.gz
           if ($LASTEXITCODE) { throw 'Source download failed' }
           New-Item -ItemType Directory source | Out-Null
           tar -xzf source.tar.gz --strip-components=1 -C source
           if ($LASTEXITCODE) { throw 'Source extraction failed' }
-          $file = 'source/src/framework/package_manager/xet.cpp'
-          $code = (Get-Content $file -Raw).Replace("`r`n", "`n")
-          $anchor = '        hasher = std::make_unique<PrefixHasher>(destination, cancelled);'
-          if (!$code.Contains($anchor)) { throw 'Hasher anchor missing' }
-          $code = $code.Replace($anchor, "#ifndef _WIN32`n$anchor`n#endif")
-          $anchor = '        const auto digest = hasher->finish(request.size);'
-          if (!$code.Contains($anchor)) { throw 'Digest anchor missing' }
-          $code = $code.Replace("    if (hasher) {`n$anchor", "#ifdef _WIN32`n    // Read only after reconstruction workers have closed their output streams.`n    if (options.verify_sha256 && is_xet_hash(request.expected_sha256)) {`n        hasher = std::make_unique<PrefixHasher>(destination, cancelled);`n    }`n#endif`n    if (hasher) {`n$anchor")
-          Set-Content $file $code
-          $file = 'source/src/framework/package_manager/manager.cpp'
-          $code = (Get-Content $file -Raw).Replace("`r`n", "`n")
-          $anchor = '    // Inventory workers issue many requests to the same origin. Keep their'
-          if (!$code.Contains($anchor)) { throw 'HTTP cache anchor missing' }
-          $code = $code.Replace($anchor, "#ifdef _WIN32`n    httplib::Client client(http_origin(parsed));`n#else`n$anchor")
-          $anchor = '    auto & client = *cached;'
-          if (!$code.Contains($anchor)) { throw 'HTTP client anchor missing' }
-          $code = $code.Replace("$anchor`n    configure_client(client, head ? 60 : 300);`n    client.set_keep_alive(true);", "$anchor`n    client.set_keep_alive(true);`n#endif`n    configure_client(client, head ? 60 : 300);")
-          if (!$code.Contains("#endif`n    configure_client(client, head ? 60 : 300);")) { throw 'HTTP cache replacement failed' }
-          Set-Content $file $code
-          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF
+          $commits = @{'1301'='4cc78a758d0c259e3ab9d55c65fcfa177292ecf9'; '1305'='a85072349d9951dfd9639b1cf9f53292185e9519'}
+          "base=$base" | Set-Content results/provenance.txt
+          foreach ($number in '1301', '1305') {
+            $commit = $commits[$number]
+            curl.exe -fLsS "https://github.com/0xShug0/audio.cpp/commit/$commit.patch" -o "pr$number.patch"
+            if ($LASTEXITCODE) { throw "PR $number download failed" }
+            Push-Location source
+            try {
+              git apply --check "../pr$number.patch"
+              if ($LASTEXITCODE) { throw "PR $number cannot apply cleanly" }
+              git apply "../pr$number.patch"
+              if ($LASTEXITCODE) { throw "PR $number application failed" }
+            } finally { Pop-Location }
+            "PR$number=$commit" | Add-Content results/provenance.txt
+          }
+          Get-FileHash source/src/framework/package_manager/xet.cpp, source/src/framework/package_manager/manager.cpp |
+            Format-Table -AutoSize | Out-File results/source-hashes.txt
+          cmake -S source -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' '-DCMAKE_C_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG /INCREMENTAL:NO' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DENGINE_BUILD_TESTS=ON
           if ($LASTEXITCODE) { throw 'Configure failed' }
-          cmake --build build --target audiocpp_server -j 4
+          cmake --build build/debug --target audiocpp_server package_manager_xet_test package_manager_http_test -j 4
           if ($LASTEXITCODE) { throw 'Build failed' }
-      - name: Reproduce release downloads
+      - name: Run existing offline download tests
         shell: pwsh
         run: |
-          New-Item -ItemType Directory results | Out-Null
+          $env:ASAN_OPTIONS = 'halt_on_error=1:detect_leaks=0'
+          $failed = @()
+          foreach ($test in 'package_manager_xet_test', 'package_manager_http_test') {
+            & "build/debug/bin/$test.exe" --log *> "results/$test.log"
+            if ($LASTEXITCODE) { $failed += "$test exit=$LASTEXITCODE" }
+          }
+          if ($failed.Count) { throw ($failed -join '; ') }
+      - name: Validate real Xet and HTTP installs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: |
           $dumpFolder = (Resolve-Path results).Path
           $dumpKey = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\audiocpp_server.exe'
           New-Item -Force $dumpKey | Out-Null
           New-ItemProperty -Path $dumpKey -Name DumpFolder -Value $dumpFolder -PropertyType ExpandString -Force | Out-Null
           New-ItemProperty -Path $dumpKey -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
-          $release = 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5'
-          curl.exe -fLsS --retry 2 "$release/audio-v0.9.5-bin-windows-x64-cpu-portable.zip" -o release.zip
-          if ($LASTEXITCODE) { throw 'Release download failed' }
-          Expand-Archive release.zip release
-          $server = Get-Item build/bin/audiocpp_server.exe
+          $server = Get-Item build/debug/bin/audiocpp_server.exe
           $env:ASAN_OPTIONS = "halt_on_error=1:detect_leaks=0"
-          if (!$server) { throw 'Server is missing from archive' }
+          if (!$server) { throw 'Built server is missing' }
           $failures = 0
           foreach ($mode in 'xet', 'xet-repeat', 'http') {
             $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
@@ -120,3 +127,4 @@ jobs:
         with:
           name: issue-1300-windows
           path: results/
+          retention-days: 3
