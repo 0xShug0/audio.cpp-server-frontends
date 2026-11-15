@@ -165,8 +165,8 @@ jobs:
           ulimit -c 0
           extra=()
           if [[ -n "$OPERATOR_PARAMS" ]]; then extra+=(-p "$OPERATOR_PARAMS"); fi
-          source/build/debug/bin/test-hrx-ops perf -b ROCm0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hip-perf.log
-          source/build/debug/bin/test-hrx-ops perf -b HRX0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hrx-perf.log
+          source/build/debug/bin/test-hrx-ops perf --perf-max-runs 16 -b ROCm0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hip-perf.log
+          source/build/debug/bin/test-hrx-ops perf --perf-max-runs 16 -b HRX0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hrx-perf.log
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
