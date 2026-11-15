@@ -28,7 +28,7 @@ jobs:
           if (!$code.Contains($anchor)) { throw 'Digest anchor missing' }
           $code = $code.Replace("    if (hasher) {`n$anchor", "#ifdef _WIN32`n    // Read only after reconstruction workers have closed their output streams.`n    if (options.verify_sha256 && is_xet_hash(request.expected_sha256)) {`n        hasher = std::make_unique<PrefixHasher>(destination, cancelled);`n    }`n#endif`n    if (hasher) {`n$anchor")
           Set-Content $file $code
-          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF
           if ($LASTEXITCODE) { throw 'Configure failed' }
           cmake --build build --target audiocpp_server -j 4
           if ($LASTEXITCODE) { throw 'Build failed' }
@@ -46,6 +46,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'Release download failed' }
           Expand-Archive release.zip release
           $server = Get-Item build/bin/audiocpp_server.exe
+          $env:ASAN_OPTIONS = "halt_on_error=1:detect_leaks=0"
           if (!$server) { throw 'Server is missing from archive' }
           foreach ($mode in 'xet', 'xet-repeat') {
             $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
