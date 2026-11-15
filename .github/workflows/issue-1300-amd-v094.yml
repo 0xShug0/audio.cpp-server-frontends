@@ -20,7 +20,7 @@ jobs:
           Expand-Archive release.zip release
           $server = Get-ChildItem release -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
           if (!$server) { throw 'Server is missing from archive' }
-          foreach ($mode in 'http', 'http-repeat') {
+          foreach ($mode in 'quiet-single', 'concurrent-installs') {
             $env:AUDIOCPP_HF_XET = if ($mode.StartsWith('http')) { '0' } else { '1' }
             foreach ($package in 'htdemucs_f16', 'htdemucs_q8_0') {
               $dir = Join-Path $PWD "downloads/$mode/$package"
@@ -36,6 +36,14 @@ jobs:
                 }
                 if (!$ready) { throw 'Server did not start' }
                 Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
+                if ($mode -eq 'concurrent-installs') {
+                  $other = if ($package -eq 'htdemucs_f16') { 'htdemucs_q8_0' } else { 'htdemucs_f16' }
+                  Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$other} | ConvertTo-Json) | Out-Null
+                }
+                Start-Sleep 45
+                $p.Refresh()
+                if ($p.HasExited) { throw "Server exited before first status poll: $($p.ExitCode)" }
+                Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status | ConvertTo-Json -Depth 5 | Set-Content "$log-first-status.json"
                 $job = $null
                 for ($i=0; $i -lt 180; $i++) {
                   $job = (Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status).data | Where-Object id -eq $package
