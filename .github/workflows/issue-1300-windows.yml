@@ -20,8 +20,10 @@ jobs:
           Expand-Archive release.zip release
           $server = Get-ChildItem release -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
           if (!$server) { throw 'Server is missing from archive' }
-          foreach ($mode in 'xet', 'http') {
+          foreach ($mode in 'xet-serial', 'xet-noverify') {
             $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
+            $env:AUDIOCPP_HF_XET_CONCURRENCY = if ($mode -eq 'xet-serial') { '1' } else { '16' }
+            $env:AUDIOCPP_HF_XET_VERIFY = if ($mode -eq 'xet-noverify') { '0' } else { '1' }
             foreach ($package in 'htdemucs_f16', 'htdemucs_q8_0') {
               $dir = Join-Path $PWD "downloads/$mode/$package"
               New-Item -ItemType Directory -Force $dir | Out-Null
@@ -37,7 +39,7 @@ jobs:
                 $job = $null
                 for ($i=0; $i -lt 180; $i++) {
                   $job = (Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status).data | Where-Object id -eq $package
-                  if ($job.state -in 'completed','failed','cancelled','succeeded','done','success') { break }
+                  if ($job.state -in 'complete','completed','failed','cancelled','succeeded','done','success') { break }
                   Start-Sleep 1
                 }
                 $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
