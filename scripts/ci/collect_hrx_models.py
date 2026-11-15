@@ -27,7 +27,7 @@ MODELS = {
                   'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', '3bc2462eca3a3a8f56abcd860d0943ffdc0546547dde55a9d08589607d6f3936'),
 }
 ORDER = [('a1', 'hip', ''), ('b1', 'hip', 'gfx1151_v1'), ('c1', 'hrx', ''),
-         ('c2', 'hrx', ''), ('b2', 'hip', 'gfx1151_v1'), ('a2', 'hip', '')]
+         ('c2', 'hrx', ''), ('b2', 'hip', 'gfx1151_v1'), ('a2', 'hip', ''), ('v1', 'vulkan', '')]
 
 
 def run(command, stem, cwd, timeout):

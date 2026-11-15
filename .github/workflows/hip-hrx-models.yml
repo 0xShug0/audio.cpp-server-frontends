@@ -106,19 +106,38 @@ jobs:
           echo "ROCM_PATH=$rocm" >> "$GITHUB_ENV"
           git -C source rev-parse HEAD > results/source-sha.txt
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
-      - name: Build Debug HIP and baseline implementations
+      - name: Prepare established Vulkan SDK
+        if: ${{ inputs.backends == 'vulkan' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vulkan-debs" "$RUNNER_TEMP/vulkan-sdk"
+          cd "$RUNNER_TEMP/vulkan-debs"
+          apt-get download libvulkan-dev glslc libshaderc1 vulkan-tools spirv-headers
+          for package in *.deb; do dpkg-deb -x "$package" "$RUNNER_TEMP/vulkan-sdk"; done
+          echo "$RUNNER_TEMP/vulkan-sdk/usr/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/vulkan-sdk/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+      - name: Build Debug selected backend
         id: hip
         run: |
           set -euo pipefail
           ulimit -c 0
+          hip=ON
+          vulkan=OFF
+          extra=()
+          if [[ "$BACKENDS" == "vulkan" ]]; then
+            hip=OFF
+            vulkan=ON
+            extra+=(-DCMAKE_PREFIX_PATH="$RUNNER_TEMP/vulkan-sdk/usr" -DVulkan_LIBRARY=/lib/x86_64-linux-gnu/libvulkan.so.1)
+            vulkaninfo --summary > results/vulkan-device.log 2>&1
+          fi
           cmake -S source -B source/build/debug -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER="$ROCM_PATH/llvm/bin/clang" \
             -DCMAKE_CXX_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
             -DCMAKE_HIP_COMPILER="$ROCM_PATH/llvm/bin/clang++" \
             -DCMAKE_PREFIX_PATH="$ROCM_PATH" -DGPU_TARGETS=gfx1151 \
-            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_HRX=OFF -DENGINE_ENABLE_CUDA=OFF \
-            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_HIP="$hip" -DENGINE_ENABLE_HRX=OFF -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN="$vulkan" \
             -DENGINE_ENABLE_WEBGPU=OFF -DENGINE_ENABLE_SYCL=OFF \
             -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
             -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
@@ -126,13 +145,13 @@ jobs:
             '-DAUDIOCPP_MODELS=irodori_tts;breeze_tts;ming3_tts;omnivoice;qwen3_tts;qwen3_asr' \
             -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
             -DAUDIOCPP_BUILD_C_API=OFF -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
-            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF 2>&1 | tee results/configure-hip.log
+            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF "${extra[@]}" 2>&1 | tee results/configure-hip.log
           target=ggml
           if [[ -n "$MODELS" && "$MODELS" != "none" ]]; then target=audiocpp_cli; fi
           cmake --build source/build/debug --target "$target" --parallel 16 2>&1 | tee results/build-hip.log
       - name: Build HRX and Loom alongside HIP
         id: hrx
-        if: ${{ !cancelled() && steps.hip.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.hip.outcome == 'success' && contains(format(',{0},', inputs.backends), ',hrx,') }}
         continue-on-error: true
         run: |
           set -euo pipefail
