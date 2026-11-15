@@ -28,6 +28,16 @@ jobs:
           if (!$code.Contains($anchor)) { throw 'Digest anchor missing' }
           $code = $code.Replace("    if (hasher) {`n$anchor", "#ifdef _WIN32`n    // Read only after reconstruction workers have closed their output streams.`n    if (options.verify_sha256 && is_xet_hash(request.expected_sha256)) {`n        hasher = std::make_unique<PrefixHasher>(destination, cancelled);`n    }`n#endif`n    if (hasher) {`n$anchor")
           Set-Content $file $code
+          $file = 'source/src/framework/package_manager/manager.cpp'
+          $code = (Get-Content $file -Raw).Replace("`r`n", "`n")
+          $anchor = '    // Inventory workers issue many requests to the same origin. Keep their'
+          if (!$code.Contains($anchor)) { throw 'HTTP cache anchor missing' }
+          $code = $code.Replace($anchor, "#ifdef _WIN32`n    httplib::Client client(http_origin(parsed));`n#else`n$anchor")
+          $anchor = '    auto & client = *cached;'
+          if (!$code.Contains($anchor)) { throw 'HTTP client anchor missing' }
+          $code = $code.Replace("$anchor`n    configure_client(client, head ? 60 : 300);`n    client.set_keep_alive(true);", "$anchor`n    client.set_keep_alive(true);`n#endif`n    configure_client(client, head ? 60 : 300);")
+          if (!$code.Contains("#endif`n    configure_client(client, head ? 60 : 300);")) { throw 'HTTP cache replacement failed' }
+          Set-Content $file $code
           cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF
           if ($LASTEXITCODE) { throw 'Configure failed' }
           cmake --build build --target audiocpp_server -j 4
@@ -48,7 +58,8 @@ jobs:
           $server = Get-Item build/bin/audiocpp_server.exe
           $env:ASAN_OPTIONS = "halt_on_error=1:detect_leaks=0"
           if (!$server) { throw 'Server is missing from archive' }
-          foreach ($mode in 'xet', 'xet-repeat') {
+          $failures = 0
+          foreach ($mode in 'xet', 'xet-repeat', 'http') {
             $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
             $env:AUDIOCPP_HF_XET_CONCURRENCY = if ($mode -eq 'xet-serial') { '1' } else { '16' }
             $env:AUDIOCPP_HF_XET_VERIFY = if ($mode -eq 'xet-noverify') { '0' } else { '1' }
@@ -72,7 +83,15 @@ jobs:
                 }
                 $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
                 "$mode $package $($job.state): $($job.message)" | Tee-Object -FilePath results/status.txt -Append
+                if ($job.state -ne 'complete') { throw "Install did not complete: $($job.message)" }
+                $gguf = Get-ChildItem $dir -Recurse -File -Filter '*.gguf' | Select-Object -First 1
+                $expected = if ($package -eq 'htdemucs_f16') { 'f8c54ba35df95aafea7881eac214b58ec18a73cbcb6ff5a90f4b762631a286b6' } else { 'b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388' }
+                if (!$gguf -or (Get-FileHash $gguf.FullName).Hash -ne $expected) { throw 'Independent checksum failed' }
+                Start-Sleep 2
+                $p.Refresh()
+                if ($p.HasExited) { throw "Server exited after install: $($p.ExitCode)" }
               } catch {
+                $failures++
                 $p.Refresh()
                 "$mode $package polling failed: $_; server exited=$($p.HasExited) exit=$($p.ExitCode)" | Tee-Object -FilePath results/status.txt -Append
                 Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue |
@@ -88,6 +107,8 @@ jobs:
               }
             }
           }
+          if (Select-String -Path 'results/*.stderr' -Pattern 'ERROR: AddressSanitizer' -Quiet) { $failures++ }
+          if ($failures) { throw "$failures validation failures" }
           $cdb = Get-Item "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue
           if ($cdb) {
             foreach ($dump in Get-ChildItem results -Filter '*.dmp') {
