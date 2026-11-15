@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import shutil
 import subprocess
+import sys
 import time
 
 
@@ -33,18 +34,49 @@ def run(command, stem, cwd, timeout):
     command = [str(v) for v in command]
     stem.with_suffix('.command.json').write_text(json.dumps(command, indent=2) + '\n')
     start = time.time()
-    with stem.with_suffix('.log').open('wb') as log:
+    log_path = stem.with_suffix('.log')
+    print(f'{stem.name}: starting (timeout {timeout}s); log={log_path}', flush=True)
+    with log_path.open('wb') as log:
         p = subprocess.Popen(command, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        # Stream raw output as well as saving it; no runner-side interpretation.
+        follow = None
         try:
-            code = p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGTERM)
+            follow = subprocess.Popen(['tail', '--pid', str(p.pid), '-n', '+1', '-f', str(log_path)])
             try:
-                p.wait(timeout=10)
+                code = p.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                os.killpg(p.pid, signal.SIGKILL)
-                p.wait()
-            code = 'timeout'
+                print(f'{stem.name}: process timeout; terminating process group {p.pid}', flush=True)
+                code = 'timeout'
+        finally:
+            try:
+                if p.poll() is None:
+                    # Cancellation must also stop the detached CLI process group.
+                    interrupting = sys.exc_info()[0] is not None
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL if interrupting else signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass  # The child exited between poll() and killpg().
+                    try:
+                        p.wait(timeout=5 if interrupting else 10)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(p.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass  # The child exited while the timeout was raised.
+                        try:
+                            p.wait(timeout=5)
+                        except subprocess.TimeoutExpired as error:
+                            (stem.parent / 'cleanup-failed.json').write_text(
+                                json.dumps(dict(pid=p.pid, command=command)) + '\n')
+                            raise RuntimeError('Child survived SIGKILL; refusing further GPU measurements') from error
+            finally:
+                if follow is not None:
+                    try:
+                        follow.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        follow.terminate()
+                        follow.wait(timeout=5)
+
     return dict(exit_code=code, started_at=start, finished_at=time.time())
 
 
@@ -57,6 +89,8 @@ def main():
     parser.add_argument('--hip-models', default='')
     parser.add_argument('--blocks', default='a1,b1,c1,c2,b2,a2')
     args = parser.parse_args()
+    if list(args.results.glob('*/cleanup-failed.json')):
+        raise RuntimeError('Previous child cleanup failed; no further GPU measurements are safe on this runner')
     source, results = args.source.resolve(), (args.results / args.model).resolve()
     results.mkdir(parents=True, exist_ok=True)
     family, repo, revision, filename, expected_sha256 = MODELS[args.model]
@@ -168,4 +202,5 @@ def main():
 
 
 if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     raise SystemExit(main())
