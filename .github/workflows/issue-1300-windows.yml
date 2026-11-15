@@ -42,6 +42,9 @@ jobs:
                 }
                 $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
                 "$mode $package $($job.state): $($job.message)" | Tee-Object -FilePath results/status.txt -Append
+              } catch {
+                $p.Refresh()
+                "$mode $package polling failed: $_; server exited=$($p.HasExited) exit=$($p.ExitCode)" | Tee-Object -FilePath results/status.txt -Append
               } finally {
                 Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
                 $p.WaitForExit()
