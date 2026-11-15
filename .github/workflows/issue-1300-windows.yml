@@ -36,6 +36,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory results | Out-Null
+          $dumpFolder = (Resolve-Path results).Path
+          $dumpKey = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\audiocpp_server.exe'
+          New-Item -Force $dumpKey | Out-Null
+          New-ItemProperty -Path $dumpKey -Name DumpFolder -Value $dumpFolder -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $dumpKey -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
           $release = 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5'
           curl.exe -fLsS --retry 2 "$release/audio-v0.9.5-bin-windows-x64-cpu-portable.zip" -o release.zip
           if ($LASTEXITCODE) { throw 'Release download failed' }
@@ -69,6 +74,8 @@ jobs:
               } catch {
                 $p.Refresh()
                 "$mode $package polling failed: $_; server exited=$($p.HasExited) exit=$($p.ExitCode)" | Tee-Object -FilePath results/status.txt -Append
+                Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue |
+                  Where-Object Message -Match 'audiocpp_server' | Format-List TimeCreated,Message | Out-File "$log.events"
               } finally {
                 Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
                 $p.WaitForExit()
@@ -78,6 +85,12 @@ jobs:
                   ForEach-Object { '{0} {1} {2}' -f (Get-FileHash $_.FullName).Hash, $_.Length, $_.FullName } |
                   Tee-Object -FilePath results/hashes.txt -Append
               }
+            }
+          }
+          $cdb = Get-Item "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue
+          if ($cdb) {
+            foreach ($dump in Get-ChildItem results -Filter '*.dmp') {
+              & $cdb.FullName -z $dump.FullName -y "srv*https://msdl.microsoft.com/download/symbols" -c '!analyze -v; q' *> "$($dump.FullName).txt"
             }
           }
       - uses: actions/upload-artifact@v4
