@@ -35,6 +35,11 @@ on:
         type: string
         default: ''
 
+      operator_perf:
+        description: Collect sequential HIP and HRX operator timings after correctness
+        type: boolean
+        default: false
+
 permissions:
   contents: read
 
@@ -122,7 +127,9 @@ jobs:
             -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
             -DAUDIOCPP_BUILD_C_API=OFF -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
             -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF 2>&1 | tee results/configure-hip.log
-          cmake --build source/build/debug --target audiocpp_cli --parallel 16 2>&1 | tee results/build-hip.log
+          target=ggml
+          if [[ -n "$MODELS" ]]; then target=audiocpp_cli; fi
+          cmake --build source/build/debug --target "$target" --parallel 16 2>&1 | tee results/build-hip.log
       - name: Build HRX and Loom alongside HIP
         id: hrx
         if: ${{ !cancelled() && steps.hip.outcome == 'success' }}
@@ -138,7 +145,9 @@ jobs:
             -DHRX_SOURCE_DIR="$RUNNER_TEMP/hrx-system" \
             -DGGML_HRX_BUILD_TESTS=ON \
             -DGGML_HRX_KERNEL_CORPUS_SOURCE_FORMAT=text 2>&1 | tee results/configure-hrx.log
-          cmake --build source/build/debug --target audiocpp_cli test-hrx-ops --parallel 16 2>&1 | tee results/build-hrx.log
+          targets=(test-hrx-ops)
+          if [[ -n "$MODELS" ]]; then targets+=(audiocpp_cli); fi
+          cmake --build source/build/debug --target "${targets[@]}" --parallel 16 2>&1 | tee results/build-hrx.log
       - name: Check requested new HRX operators against CPU
         id: operators
         if: ${{ !cancelled() && steps.hrx.outcome == 'success' && inputs.operators != '' }}
@@ -148,6 +157,14 @@ jobs:
           extra=()
           if [[ -n "$OPERATOR_PARAMS" ]]; then extra+=(-p "$OPERATOR_PARAMS"); fi
           source/build/debug/bin/test-hrx-ops test -b HRX0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators.log
+      - name: Collect sequential HIP and HRX operator timings
+        if: ${{ !cancelled() && steps.operators.outcome == 'success' && inputs.operator_perf }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ -n "$OPERATOR_PARAMS" ]]; then extra+=(-p "$OPERATOR_PARAMS"); fi
+          source/build/debug/bin/test-hrx-ops perf -b ROCm0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hip-perf.log
+          source/build/debug/bin/test-hrx-ops perf -b HRX0 -o "$OPERATORS" "${extra[@]}" 2>&1 | tee results/operators-hrx-perf.log
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
