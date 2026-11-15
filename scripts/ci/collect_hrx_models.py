@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """Collect raw three-backend runs. Interpret outputs only after download."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import time
 
 
 MODELS = {
     'irodori': ('irodori_tts', 'audio-cpp/audio.cpp-gguf', 'ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7',
-                'Irodori-TTS-v4-Small-GGUF/irodori-tts-v4.1-small-mf-q8_0.gguf'),
+                'Irodori-TTS-v4-Small-GGUF/irodori-tts-v4.1-small-mf-q8_0.gguf', 'a450c277a29b771bde3ceb21fd753bfb9a61c93aef952e0a3b20ad8d3facbbcd'),
     'breeze': ('breeze_tts', 'audio-cpp/audio.cpp-gguf', 'ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7',
-               'Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf'),
+               'Breeze-TTS-2-GGUF/breeze-tts-2-q8_0.gguf', 'b17b89b1c21107c44e8d556ab0a856d7acd06bdd0c914e68e0e57f6e33f555a3'),
     'ming3': ('ming3_tts', 'audio-cpp/Ming-3.0-TTS-0.5B-GGUF', '2eb8d37c7f10672e69c8aa33091baa04c461b66c',
-              'ming-3.0-tts-0.5b-q8_0.gguf'),
+              'ming-3.0-tts-0.5b-q8_0.gguf', 'fcf2aa25e8e9cf2065a936e506581735c64d6255fb7869f09fbb61a2dde09aa1'),
     'omnivoice': ('omnivoice', 'audio-cpp/audio.cpp-gguf', 'ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7',
-                  'OmniVoice-GGUF/omnivoice-q8_0.gguf'),
+                  'OmniVoice-GGUF/omnivoice-q8_0.gguf', '0e5a721edd1b08d9067ef66f40ded609a6b14f5a8445c703f9869736cabd350a'),
     'qwen3_tts': ('qwen3_tts', 'audio-cpp/audio.cpp-gguf', 'ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7',
-                  'Qwen3-TTS-12Hz-1.7B-VoiceDesign-GGUF/qwen3-tts-12hz-1.7b-voicedesign-q8_0.gguf'),
+                  'Qwen3-TTS-12Hz-1.7B-VoiceDesign-GGUF/qwen3-tts-12hz-1.7b-voicedesign-q8_0.gguf', 'b86e03d1d2077bbaed157ab7a7fc646c3e309e69afa52c5e1c86b622b4715057'),
     'qwen3_asr': ('qwen3_asr', 'audio-cpp/audio.cpp-gguf', 'ca0b203eb1bb87f333a7cfbad2d5f6672b4ccba7',
-                  'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf'),
+                  'Qwen3-ASR-1.7B-GGUF/qwen3-asr-1.7b-q8_0.gguf', '3bc2462eca3a3a8f56abcd860d0943ffdc0546547dde55a9d08589607d6f3936'),
 }
 ORDER = [('a1', 'hip', ''), ('b1', 'hip', 'gfx1151_v1'), ('c1', 'hrx', ''),
          ('c2', 'hrx', ''), ('b2', 'hip', 'gfx1151_v1'), ('a2', 'hip', '')]
@@ -57,21 +59,56 @@ def main():
     args = parser.parse_args()
     source, results = args.source.resolve(), (args.results / args.model).resolve()
     results.mkdir(parents=True, exist_ok=True)
-    family, repo, revision, filename = MODELS[args.model]
+    family, repo, revision, filename, expected_sha256 = MODELS[args.model]
     model_dir = Path(os.environ['RUNNER_TEMP']) / 'hrx-models' / args.model
     model_dir.mkdir(parents=True, exist_ok=True)
     model = model_dir / Path(filename).name
     status = dict(family=family, repo=repo, revision=revision, file=filename, runs=[])
     try:
-        if not model.exists():
-            url = f'https://huggingface.co/{repo}/resolve/{revision}/{filename}?download=true'
-            download = run(['curl', '--fail', '--location', '--retry', '3', '--connect-timeout', '30',
-                            '--max-time', '1800', '--output', model.with_suffix('.part'), url],
-                           results / 'download', source, 1900)
-            status['download'] = download
-            if download['exit_code'] != 0:
-                raise RuntimeError('download failed; see download.log')
-            model.with_suffix('.part').rename(model)
+        cache_root = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'audio-cpp-ci'
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cached = cache_root / expected_sha256
+        status['model_sha256'] = expected_sha256
+        status['cache_hit'] = False
+        if cached.exists():
+            with cached.open('rb') as handle:
+                actual = hashlib.file_digest(handle, 'sha256').hexdigest()
+            if actual == expected_sha256:
+                status['cache_hit'] = True
+            else:
+                status['invalid_cache_sha256'] = actual
+                print(f'{args.model}: rejecting corrupt runner cache {cached}: {actual}', flush=True)
+                cached.unlink()
+        if status['cache_hit']:
+            print(f'{args.model}: runner cache hit {cached}', flush=True)
+            (results / 'download.log').write_text(f'Runner cache hit: {cached}\nSHA-256 verified: {expected_sha256}\n')
+            status['download'] = dict(exit_code=0, cache_hit=True)
+        else:
+            official = 'https://huggingface.co'
+            endpoint = os.environ.get('HF_ENDPOINT', official).rstrip('/')
+            endpoints = [endpoint] + ([official] if endpoint != official else [])
+            partial = cache_root / f'{expected_sha256}.{os.getpid()}.part'
+            try:
+                for index, host in enumerate(endpoints):
+                    url = f'{host}/{repo}/resolve/{revision}/{filename}?download=true'
+                    stem = results / ('download' if host == official else 'download-mirror')
+                    download = run(['curl', '--fail', '--location', '--retry', '3', '--connect-timeout', '30',
+                                    '--max-time', '1800', '--output', partial, url], stem, source, 1900)
+                    status['download'] = download
+                    if download['exit_code'] == 0:
+                        with partial.open('rb') as handle:
+                            actual = hashlib.file_digest(handle, 'sha256').hexdigest()
+                        if actual != expected_sha256:
+                            raise RuntimeError(f'model SHA-256 mismatch: expected {expected_sha256}, got {actual}')
+                        partial.replace(cached)
+                        break
+                    if index + 1 == len(endpoints):
+                        raise RuntimeError('download failed; see download logs')
+                    print(f'{args.model}: {host} download failed; retrying official Hugging Face', flush=True)
+            finally:
+                if partial.exists():
+                    partial.unlink()
+        shutil.copyfile(cached, model)
         status['model_bytes'] = model.stat().st_size
         en = ('The little bookshop beside the station stays open until sunset. After work, '
               'I often stop there to read a few pages and speak with the owner. On a rainy '
@@ -118,7 +155,7 @@ def main():
                        '--request-sequence', sequence, '--out-dir', results / label]
             if impl:
                 command += ['--backend-impl', impl]
-            record = run(command, results / label, source, 1200)
+            record = run(command, results / label, source, 3600 if args.model == 'qwen3_asr' else 1200)
             record.update(backend=backend, implementation=impl or 'default')
             status_path.write_text(json.dumps(record, indent=2) + '\n')
             status['runs'].append(record)
