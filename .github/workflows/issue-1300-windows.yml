@@ -10,6 +10,28 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build Windows verification fix
+        shell: pwsh
+        run: |
+          curl.exe -fLsS https://codeload.github.com/0xShug0/audio.cpp/tar.gz/83b1354b -o source.tar.gz
+          if ($LASTEXITCODE) { throw 'Source download failed' }
+          New-Item -ItemType Directory source | Out-Null
+          tar -xzf source.tar.gz --strip-components=1 -C source
+          if ($LASTEXITCODE) { throw 'Source extraction failed' }
+          $file = 'source/src/framework/package_manager/xet.cpp'
+          $code = (Get-Content $file -Raw).Replace("`r`n", "`n")
+          $anchor = '        hasher = std::make_unique<PrefixHasher>(destination, cancelled);'
+          if (!$code.Contains($anchor)) { throw 'Hasher anchor missing' }
+          $code = $code.Replace($anchor, "#ifndef _WIN32`n$anchor`n#endif")
+          $anchor = '        const auto digest = hasher->finish(request.size);'
+          if (!$code.Contains($anchor)) { throw 'Digest anchor missing' }
+          $code = $code.Replace("    if (hasher) {`n$anchor", "#ifdef _WIN32`n    // Read only after reconstruction workers have closed their output streams.`n    if (options.verify_sha256 && is_xet_hash(request.expected_sha256)) {`n        hasher = std::make_unique<PrefixHasher>(destination, cancelled);`n    }`n#endif`n    if (hasher) {`n$anchor")
+          Set-Content $file $code
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF
+          if ($LASTEXITCODE) { throw 'Configure failed' }
+          cmake --build build --target audiocpp_server -j 4
+          if ($LASTEXITCODE) { throw 'Build failed' }
       - name: Reproduce release downloads
         shell: pwsh
         run: |
@@ -18,9 +40,9 @@ jobs:
           curl.exe -fLsS --retry 2 "$release/audio-v0.9.5-bin-windows-x64-cpu-portable.zip" -o release.zip
           if ($LASTEXITCODE) { throw 'Release download failed' }
           Expand-Archive release.zip release
-          $server = Get-ChildItem release -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
+          $server = Get-Item build/bin/audiocpp_server.exe
           if (!$server) { throw 'Server is missing from archive' }
-          foreach ($mode in 'xet-serial', 'xet-noverify') {
+          foreach ($mode in 'xet', 'xet-repeat') {
             $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
             $env:AUDIOCPP_HF_XET_CONCURRENCY = if ($mode -eq 'xet-serial') { '1' } else { '16' }
             $env:AUDIOCPP_HF_XET_VERIFY = if ($mode -eq 'xet-noverify') { '0' } else { '1' }
