@@ -1,0 +1,65 @@
+name: HTDemucs AMD Windows v0.9.4
+on:
+  push:
+    branches: [test/issue-1300-windows]
+    paths: [.github/workflows/issue-1300-amd-v094.yml]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: [self-hosted, windows, devlab-dispatch, strix-halo]
+    timeout-minutes: 15
+    steps:
+      - name: Reproduce release downloads
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory results | Out-Null
+          $release = 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.4'
+          curl.exe -fLsS --retry 2 "$release/audio-v0.9.4-bin-windows-x64-cpu-portable.zip" -o release.zip
+          if ($LASTEXITCODE) { throw 'Release download failed' }
+          Expand-Archive release.zip release
+          $server = Get-ChildItem release -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
+          if (!$server) { throw 'Server is missing from archive' }
+          foreach ($mode in 'http', 'http-repeat') {
+            $env:AUDIOCPP_HF_XET = if ($mode.StartsWith('http')) { '0' } else { '1' }
+            foreach ($package in 'htdemucs_f16', 'htdemucs_q8_0') {
+              $dir = Join-Path $PWD "downloads/$mode/$package"
+              New-Item -ItemType Directory -Force $dir | Out-Null
+              Copy-Item release (Join-Path $dir 'release') -Recurse
+              $server = Get-ChildItem (Join-Path $dir 'release') -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
+              $log = "results/$mode-$package"
+              $p = Start-Process $server.FullName -ArgumentList '--ui','--ui-management','--backend','cpu','--port','18000','--log' -RedirectStandardOutput "$log.stdout" -RedirectStandardError "$log.stderr" -WorkingDirectory (Resolve-Path $dir).Path -PassThru
+              try {
+                $ready = $false
+                for ($i=0; $i -lt 30; $i++) {
+                  try { Invoke-RestMethod http://127.0.0.1:18000/health -TimeoutSec 2 | Out-Null; $ready = $true; break } catch { Start-Sleep 1 }
+                }
+                if (!$ready) { throw 'Server did not start' }
+                Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
+                $job = $null
+                for ($i=0; $i -lt 180; $i++) {
+                  $job = (Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status).data | Where-Object id -eq $package
+                  if ($job.state -in 'complete','completed','failed','cancelled','succeeded','done','success') { break }
+                  Start-Sleep 1
+                }
+                $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
+                "$mode $package $($job.state): $($job.message)" | Tee-Object -FilePath results/status.txt -Append
+              } catch {
+                $p.Refresh()
+                "$mode $package polling failed: $_; server exited=$($p.HasExited) exit=$($p.ExitCode)" | Tee-Object -FilePath results/status.txt -Append
+              } finally {
+                Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+                $p.WaitForExit()
+              }
+              if (Test-Path $dir) {
+                Get-ChildItem $dir -Force -Recurse -File -Filter '*.gguf' |
+                  ForEach-Object { '{0} {1} {2}' -f (Get-FileHash $_.FullName).Hash, $_.Length, $_.FullName } |
+                  Tee-Object -FilePath results/hashes.txt -Append
+              }
+            }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-1300-windows
+          path: results/
