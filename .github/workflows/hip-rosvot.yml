@@ -1,0 +1,116 @@
+name: ROSVOT Conformer HIP validation
+on:
+  push:
+    branches: [hip-test]
+    paths:
+      - .github/workflows/hip-rosvot.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  generation:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 45
+    env:
+      SOURCE_REF: 26b5fc921cfe180b43b3e48f137bda4462f2d54b
+      MODEL_REF: 09266f76229fc31446f93b49deb9aa8ff0742b00
+      GIT_LFS_SKIP_SMUDGE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Sparse checkout pinned audio.cpp without frontends
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          mkdir -p results source models
+          curl -fLsS --retry 2 --max-time 60 -o results/source.sparse \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/hip-upload-pr1070.sparse"
+          printf '\n/tests/\n/assets/resources/a.wav\n' >> results/source.sparse
+          {
+            git init source
+            git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+            git -C source config http.version HTTP/1.1
+            git -C source config remote.origin.promisor true
+            git -C source config remote.origin.partialclonefilter blob:none
+            timeout 180 git -C source -c protocol.version=2 fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE_REF"
+            git -C source sparse-checkout set --no-cone --stdin < results/source.sparse
+            timeout 600 git -C source checkout --detach FETCH_HEAD
+            test "$(git -C source rev-parse HEAD)" = "$SOURCE_REF"
+          } 2>&1 | tee results/source-download.log
+      - name: Build Debug HIP CLI with ROSVOT only
+        id: build
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]] && command -v hipconfig >/dev/null; then rocm="$(hipconfig --path)"; fi
+          "$rocm/bin/hipcc" --version | tee results/environment.log
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | head -1)
+          printf 'arch=%s\n' "$arch" | tee -a results/environment.log
+          lscpu >> results/environment.log
+          cmake -S source -B source/build/debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_METAL=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=rosvot \
+            -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_EXTENDED_TESTS=OFF \
+            -DENGINE_BUILD_MODEL_TESTS=OFF -DAUDIOCPP_BUILD_C_API=OFF \
+            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF \
+            2>&1 | tee results/configure.log
+          cmake --build source/build/debug --target audiocpp_cli --parallel 16 \
+            2>&1 | tee results/build.log
+      - name: Download verified package and singing input
+        id: download
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          model_hash=2b034b15126b21bd3f8ba7008f35aca51500f0443e5c36bdc85eba957c02ee38
+          cache="${XDG_CACHE_HOME:-$HOME/.cache}/audio-cpp-ci/models"
+          mkdir -p "$cache" inputs
+          model="$cache/$model_hash.gguf"
+          if ! echo "$model_hash  $model" | sha256sum -c - > results/cache.log 2>&1; then
+            curl -fLsS --retry 2 --connect-timeout 30 --max-time 1500 \
+              -o "$model.tmp" "${HF_ENDPOINT:-https://huggingface.co}/audio-cpp/SoulX-Singer-GGUF/resolve/$MODEL_REF/ROSVOT-GGUF/rosvot-f32.gguf" \
+              > results/model-download.log 2>&1
+            echo "$model_hash  $model.tmp" | sha256sum -c - >> results/cache.log
+            mv "$model.tmp" "$model"
+          fi
+          ln -s "$model" models/rosvot-f32.gguf
+          curl -fLsS --retry 2 --max-time 120 -o inputs/singing.wav \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/.github/tests/rosvot/singing.wav" \
+            > results/input-download.log 2>&1
+          printf 'source=%s\nmodel=%s\n' "$SOURCE_REF" "$MODEL_REF" > results/revisions.txt
+      - name: Run ROSVOT JSON and MIDI on HIP
+        if: ${{ !cancelled() && steps.download.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          ulimit -c 0
+          failed=0
+          for format in json midi; do
+            suffix="$format"
+            if [[ "$format" == midi ]]; then suffix=mid; fi
+            rc=0
+            /usr/bin/time -v timeout 300 source/build/debug/bin/audiocpp_cli \
+              --model "$PWD/models/rosvot-f32.gguf" \
+              --model-spec-override "$PWD/source/model_specs/rosvot.json" \
+              --family rosvot --task midi --backend hip --threads 8 \
+              --audio "$PWD/inputs/singing.wav" --request-option "output_format=$format" \
+              --out "results/notes.$suffix" --metrics \
+              --log --log-file "results/$format-framework.log" > "results/$format-generation.log" 2>&1 || rc=$?
+            printf '%s\t%s\n' "$format" "$rc" | tee -a results/exit-codes.tsv
+            if [[ "$rc" != 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Upload logs and note outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rosvot-conformer-hip
+          path: results/
+          retention-days: 3
