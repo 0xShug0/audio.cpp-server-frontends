@@ -1,0 +1,17 @@
+name: Validate rocBLAS compatibility releases
+on:
+  push:
+    branches: [hip-test]
+    paths: [.github/workflows/hip-rocblas-release.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  packages:
+    uses: ./.github/workflows/hip-release-only.yml
+    with:
+      source_repository: 0xShug0/audio.cpp
+      source_sha: 49ca1a1fd7cd074a938508c9c61bbe995591b8bc
+      version: validation-49ca1a1fd
+      platforms: '["ubuntu-24.04", "windows-2022"]'
+      rocblas: true
