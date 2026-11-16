@@ -2,7 +2,7 @@ name: HTDemucs AMD Windows crash check
 on:
   push:
     branches: [test/issue-1300-windows]
-    paths: [.github/workflows/issue-1300-amd-windows.yml]
+    paths: [.github/workflows/issue-1300-amd-windows.yml, .github/workflows/issue-1300-browser.cjs]
 permissions:
   contents: read
 jobs:
@@ -10,6 +10,19 @@ jobs:
     runs-on: [self-hosted, windows, devlab-dispatch, strix-halo]
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/workflows/issue-1300-browser.cjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - shell: pwsh
+        run: |
+          npm install --no-save playwright
+          if ($LASTEXITCODE) { throw 'Playwright installation failed' }
+          npx playwright install chromium
+          if ($LASTEXITCODE) { throw 'Chromium installation failed' }
       - name: Reproduce release downloads
         shell: pwsh
         run: |
@@ -20,8 +33,8 @@ jobs:
           Expand-Archive release.zip release
           $server = Get-ChildItem release -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
           if (!$server) { throw 'Server is missing from archive' }
-          foreach ($mode in 'xet', 'xet-repeat', 'http') {
-            $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
+          foreach ($mode in 'browser-xet', 'direct-xet', 'direct-http', 'browser-http') {
+            $env:AUDIOCPP_HF_XET = if ($mode.EndsWith('-http')) { '0' } else { '1' }
             foreach ($package in 'htdemucs_f16', 'htdemucs_q8_0') {
               $dir = Join-Path $PWD "downloads/$mode/$package"
               New-Item -ItemType Directory -Force $dir | Out-Null
@@ -33,7 +46,12 @@ jobs:
                   try { Invoke-RestMethod http://127.0.0.1:18000/health -TimeoutSec 2 | Out-Null; $ready = $true; break } catch { Start-Sleep 1 }
                 }
                 if (!$ready) { throw 'Server did not start' }
-                Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
+                if ($mode.StartsWith('browser-')) {
+                  node .github/workflows/issue-1300-browser.cjs $package "$log.browser.jsonl" *> "$log.browser.log"
+                  if ($LASTEXITCODE) { throw 'Browser interaction failed; see browser log' }
+                } else {
+                  Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
+                }
                 $job = $null
                 for ($i=0; $i -lt 180; $i++) {
                   $job = (Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status).data | Where-Object id -eq $package
