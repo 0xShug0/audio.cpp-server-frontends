@@ -36,9 +36,9 @@ jobs:
           Expand-Archive release.zip release
           $server = Get-ChildItem release -Filter audiocpp_server.exe -Recurse | Select-Object -First 1
           if (!$server) { throw 'Server is missing from archive' }
-          foreach ($mode in 'browser-xet', 'direct-xet', 'direct-http', 'browser-http') {
+          foreach ($mode in 'browser-http', 'direct-http') {
             $env:AUDIOCPP_HF_XET = if ($mode.EndsWith('-http')) { '0' } else { '1' }
-            foreach ($package in 'htdemucs_f16', 'htdemucs_q8_0') {
+            foreach ($package in 'htdemucs_q8_0') {
               $dir = Join-Path $PWD "downloads/$mode/$package"
               New-Item -ItemType Directory -Force $dir | Out-Null
               $log = "results/$mode-$package"
