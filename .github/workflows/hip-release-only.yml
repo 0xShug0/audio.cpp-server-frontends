@@ -15,6 +15,10 @@ on:
       platforms:
         type: string
         default: '["ubuntu-24.04", "windows-2022"]'
+      rocblas:
+        description: Build and validate the rocBLAS compatibility package
+        type: boolean
+        default: false
       model_families:
         type: string
         default: ''
@@ -37,6 +41,10 @@ on:
       platforms:
         type: string
         default: '["ubuntu-24.04", "windows-2022"]'
+      rocblas:
+        description: Build and validate the rocBLAS compatibility package
+        type: boolean
+        default: false
       model_families:
         type: string
         default: ''
@@ -89,20 +97,20 @@ jobs:
         if: runner.os == 'Windows'
       - uses: ggml-org/ccache-action@v1.2.24
         with:
-          key: hip-release-${{ runner.os }}-rocm10
+          key: hip-release-${{ runner.os }}-rocm10${{ inputs.rocblas && '-rocblas' || '' }}
           max-size: 2G
           install: ${{ runner.os == 'Linux' && 'no' || 'binary' }}
       - name: Build and package deployment binaries
-        run: python scripts/ci/hip-release-only/build_hip_release.py --source source --output dist
+        run: python ${{ inputs.rocblas && 'source/scripts/ci/build_hip_release.py' || 'scripts/ci/hip-release-only/build_hip_release.py' }} --source source --output dist ${{ inputs.rocblas && '--rocblas' || '' }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hip-build-logs-${{ runner.os }}
+          name: hip-build-logs-${{ runner.os }}${{ inputs.rocblas && '-rocblas' || '' }}
           path: dist/logs/
           retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
-          name: hip-release-${{ runner.os }}
+          name: hip-release-${{ runner.os }}${{ inputs.rocblas && '-rocblas' || '' }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -111,11 +119,22 @@ jobs:
           compression-level: 0
           retention-days: 1
       - uses: conda-incubator/setup-miniconda@v3
-        if: runner.os == 'Linux' && inputs.model_families != ''
+        if: inputs.rocblas || (runner.os == 'Linux' && inputs.model_families != '')
         with:
           activate-environment: qwen3-tts
           python-version: '3.12'
           auto-activate-base: false
+      - name: Validate extracted rocBLAS package
+        if: inputs.rocblas
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: conda run --no-capture-output -n qwen3-tts python scripts/ci/test_rocblas_prebuilt.py --packages dist --source source --output validation
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.rocblas
+        with:
+          name: hip-rocblas-validation-${{ runner.os }}
+          path: validation/
+          retention-days: 3
       - name: Collect HIP model logs and outputs on the build runner
         if: runner.os == 'Linux' && inputs.model_families != ''
         shell: bash -el {0}
