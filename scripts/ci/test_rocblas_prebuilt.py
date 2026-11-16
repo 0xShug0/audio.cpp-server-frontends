@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--packages', type=Path, required=True)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--blas', choices=['rocblas', 'hipblaslt'], default='rocblas')
     args = parser.parse_args()
     packages, source, output = args.packages.resolve(), args.source.resolve(), args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -37,6 +38,8 @@ def main():
         return process.returncode
 
     archives = list(packages.glob('*-rocblas-test.zip' if windows else '*-rocblas-test.tar.gz'))
+    if args.blas == 'hipblaslt':
+        archives = [p for p in packages.glob('*-test.zip' if windows else '*-test.tar.gz') if '-rocblas-' not in p.name]
     if len(archives) != 1:
         raise RuntimeError(f'expected one rocBLAS archive, got {archives}')
     archive = archives[0]
@@ -45,7 +48,7 @@ def main():
     with archive.open('rb') as file:
         if hashlib.file_digest(file, 'sha256').hexdigest() != expected:
             raise RuntimeError('archive checksum mismatch')
-    binary = Path(os.environ['RUNNER_TEMP']) / f'rocblas-prebuilt-{os.environ["GITHUB_RUN_ID"]}'
+    binary = Path(os.environ['RUNNER_TEMP']) / f'{args.blas}-prebuilt-{os.environ["GITHUB_RUN_ID"]}'
     binary.mkdir()
     if windows:
         with zipfile.ZipFile(archive) as pack:
@@ -54,15 +57,16 @@ def main():
         with tarfile.open(archive) as pack:
             pack.extractall(binary, filter='data')
     manifest = json.loads((binary / 'BUILD.json').read_text())
-    if manifest['source_sha'] != os.environ['EXPECTED_SOURCE_SHA'] or manifest.get('hip_blas') != 'rocblas':
+    if manifest['source_sha'] != os.environ['EXPECTED_SOURCE_SHA'] or manifest.get('hip_blas', 'hipblaslt') != args.blas:
         raise RuntimeError(f'unexpected package manifest: {manifest}')
     (output / 'BUILD.json').write_text(json.dumps(manifest, indent=2))
     cache_text = (packages / 'logs/CMakeCache.txt').read_text()
-    if 'GGML_HIP_HIPBLASLT:BOOL=OFF' not in cache_text:
+    expected_blas = 'OFF' if args.blas == 'rocblas' else 'ON'
+    if f'GGML_HIP_HIPBLASLT:BOOL={expected_blas}' not in cache_text:
         raise RuntimeError('compatibility package did not disable hipBLASLt')
 
     # Install the end-user libraries/device extra separately from the build SDK.
-    runtime = Path(os.environ['RUNNER_TEMP']) / f'rocblas-runtime-{os.environ["GITHUB_RUN_ID"]}'
+    runtime = Path(os.environ['RUNNER_TEMP']) / f'{args.blas}-runtime-{os.environ["GITHUB_RUN_ID"]}'
     run([sys.executable, '-m', 'venv', runtime], 'create-runtime')
     python = runtime / ('Scripts/python.exe' if windows else 'bin/python')
     run([python, '-m', 'pip', 'install', '--index-url', 'https://stable.repo.amd.com/rocm/whl-next/',

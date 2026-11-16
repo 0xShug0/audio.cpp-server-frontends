@@ -1,0 +1,128 @@
+name: HIP test release binaries
+
+on:
+  workflow_call:
+    inputs:
+      source_repository:
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    # DevLab availability and HIP build failures must not fail the release.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ fromJSON(matrix.os == 'windows-2022' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
+    timeout-minutes: 180
+    env:
+      ROCM_VERSION: '10.0.0'
+      SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      GPU_TARGETS: release
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        env:
+          # DevLab home directories are RAM-backed; use temporary scratch for pip's cache.
+          PIP_CACHE_DIR: ${{ runner.temp }}/pip-cache
+        run: |
+          python -m pip install ninja patchelf
+          tools="$RUNNER_TEMP/hip-release-tools"
+          mkdir -p "$tools"
+          curl -fL --retry 3 --max-time 120 -o "$tools/ccache.tar.xz" https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-linux-x86_64-musl-static.tar.xz
+          tar -xJf "$tools/ccache.tar.xz" -C "$tools" --strip-components=1 ccache-4.13.6-linux-x86_64-musl-static/ccache
+          echo "$tools" >> "$GITHUB_PATH"
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: ggml-org/ccache-action@v1.2.24
+        with:
+          key: hip-release-${{ runner.os }}-rocm10
+          max-size: 2G
+          install: ${{ runner.os == 'Linux' && 'no' || 'binary' }}
+      - name: Build and package hipBLASLt deployment binaries
+        id: hipblaslt
+        run: python source/scripts/ci/build_hip_release.py --source source --output dist
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-build-logs-${{ runner.os }}
+          path: dist/logs/
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.hipblaslt.outcome == 'success' }}
+        with:
+          name: hip-release-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+      - name: Build and package rocBLAS deployment binaries
+        id: rocblas
+        if: ${{ !cancelled() }}
+        run: python source/scripts/ci/build_hip_release.py --source source --output dist-rocblas --rocblas
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-build-logs-${{ runner.os }}-rocblas
+          path: dist-rocblas/logs/
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.rocblas.outcome == 'success' }}
+        with:
+          name: hip-release-${{ runner.os }}-rocblas
+          path: |
+            dist-rocblas/*.tar.gz
+            dist-rocblas/*.zip
+            dist-rocblas/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+      - uses: conda-incubator/setup-miniconda@v3
+        if: ${{ !cancelled() }}
+        with:
+          activate-environment: qwen3-tts
+          python-version: '3.12'
+          auto-activate-base: false
+      - name: Validate hipBLASLt package
+        if: ${{ !cancelled() && steps.hipblaslt.outcome == 'success' }}
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: conda run --no-capture-output -n qwen3-tts python scripts/ci/test_rocblas_prebuilt.py --packages dist --source source --output validation-hipblaslt --blas hipblaslt
+      - name: Validate rocBLAS package
+        if: ${{ !cancelled() && steps.rocblas.outcome == 'success' }}
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: conda run --no-capture-output -n qwen3-tts python scripts/ci/test_rocblas_prebuilt.py --packages dist-rocblas --source source --output validation-rocblas
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-dual-validation-${{ runner.os }}
+          path: validation-*/
+          retention-days: 3
