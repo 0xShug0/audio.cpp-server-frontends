@@ -15,7 +15,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory results | Out-Null
-          $commit = '97c85a8819692d27461e3f4aa5f44307421cbe7d'
+          $commit = 'f27c31e38072d1eea84faed55eb0c1d58980bfbc'
           "PR1305=$commit" | Set-Content results/provenance.txt
           curl.exe -fLsS "https://codeload.github.com/0xShug0/audio.cpp/tar.gz/$commit" -o source.tar.gz
           if ($LASTEXITCODE) { throw 'Source download failed' }
