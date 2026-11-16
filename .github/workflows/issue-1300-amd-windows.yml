@@ -41,6 +41,8 @@ jobs:
                   Start-Sleep 1
                 }
                 $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
+                Start-Sleep 2
+                Invoke-RestMethod http://127.0.0.1:18000/health -TimeoutSec 2 | Out-Null
                 "$mode $package $($job.state): $($job.message)" | Tee-Object -FilePath results/status.txt -Append
               } catch {
                 $p.Refresh()
