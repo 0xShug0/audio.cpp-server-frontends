@@ -27,6 +27,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory results | Out-Null
+          curl.exe -fLsS https://download.sysinternals.com/files/Procdump.zip -o procdump.zip
+          if ($LASTEXITCODE) { throw 'ProcDump download failed' }
+          Expand-Archive procdump.zip procdump
           $release = 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.5'
           curl.exe -fLsS --retry 2 "$release/audio-v0.9.5-bin-windows-x64-cpu-portable.zip" -o release.zip
           if ($LASTEXITCODE) { throw 'Release download failed' }
@@ -40,6 +43,7 @@ jobs:
               New-Item -ItemType Directory -Force $dir | Out-Null
               $log = "results/$mode-$package"
               $p = Start-Process $server.FullName -ArgumentList '--ui','--ui-management','--backend','cpu','--port','18000','--models-root',"`"$dir`"",'--log' -RedirectStandardOutput "$log.stdout" -RedirectStandardError "$log.stderr" -PassThru
+              $dump = Start-Process ./procdump/procdump64.exe -ArgumentList '-accepteula','-e',"$($p.Id)","$log.dmp" -RedirectStandardOutput "$log.procdump" -RedirectStandardError "$log.procdump.stderr" -PassThru
               try {
                 $ready = $false
                 for ($i=0; $i -lt 30; $i++) {
@@ -50,7 +54,7 @@ jobs:
                   node .github/workflows/issue-1300-browser.cjs $package "$log.browser.jsonl" *> "$log.browser.log"
                   if ($LASTEXITCODE) { throw 'Browser interaction failed; see browser log' }
                 } else {
-                  Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
+                  Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package; overwrite=$false} | ConvertTo-Json -Compress) | Out-Null
                 }
                 $job = $null
                 for ($i=0; $i -lt 180; $i++) {
@@ -68,6 +72,7 @@ jobs:
               } finally {
                 Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
                 $p.WaitForExit()
+                if (!$dump.WaitForExit(10000)) { Stop-Process -Id $dump.Id -ErrorAction SilentlyContinue }
               }
               if (Test-Path $dir) {
                 Get-ChildItem $dir -Force -Recurse -File |
