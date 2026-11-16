@@ -67,7 +67,7 @@ def main():
     python = runtime / ('Scripts/python.exe' if windows else 'bin/python')
     run([python, '-m', 'pip', 'install', '--index-url', 'https://stable.repo.amd.com/rocm/whl-next/',
          'rocm[libraries,device-gfx1151]==10.0.0'], 'install-runtime')
-    discover = "import json,rocm_sdk; print(json.dumps(list(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64','hipblas','rocblas')))))"
+    discover = "import json,rocm_sdk; print(json.dumps(list(dict.fromkeys(str(p.parent) for p in rocm_sdk.find_libraries('amdhip64','hipblas')))))"
     paths = json.loads(subprocess.check_output([python, '-c', discover], text=True))
     (output / 'runtime-paths.json').write_text(json.dumps(paths, indent=2))
     env['PATH' if windows else 'LD_LIBRARY_PATH'] = os.pathsep.join(paths) + (os.pathsep + env['PATH'] if windows else '')

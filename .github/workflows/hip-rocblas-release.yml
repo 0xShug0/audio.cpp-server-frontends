@@ -7,11 +7,44 @@ permissions:
   contents: read
   actions: read
 jobs:
-  packages:
-    uses: ./.github/workflows/hip-release-only.yml
-    with:
-      source_repository: 0xShug0/audio.cpp
-      source_sha: 49ca1a1fd7cd074a938508c9c61bbe995591b8bc
-      version: validation-49ca1a1fd
-      platforms: '["ubuntu-24.04", "windows-2022"]'
-      rocblas: true
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [Linux, Windows]
+    runs-on: ${{ fromJSON(matrix.os == 'Windows' && '["self-hosted", "windows", "devlab-dispatch", "strix-halo"]' || '["self-hosted", "linux", "devlab-dispatch", "strix-halo"]') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: 0xShug0/audio.cpp
+          ref: 49ca1a1fd7cd074a938508c9c61bbe995591b8bc
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: hip-release-${{ matrix.os }}-rocblas
+          run-id: 43944474466
+          github-token: ${{ github.token }}
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: hip-build-logs-${{ matrix.os }}-rocblas
+          run-id: 43944474466
+          github-token: ${{ github.token }}
+          path: dist/logs
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: qwen3-tts
+          python-version: '3.12'
+          auto-activate-base: false
+      - name: Validate extracted package
+        env:
+          EXPECTED_SOURCE_SHA: 49ca1a1fd7cd074a938508c9c61bbe995591b8bc
+        run: conda run --no-capture-output -n qwen3-tts python scripts/ci/test_rocblas_prebuilt.py --packages dist --source source --output validation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hip-rocblas-validation-${{ matrix.os }}
+          path: validation/
+          retention-days: 3
