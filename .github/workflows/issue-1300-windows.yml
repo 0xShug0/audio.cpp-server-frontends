@@ -1,4 +1,4 @@
-name: Validate package downloads with PRs 1301 and 1305
+name: Reproduce Windows HTTPS crash and validate PR 1305
 on:
   push:
     branches: [test/issue-1300-windows]
@@ -11,8 +11,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Build exact PRs together (Debug and ASan)
-        id: build
+      - name: Build baseline with PR 1301 only
         shell: pwsh
         run: |
           New-Item -ItemType Directory results | Out-Null
@@ -24,117 +23,127 @@ jobs:
           if ($LASTEXITCODE) { throw 'Source extraction failed' }
           $commits = @{'1301'='4cc78a758d0c259e3ab9d55c65fcfa177292ecf9'; '1305'='a85072349d9951dfd9639b1cf9f53292185e9519'}
           "base=$base" | Set-Content results/provenance.txt
-          foreach ($number in '1301', '1305') {
-            $commit = $commits[$number]
+          foreach ($number in '1301','1305') {
+            $commit=$commits[$number]
             curl.exe -fLsS "https://github.com/0xShug0/audio.cpp/commit/$commit.patch" -o "pr$number.patch"
             if ($LASTEXITCODE) { throw "PR $number download failed" }
-            Push-Location source
-            try {
-              git apply --check "../pr$number.patch"
-              if ($LASTEXITCODE) { throw "PR $number cannot apply cleanly" }
-              git apply "../pr$number.patch"
-              if ($LASTEXITCODE) { throw "PR $number application failed" }
-            } finally { Pop-Location }
             "PR$number=$commit" | Add-Content results/provenance.txt
           }
-          Get-FileHash source/src/framework/package_manager/xet.cpp, source/src/framework/package_manager/manager.cpp |
-            Format-Table -AutoSize | Out-File results/source-hashes.txt
-          cmake -S source -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' '-DCMAKE_C_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG /INCREMENTAL:NO' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_EXTENDED_TESTS=ON
+          Push-Location source
+          try {
+            git apply --check ../pr1301.patch
+            if ($LASTEXITCODE) { throw 'PR 1301 does not apply cleanly' }
+            git apply ../pr1301.patch
+            if ($LASTEXITCODE) { throw 'PR 1301 application failed' }
+          } finally { Pop-Location }
+          cmake -S source -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug '-DCMAKE_C_FLAGS=/fsanitize=address /Zi' '-DCMAKE_CXX_FLAGS=/fsanitize=address /Zi' '-DCMAKE_C_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Zi' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/DEBUG /INCREMENTAL:NO' -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=htdemucs -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF
           if ($LASTEXITCODE) { throw 'Configure failed' }
-          cmake --build build/debug --target audiocpp_server package_manager_xet_test package_manager_http_test -j 4
+          cmake --build build/debug --target audiocpp_server -j 4
           if ($LASTEXITCODE) { throw 'Build failed' }
-      - name: Run existing offline download tests
-        shell: pwsh
-        run: |
+          @{phase='before';manager=(Get-FileHash source/src/framework/package_manager/manager.cpp).Hash;xet=(Get-FileHash source/src/framework/package_manager/xet.cpp).Hash;binary=(Get-FileHash build/debug/bin/audiocpp_server.exe).Hash} | ConvertTo-Json | Set-Content results/before-build.json
+          @'
+          param([ValidateSet('before','after')][string]$Phase)
+          $ErrorActionPreference = 'Stop'
           $env:ASAN_OPTIONS = 'halt_on_error=1:detect_leaks=0'
-          $failed = @()
-          foreach ($test in 'package_manager_xet_test', 'package_manager_http_test') {
-            & "build/debug/bin/$test.exe" --log *> "results/$test.log"
-            if ($LASTEXITCODE) { $failed += "$test exit=$LASTEXITCODE" }
-          }
-          if ($failed.Count) { throw ($failed -join '; ') }
-      - name: Validate real Xet and HTTP installs
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $dumpFolder = (Resolve-Path results).Path
-          $dumpKey = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\audiocpp_server.exe'
-          New-Item -Force $dumpKey | Out-Null
-          New-ItemProperty -Path $dumpKey -Name DumpFolder -Value $dumpFolder -PropertyType ExpandString -Force | Out-Null
-          New-ItemProperty -Path $dumpKey -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
-          $server = Get-Item build/debug/bin/audiocpp_server.exe
-          $env:ASAN_OPTIONS = "halt_on_error=1:detect_leaks=0"
-          if (!$server) { throw 'Built server is missing' }
-          $failures = 0
-          foreach ($mode in 'xet', 'xet-repeat', 'http') {
-            $env:AUDIOCPP_HF_XET = if ($mode -eq 'http') { '0' } else { '1' }
-            $env:AUDIOCPP_HF_XET_CONCURRENCY = if ($mode -eq 'xet-serial') { '1' } else { '16' }
-            $env:AUDIOCPP_HF_XET_VERIFY = if ($mode -eq 'xet-noverify') { '0' } else { '1' }
-            foreach ($package in 'htdemucs_f16', 'htdemucs_q8_0') {
-              $dir = Join-Path $PWD "downloads/$mode/$package"
+          $env:AUDIOCPP_HF_XET = '1'
+          $env:AUDIOCPP_HF_XET_CONCURRENCY = '16'
+          $env:AUDIOCPP_HF_XET_VERIFY = '1'
+          $server = (Resolve-Path build/debug/bin/audiocpp_server.exe).Path
+          $records = @()
+          New-Item -ItemType Directory -Force "results/$Phase" | Out-Null
+          foreach ($iteration in 1,2) {
+            foreach ($package in 'htdemucs_f16','htdemucs_q8_0') {
+              $dir = Join-Path $PWD "downloads/$Phase/$iteration/$package"
               New-Item -ItemType Directory -Force $dir | Out-Null
-              $log = "results/$mode-$package"
-              $p = Start-Process $server.FullName -ArgumentList '--ui','--ui-management','--backend','cpu','--port','18000','--models-root',"`"$dir`"",'--log' -RedirectStandardOutput "$log.stdout" -RedirectStandardError "$log.stderr" -PassThru
+              $log = "results/$Phase/$iteration-$package"
+              $record = [ordered]@{phase=$Phase; iteration=$iteration; package=$package; complete=$false; hash_matched=$false; used_xet=$false; fallback=$false; alive_after=$false; exit_code=$null; asan_uaf=$false; asan_error=$false; error=$null}
+              $p = Start-Process $server -ArgumentList '--ui','--ui-management','--backend','cpu','--threads','8','--port','18000','--models-root',"`"$dir`"",'--log' -RedirectStandardOutput "$log.stdout" -RedirectStandardError "$log.stderr" -PassThru
               try {
                 $ready = $false
                 for ($i=0; $i -lt 30; $i++) {
-                  try { Invoke-RestMethod http://127.0.0.1:18000/health -TimeoutSec 2 | Out-Null; $ready = $true; break } catch { Start-Sleep 1 }
+                  $p.Refresh()
+                  if ($p.HasExited) { throw "Server exited during startup: $($p.ExitCode)" }
+                  try { Invoke-RestMethod http://127.0.0.1:18000/health -TimeoutSec 2 | Out-Null; $ready=$true; break } catch { Start-Sleep 1 }
                 }
                 if (!$ready) { throw 'Server did not start' }
                 Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install -Method Post -ContentType application/json -Body (@{id=$package} | ConvertTo-Json) | Out-Null
                 $job = $null
                 $lastMessage = ''
-                $usedXet = $false
-                $fellBack = $false
                 for ($i=0; $i -lt 1800; $i++) {
+                  $p.Refresh()
+                  if ($p.HasExited) { throw "Server exited during install: $($p.ExitCode)" }
                   $job = (Invoke-RestMethod http://127.0.0.1:18000/v1/ui/models/install-status).data | Where-Object id -eq $package
                   if ($job -and $job.message -ne $lastMessage) {
                     $lastMessage = $job.message
                     $lastMessage | Add-Content "$log.progress"
-                    if ($lastMessage -match '\(Xet\)') { $usedXet = $true }
-                    if ($lastMessage -match 'Xet unavailable|using HTTP') { $fellBack = $true }
+                    if ($lastMessage -match '\(Xet\)') { $record.used_xet=$true }
+                    if ($lastMessage -match 'Xet unavailable|using HTTP') { $record.fallback=$true }
                   }
-                  if ($job.state -in 'complete','completed','failed','cancelled','succeeded','done','success') { break }
+                  if ($job.state -in 'complete','failed','cancelled') { break }
                   Start-Sleep -Milliseconds 100
                 }
-                $job | ConvertTo-Json -Depth 5 | Set-Content "$log.json"
-                "$mode $package $($job.state): $($job.message)" | Tee-Object -FilePath results/status.txt -Append
+                $job | ConvertTo-Json -Depth 5 | Set-Content "$log.status.json"
                 if ($job.state -ne 'complete') { throw "Install did not complete: $($job.message)" }
-                if ($mode -ne 'http' -and (!$usedXet -or $fellBack)) { throw 'Xet transport was not verified without HTTP fallback' }
+                $record.complete=$true
                 $gguf = Get-ChildItem $dir -Recurse -File -Filter '*.gguf' | Select-Object -First 1
                 $expected = if ($package -eq 'htdemucs_f16') { 'f8c54ba35df95aafea7881eac214b58ec18a73cbcb6ff5a90f4b762631a286b6' } else { 'b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388' }
-                if (!$gguf -or (Get-FileHash $gguf.FullName).Hash -ne $expected) { throw 'Independent checksum failed' }
+                if (!$gguf) { throw 'No downloaded GGUF' }
+                $hash = (Get-FileHash $gguf.FullName).Hash
+                $hash | Set-Content "$log.sha256"
+                if ($hash -ne $expected) { throw 'Independent checksum failed' }
+                $record.hash_matched=$true
                 Start-Sleep 2
                 $p.Refresh()
                 if ($p.HasExited) { throw "Server exited after install: $($p.ExitCode)" }
+                Invoke-RestMethod http://127.0.0.1:18000/health -TimeoutSec 2 | Out-Null
+                $record.alive_after=$true
+                if (!$record.used_xet -or $record.fallback) { throw 'Xet was not verified without fallback' }
               } catch {
-                $failures++
-                $p.Refresh()
-                "$mode $package polling failed: $_; server exited=$($p.HasExited) exit=$($p.ExitCode)" | Tee-Object -FilePath results/status.txt -Append
-                Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000,1001; StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue |
-                  Where-Object Message -Match 'audiocpp_server' | Format-List TimeCreated,Message | Out-File "$log.events"
+                $record.error = $_.ToString()
               } finally {
-                Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+                $p.Refresh()
+                if ($p.HasExited) { $record.exit_code=$p.ExitCode } else { Stop-Process -Id $p.Id -ErrorAction SilentlyContinue }
                 $p.WaitForExit()
               }
-              if (Test-Path $dir) {
-                Get-ChildItem $dir -Force -Recurse -File |
-                  ForEach-Object { '{0} {1} {2}' -f (Get-FileHash $_.FullName).Hash, $_.Length, $_.FullName } |
-                  Tee-Object -FilePath results/hashes.txt -Append
-              }
+              $stderr = Get-Content "$log.stderr" -Raw
+              $record.asan_error = $stderr -match 'ERROR: AddressSanitizer'
+              $record.asan_uaf = ($stderr -match 'ERROR: AddressSanitizer: heap-use-after-free') -and ($stderr -match 'CRYPTO_get_thread_local') -and ($stderr -match 'SSLClient')
+              $records += [pscustomobject]$record
+              $records | ConvertTo-Json -Depth 5 | Set-Content "results/$Phase/summary.json"
+              "$Phase iteration=$iteration package=$package complete=$($record.complete) alive=$($record.alive_after) asan_uaf=$($record.asan_uaf) exit=$($record.exit_code) error=$($record.error)" | Tee-Object -FilePath results/status.txt -Append
             }
           }
-          if (Select-String -Path 'results/*.stderr' -Pattern 'ERROR: AddressSanitizer' -Quiet) { $failures++ }
-          if ($failures) { throw "$failures validation failures" }
-          $cdb = Get-Item "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue
-          if ($cdb) {
-            foreach ($dump in Get-ChildItem results -Filter '*.dmp') {
-              & $cdb.FullName -z $dump.FullName -y "srv*https://msdl.microsoft.com/download/symbols" -c '!analyze -v; q' *> "$($dump.FullName).txt"
-            }
-          }
+          $crashes = @($records | Where-Object asan_uaf).Count
+          $successes = @($records | Where-Object { $_.complete -and $_.hash_matched -and $_.used_xet -and !$_.fallback -and $_.alive_after -and !$_.asan_error -and !$_.error }).Count
+          if ($Phase -eq 'before') {
+            if ($crashes -lt 1) { throw 'The original TLS teardown crash was not reproduced' }
+            if ($crashes + $successes -ne $records.Count) { throw 'Baseline also encountered an unrelated failure; inspect logs' }
+          } elseif ($successes -ne 4) { throw "Fixed code passed only $successes/4 installs" }
+          '@ | Set-Content run-crash-cases.ps1
+      - name: Reproduce baseline crash
+        shell: pwsh
+        run: |
+          & ./run-crash-cases.ps1 -Phase before
+      - name: Apply PR 1305 and rebuild unchanged configuration
+        shell: pwsh
+        run: |
+          Push-Location source
+          try {
+            git apply --check ../pr1305.patch
+            if ($LASTEXITCODE) { throw 'PR 1305 does not apply cleanly' }
+            git apply ../pr1305.patch
+            if ($LASTEXITCODE) { throw 'PR 1305 application failed' }
+          } finally { Pop-Location }
+          cmake --build build/debug --target audiocpp_server -j 4
+          if ($LASTEXITCODE) { throw 'Fixed build failed' }
+          @{phase='after';manager=(Get-FileHash source/src/framework/package_manager/manager.cpp).Hash;xet=(Get-FileHash source/src/framework/package_manager/xet.cpp).Hash;binary=(Get-FileHash build/debug/bin/audiocpp_server.exe).Hash} | ConvertTo-Json | Set-Content results/after-build.json
+      - name: Validate identical cases with fix
+        shell: pwsh
+        run: |
+          & ./run-crash-cases.ps1 -Phase after
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: issue-1300-windows
+          name: windows-crash-before-after
           path: results/
           retention-days: 3
