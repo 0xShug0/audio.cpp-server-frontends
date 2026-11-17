@@ -26,7 +26,7 @@ jobs:
           git -C source config remote.origin.promisor true
           git -C source config remote.origin.partialclonefilter blob:none
           git -C source fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE"
-          git -C source sparse-checkout set --no-cone '/*' '!/assets/' '!/tests/' '!/docs/' '!/webui/native/node_modules/' '!/webui/native/src/'
+          git -C source sparse-checkout set --no-cone '/*' '!/assets/' '!/docs/' '!/webui/native/src/'
           git -C source checkout --detach FETCH_HEAD
           git -C source rev-parse HEAD > results/source.txt
           rocm="${ROCM_PATH:-/opt/rocm}"
@@ -38,6 +38,7 @@ jobs:
             -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
             -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
             -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON \
+            -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_EXTENDED_TESTS=OFF -DENGINE_BUILD_MODEL_TESTS=OFF \
             -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=soulx_singer \
             -DAUDIOCPP_BUILD_C_API=OFF -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
             -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DAUDIOCPP_BUILD_SERVER=OFF \
