@@ -1,0 +1,97 @@
+name: SoulX-Singer HIP validation
+on:
+  push:
+    branches: [hip-test]
+    paths: [.github/workflows/hip-soulx-1319.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inference:
+    runs-on: [self-hosted, linux, devlab-dispatch, strix-halo]
+    timeout-minutes: 35
+    env:
+      SOURCE: 578cb81031dc89e0e8be160cf2954f4e4b031b62
+      WEIGHTS: ded36295f789661e590e4bf6ad49a25470cf830d
+      EXAMPLES: 81aeb3ae772c70093c3de74dc23c92d983801ae4
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - name: Build pinned HIP CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          git init source
+          git -C source remote add origin https://github.com/0xShug0/audio.cpp.git
+          git -C source config remote.origin.promisor true
+          git -C source config remote.origin.partialclonefilter blob:none
+          git -C source fetch --no-tags --depth=1 --filter=blob:none origin "$SOURCE"
+          git -C source sparse-checkout set --no-cone '/*' '!/assets/' '!/tests/' '!/docs/' '!/webui/'
+          git -C source checkout --detach FETCH_HEAD
+          git -C source rev-parse HEAD > results/source.txt
+          rocm="${ROCM_PATH:-/opt/rocm}"
+          if [[ ! -x "$rocm/bin/hipcc" ]]; then rocm="$(hipconfig --path)"; fi
+          arch=$("$rocm/llvm/bin/amdgpu-arch" | sed -n '1p')
+          "$rocm/bin/hipcc" --version > results/environment.log
+          printf '%s\n' "$arch" >> results/environment.log
+          cmake -S source -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$rocm/llvm/bin/clang" -DCMAKE_CXX_COMPILER="$rocm/llvm/bin/clang++" \
+            -DCMAKE_HIP_COMPILER="$rocm/llvm/bin/clang++" -DCMAKE_PREFIX_PATH="$rocm" -DGPU_TARGETS="$arch" \
+            -DENGINE_ENABLE_HIP=ON -DENGINE_ENABLE_OPENMP=ON -DGGML_OPENMP=ON \
+            -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=soulx_singer \
+            -DAUDIOCPP_BUILD_C_API=OFF -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=OFF \
+            -DAUDIOCPP_BUILD_SERVER_FRONTENDS=OFF -DAUDIOCPP_BUILD_SERVER=OFF \
+            2>&1 | tee results/configure.log
+          cmake --build build --target audiocpp_cli --parallel 16 2>&1 | tee results/build.log
+          build/bin/audiocpp_cli --list-devices --backend hip > results/devices.log 2>&1
+      - name: Run real SVS and SVC requests
+        shell: bash
+        run: |
+          set -uo pipefail
+          ulimit -c 0
+          mkdir -p models
+          hf="https://huggingface.co/audio-cpp/SoulX-Singer-GGUF/resolve/$WEIGHTS"
+          ex="https://raw.githubusercontent.com/Soul-AILab/SoulX-Singer/$EXAMPLES/example/audio"
+          fetch() { curl -fLsS --retry 2 --connect-timeout 20 --max-time 420 "$1" -o "$2"; }
+          failed=0
+          run_case() {
+            local id="$1"; shift
+            local rc=0
+            timeout 240 build/bin/audiocpp_cli --family soulx_singer --backend hip --threads 8 \
+              --request-option seed=2026 --log --metrics --out "results/$id.wav" "$@" \
+              > "results/$id.log" 2>&1 || rc=$?
+            printf '%s\t%s\n' "$id" "$rc" | tee -a results/exit-codes.tsv
+            if [[ "$rc" != 0 || ! -s "results/$id.wav" ]]; then failed=1; fi
+          }
+          if fetch "$hf/SoulX-Singer-GGUF/soulx-singer-q8_0.gguf" models/svs.gguf &&
+             fetch "$ex/en_prompt.mp3" models/en_prompt.mp3 &&
+             fetch "$ex/en_prompt.json" results/reference.json &&
+             fetch "$ex/en_target.json" results/target.json &&
+             ffmpeg -nostdin -v error -i models/en_prompt.mp3 -ac 1 -ar 24000 results/svs-reference.wav; then
+            for mode in score melody; do
+              run_case "svs-$mode" --task gen --model models/svs.gguf --voice-ref results/svs-reference.wav \
+                --request-option reference_metadata_file=results/reference.json \
+                --request-option target_metadata_file=results/target.json --request-option "control=$mode"
+            done
+          else
+            printf 'SVS setup failed\n' | tee -a results/exit-codes.tsv
+            failed=1
+          fi
+          rm -f models/svs.gguf
+          if fetch "$hf/SoulX-Singer-SVC-GGUF/soulx-singer-svc-q8_0.gguf" models/svc.gguf &&
+             fetch "$ex/svc_prompt_demo.mp3" models/svc-ref.mp3 &&
+             fetch "$ex/svc_target_demo.mp3" models/svc-source.mp3 &&
+             ffmpeg -nostdin -v error -i models/svc-ref.mp3 -t 8 -ac 1 -ar 24000 results/svc-reference.wav &&
+             ffmpeg -nostdin -v error -i models/svc-source.mp3 -t 8 -ac 1 -ar 24000 results/svc-source.wav; then
+            run_case svc --task svc --model models/svc.gguf --audio results/svc-source.wav --voice-ref results/svc-reference.wav
+          else
+            printf 'SVC setup failed\n' | tee -a results/exit-codes.tsv
+            failed=1
+          fi
+          rm -f models/svc.gguf
+          exit "$failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soulx-hip-results
+          path: results/
